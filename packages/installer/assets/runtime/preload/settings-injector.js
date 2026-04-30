@@ -70,6 +70,36 @@ const TRANSLATIONS = {
         "Manage your installed Codex++ tweaks.": "설치된 Codex++ 트윅을 관리합니다.",
         "Remap or disable Codex's keyboard shortcuts.": "Codex 키보드 단축키를 변경하거나 비활성화합니다.",
         "Bennett's small quality-of-life tweaks.": "Bennett의 작은 사용성 개선 트윅입니다.",
+        "Codex++ Updates": "Codex++ 업데이트",
+        "Loading update settings": "업데이트 설정 불러오는 중",
+        "Checking current Codex++ configuration.": "현재 Codex++ 설정을 확인하는 중입니다.",
+        "Could not load update settings": "업데이트 설정을 불러올 수 없음",
+        "Maintenance": "유지보수",
+        "Automatically refresh Codex++": "Codex++ 자동 새로고침",
+        "Installed version v{version}. The watcher can refresh the Codex++ runtime after you rerun the GitHub installer.": "설치된 버전 v{version}. GitHub installer를 다시 실행한 뒤 watcher가 Codex++ runtime을 새로고침할 수 있습니다.",
+        "Codex++ update available": "Codex++ 업데이트 사용 가능",
+        "Codex++ is up to date": "Codex++ 최신 상태",
+        "Release Notes": "릴리스 노트",
+        "Check Now": "지금 확인",
+        "Latest release notes": "최신 릴리스 노트",
+        "No release notes available.": "릴리스 노트가 없습니다.",
+        "No update check has run yet.": "아직 업데이트 확인을 실행하지 않았습니다.",
+        "Latest v{version}. ": "최신 v{version}. ",
+        "Checked {date}.": "{date}에 확인함.",
+        "Uninstall Codex++": "Codex++ 제거",
+        "Copies the uninstall command. Run it from a terminal after quitting Codex.": "제거 명령을 복사합니다. Codex를 종료한 뒤 터미널에서 실행하세요.",
+        "Copy Command": "명령 복사",
+        "Report a bug": "버그 신고",
+        "Open a GitHub issue with runtime, installer, or tweak-manager details.": "runtime, installer, tweak-manager 정보를 담아 GitHub 이슈를 엽니다.",
+        "Open Issue": "이슈 열기",
+        "Open Tweaks Folder": "트윅 폴더 열기",
+        "Force Reload": "강제 새로고침",
+        "Installed Tweaks": "설치된 트윅",
+        "No tweaks installed": "설치된 트윅 없음",
+        "Drop a tweak folder into {path} and reload.": "{path}에 트윅 폴더를 넣고 새로고침하세요.",
+        "Update Available": "업데이트 있음",
+        "Homepage": "홈페이지",
+        "Review Release": "릴리스 확인",
     },
 };
 function preferredLocale() {
@@ -91,9 +121,11 @@ function preferredLocale() {
     }
     return DEFAULT_LOCALE;
 }
-function localize(text) {
+function localize(text, values) {
     const template = TRANSLATIONS[preferredLocale()]?.[text] ?? text;
-    return template;
+    if (!values)
+        return template;
+    return template.replace(/\{(\w+)\}/g, (match, key) => values[key] === undefined ? match : String(values[key]));
 }
 function localizeOptional(text) {
     return text === undefined ? undefined : localize(text);
@@ -654,7 +686,7 @@ function autoUpdateRow(config) {
     title.textContent = "Automatically refresh Codex++";
     const desc = document.createElement("div");
     desc.className = "text-token-text-secondary min-w-0 text-sm";
-    desc.textContent = `Installed version v${config.version}. The watcher can refresh the Codex++ runtime after you rerun the GitHub installer.`;
+    desc.textContent = localize("Installed version v{version}. The watcher can refresh the Codex++ runtime after you rerun the GitHub installer.", { version: config.version });
     left.appendChild(title);
     left.appendChild(desc);
     row.appendChild(left);
@@ -724,9 +756,13 @@ function releaseNotesRow(check) {
 }
 function updateSummary(check) {
     if (!check)
-        return "No update check has run yet.";
-    const latest = check.latestVersion ? `Latest v${check.latestVersion}. ` : "";
-    const checked = `Checked ${new Date(check.checkedAt).toLocaleString()}.`;
+        return localize("No update check has run yet.");
+    const latest = check.latestVersion
+        ? localize("Latest v{version}. ", { version: check.latestVersion })
+        : "";
+    const checked = localize("Checked {date}.", {
+        date: new Date(check.checkedAt).toLocaleString(),
+    });
     if (check.error)
         return `${latest}${checked} ${check.error}`;
     return `${latest}${checked}`;
@@ -771,10 +807,10 @@ function actionRow(titleText, description) {
     left.className = "flex min-w-0 flex-col gap-1";
     const title = document.createElement("div");
     title.className = "min-w-0 text-sm text-token-text-primary";
-    title.textContent = titleText;
+    title.textContent = localize(titleText);
     const desc = document.createElement("div");
     desc.className = "text-token-text-secondary min-w-0 text-sm";
-    desc.textContent = description;
+    desc.textContent = localize(description);
     left.appendChild(title);
     left.appendChild(desc);
     row.appendChild(left);
@@ -819,7 +855,9 @@ function renderTweaksPage(sectionsWrap) {
         section.className = "flex flex-col gap-2";
         section.appendChild(sectionTitle("Installed Tweaks", trailing));
         const card = roundedCard();
-        card.appendChild(rowSimple("No tweaks installed", `Drop a tweak folder into ${tweaksPath()} and reload.`));
+        card.appendChild(rowSimple("No tweaks installed", localize("Drop a tweak folder into {path} and reload.", {
+            path: tweaksPath(),
+        })));
         section.appendChild(card);
         sectionsWrap.appendChild(section);
         return;
@@ -916,7 +954,7 @@ function tweakRow(t, sections) {
         const badge = document.createElement("span");
         badge.className =
             "rounded-full border border-token-border bg-token-foreground/5 px-2 py-0.5 text-[11px] font-medium text-token-text-primary";
-        badge.textContent = "Update Available";
+        badge.textContent = localize("Update Available");
         titleRow.appendChild(badge);
     }
     stack.appendChild(titleRow);
@@ -953,7 +991,7 @@ function tweakRow(t, sections) {
         link.target = "_blank";
         link.rel = "noreferrer";
         link.className = "inline-flex text-token-text-link-foreground hover:underline";
-        link.textContent = "Homepage";
+        link.textContent = localize("Homepage");
         meta.appendChild(link);
     }
     if (meta.children.length > 0)
@@ -1057,12 +1095,12 @@ function panelShell(title, subtitle) {
     headerInner.className = "flex min-w-0 flex-1 flex-col gap-1.5 pb-panel";
     const heading = document.createElement("div");
     heading.className = "electron:heading-lg heading-base truncate";
-    heading.textContent = title;
+    heading.textContent = localize(title);
     headerInner.appendChild(heading);
     if (subtitle) {
         const sub = document.createElement("div");
         sub.className = "text-token-text-secondary text-sm";
-        sub.textContent = subtitle;
+        sub.textContent = localize(subtitle);
         headerInner.appendChild(sub);
     }
     headerWrap.appendChild(headerInner);
@@ -1080,7 +1118,7 @@ function sectionTitle(text, trailing) {
     titleInner.className = "flex min-w-0 flex-1 flex-col gap-1";
     const t = document.createElement("div");
     t.className = "text-base font-medium text-token-text-primary";
-    t.textContent = text;
+    t.textContent = localize(text);
     titleInner.appendChild(t);
     titleRow.appendChild(titleInner);
     if (trailing) {
@@ -1100,8 +1138,9 @@ function openInPlaceButton(label, onClick) {
     btn.type = "button";
     btn.className =
         "border-token-border user-select-none no-drag cursor-interaction flex items-center gap-1 border whitespace-nowrap focus:outline-none disabled:cursor-not-allowed disabled:opacity-40 rounded-lg text-token-description-foreground enabled:hover:bg-token-list-hover-background data-[state=open]:bg-token-list-hover-background border-transparent h-token-button-composer px-2 py-0 text-base leading-[18px]";
+    const localizedLabel = localize(label);
     btn.innerHTML =
-        `${label}` +
+        `${localizedLabel}` +
             `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" class="icon-2xs" aria-hidden="true">` +
             `<path d="M14.3349 13.3301V6.60645L5.47065 15.4707C5.21095 15.7304 4.78895 15.7304 4.52925 15.4707C4.26955 15.211 4.26955 14.789 4.52925 14.5293L13.3935 5.66504H6.66011C6.29284 5.66504 5.99507 5.36727 5.99507 5C5.99507 4.63273 6.29284 4.33496 6.66011 4.33496H14.9999L15.1337 4.34863C15.4369 4.41057 15.665 4.67857 15.665 5V13.3301C15.6649 13.6973 15.3672 13.9951 14.9999 13.9951C14.6327 13.9951 14.335 13.6973 14.3349 13.3301Z" fill="currentColor"></path>` +
             `</svg>`;
@@ -1117,7 +1156,7 @@ function compactButton(label, onClick) {
     btn.type = "button";
     btn.className =
         "border-token-border user-select-none no-drag cursor-interaction inline-flex h-8 items-center whitespace-nowrap rounded-lg border px-2 text-sm text-token-text-primary enabled:hover:bg-token-list-hover-background disabled:cursor-not-allowed disabled:opacity-40";
-    btn.textContent = label;
+    btn.textContent = localize(label);
     btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1142,13 +1181,13 @@ function rowSimple(title, description) {
     if (title) {
         const t = document.createElement("div");
         t.className = "min-w-0 text-sm text-token-text-primary";
-        t.textContent = title;
+        t.textContent = localize(title);
         stack.appendChild(t);
     }
     if (description) {
         const d = document.createElement("div");
         d.className = "text-token-text-secondary min-w-0 text-sm";
-        d.textContent = description;
+        d.textContent = localize(description);
         stack.appendChild(d);
     }
     left.appendChild(stack);
