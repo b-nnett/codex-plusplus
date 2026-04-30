@@ -800,7 +800,7 @@ function autoUpdateRow(config: CodexPlusPlusConfig): HTMLElement {
   left.className = "flex min-w-0 flex-col gap-1";
   const title = document.createElement("div");
   title.className = "min-w-0 text-sm text-token-text-primary";
-  title.textContent = "Automatically refresh Codex++";
+  title.textContent = localize("Automatically refresh Codex++");
   const desc = document.createElement("div");
   desc.className = "text-token-text-secondary min-w-0 text-sm";
   desc.textContent = localize(
@@ -825,7 +825,9 @@ function checkForUpdatesRow(check: CodexPlusPlusUpdateCheck | null): HTMLElement
   left.className = "flex min-w-0 flex-col gap-1";
   const title = document.createElement("div");
   title.className = "min-w-0 text-sm text-token-text-primary";
-  title.textContent = check?.updateAvailable ? "Codex++ update available" : "Codex++ is up to date";
+  title.textContent = check?.updateAvailable
+    ? localize("Codex++ update available")
+    : localize("Codex++ is up to date");
   const desc = document.createElement("div");
   desc.className = "text-token-text-secondary min-w-0 text-sm";
   desc.textContent = updateSummary(check);
@@ -873,12 +875,12 @@ function releaseNotesRow(check: CodexPlusPlusUpdateCheck): HTMLElement {
   row.className = "flex flex-col gap-2 p-3";
   const title = document.createElement("div");
   title.className = "text-sm text-token-text-primary";
-  title.textContent = "Latest release notes";
+  title.textContent = localize("Latest release notes");
   row.appendChild(title);
   const body = document.createElement("pre");
   body.className =
     "max-h-48 overflow-auto whitespace-pre-wrap rounded-md border border-token-border bg-token-foreground/5 p-3 text-xs text-token-text-secondary";
-  body.textContent = check.releaseNotes?.trim() || check.error || "No release notes available.";
+  body.textContent = check.releaseNotes?.trim() || check.error || localize("No release notes available.");
   row.appendChild(body);
   return row;
 }
