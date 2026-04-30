@@ -216,14 +216,39 @@ function comboFromEvent(e) {
   if (e.ctrlKey) mods.add("Ctrl");
   if (e.altKey) mods.add("Alt");
   if (e.shiftKey) mods.add("Shift");
-  let key = e.key;
+  const key = keyFromEvent(e);
   if (!key) return null;
-  // Modifier-only keypresses ignored.
-  if (["Meta", "Control", "Alt", "Shift", "OS"].includes(key)) return null;
-  if (/^[a-z]$/i.test(key)) key = key.toUpperCase();
-  else if (key.length > 1) key = capitalize(key);
   const ordered = MOD_ORDER.filter((m) => mods.has(m));
   return [...ordered, key].join("+");
+}
+
+function keyFromEvent(e) {
+  // `event.key` is layout/input-method dependent: on a Korean keyboard
+  // state, physical Cmd+B can report "ㅠ". `event.code` stays "KeyB", so
+  // prefer it for shortcut matching and recording.
+  const physical = keyFromCode(e.code);
+  if (physical) return physical;
+  return normalizeEventKey(e.key);
+}
+
+function keyFromCode(code) {
+  if (!code || typeof code !== "string") return null;
+  const letter = /^Key([A-Z])$/.exec(code);
+  if (letter) return letter[1];
+  const digit = /^Digit([0-9])$/.exec(code);
+  if (digit) return digit[1];
+  const numpadDigit = /^Numpad([0-9])$/.exec(code);
+  if (numpadDigit) return numpadDigit[1];
+  return null;
+}
+
+function normalizeEventKey(key) {
+  if (!key) return null;
+  if (["Meta", "Control", "Alt", "Shift", "OS"].includes(key)) return null;
+  if (key === " ") return "Space";
+  if (/^[a-z]$/i.test(key)) return key.toUpperCase();
+  if (key.length > 1) return capitalize(key);
+  return key;
 }
 
 /** Pretty-print "Cmd+Shift+M" → "⌘⇧M" for display. */

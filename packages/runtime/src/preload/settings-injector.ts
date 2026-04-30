@@ -4,9 +4,9 @@
  * Codex's settings is a routed page (URL stays at `/index.html?hostId=local`)
  * NOT a modal dialog. The sidebar lives inside a `<div class="flex flex-col
  * gap-1 gap-0">` wrapper that holds one or more `<div class="flex flex-col
- * gap-px">` groups of buttons. There are no stable `role` / `aria-label` /
- * `data-testid` hooks on the shell so we identify the sidebar by text-content
- * match against known item labels (General, Appearance, Configuration, …).
+ * gap-px">` groups of buttons. There are no stable `role` / `data-testid`
+ * hooks on the shell so we identify the sidebar by structure instead of
+ * localized labels.
  *
  * Layout we inject:
  *
@@ -146,6 +146,48 @@ function safeStringify(v: unknown): string {
   }
 }
 
+const DEFAULT_LOCALE = "en";
+
+// Add a language by adding another top-level locale code here, e.g. `ja` or `zh`.
+const TRANSLATIONS: Record<string, Record<string, string>> = {
+  ko: {
+    "Config": "설정",
+    "Tweaks": "트윅",
+    "Keyboard Shortcuts": "키보드 단축키",
+    "UI Improvements": "UI 개선",
+    "Configure Codex++ itself.": "Codex++ 자체 설정을 관리합니다.",
+    "Manage your installed Codex++ tweaks.": "설치된 Codex++ 트윅을 관리합니다.",
+    "Remap or disable Codex's keyboard shortcuts.": "Codex 키보드 단축키를 변경하거나 비활성화합니다.",
+    "Bennett's small quality-of-life tweaks.": "Bennett의 작은 사용성 개선 트윅입니다.",
+  },
+};
+
+function preferredLocale(): string {
+  const candidates = [
+    document.documentElement.lang,
+    navigator.language,
+    ...(navigator.languages ?? []),
+    Intl.DateTimeFormat().resolvedOptions().locale,
+  ];
+  for (const locale of candidates) {
+    const normalized = locale?.toLowerCase();
+    if (!normalized) continue;
+    if (TRANSLATIONS[normalized]) return normalized;
+    const base = normalized.split("-")[0];
+    if (TRANSLATIONS[base]) return base;
+  }
+  return DEFAULT_LOCALE;
+}
+
+function localize(text: string): string {
+  const template = TRANSLATIONS[preferredLocale()]?.[text] ?? text;
+  return template;
+}
+
+function localizeOptional(text: string | undefined): string | undefined {
+  return text === undefined ? undefined : localize(text);
+}
+
 // ───────────────────────────────────────────────────────────── public API ──
 
 export function startSettingsInjector(): void {
@@ -192,9 +234,11 @@ function onDocumentClick(e: MouseEvent): void {
   const target = e.target instanceof Element ? e.target : null;
   const control = target?.closest("[role='link'],button,a");
   if (!(control instanceof HTMLElement)) return;
-  if (compactSettingsText(control.textContent || "") !== "Back to app") return;
+  if (state.navGroup?.contains(control) || state.pagesGroup?.contains(control)) return;
   setTimeout(() => {
-    setSettingsSurfaceVisible(false, "back-to-app");
+    if (!findSidebarItemsGroup()) {
+      setSettingsSurfaceVisible(false, "settings-control-left-surface");
+    }
   }, 0);
 }
 
@@ -336,8 +380,8 @@ function tryInject(): void {
   group.appendChild(header);
 
   // ── Two sidebar items ────────────────────────────────────────────────
-  const configBtn = makeSidebarItem("Config", configIconSvg());
-  const tweaksBtn = makeSidebarItem("Tweaks", tweaksIconSvg());
+  const configBtn = makeSidebarItem(localize("Config"), configIconSvg(), "config");
+  const tweaksBtn = makeSidebarItem(localize("Tweaks"), tweaksIconSvg(), "tweaks");
 
   configBtn.addEventListener("click", (e) => {
     e.preventDefault();
@@ -371,17 +415,7 @@ function scheduleSettingsSurfaceHidden(): void {
 }
 
 function isSettingsTextVisible(): boolean {
-  const text = compactSettingsText(document.body?.textContent || "").toLowerCase();
-  return (
-    text.includes("back to app") &&
-    text.includes("general") &&
-    text.includes("appearance") &&
-    (text.includes("configuration") || text.includes("default permissions"))
-  );
-}
-
-function compactSettingsText(value: string): string {
-  return String(value || "").replace(/\s+/g, " ").trim();
+  return !!document.querySelector('[data-codexpp="nav-group"]');
 }
 
 function setSettingsSurfaceVisible(visible: boolean, reason: string): void {
@@ -415,7 +449,7 @@ function syncPagesGroup(): void {
   // write would re-trigger that observer (infinite loop, app freeze).
   const desiredKey = pages.length === 0
     ? "EMPTY"
-    : pages.map((p) => `${p.id}|${p.page.title}|${p.page.iconSvg ?? ""}`).join("\n");
+    : pages.map((p) => `${p.id}|${localize(p.page.title)}|${p.page.iconSvg ?? ""}`).join("\n");
   const groupAttached = !!state.pagesGroup && outer.contains(state.pagesGroup);
   if (state.pagesGroupKey === desiredKey && (pages.length === 0 ? !groupAttached : groupAttached)) {
     return;
@@ -439,7 +473,7 @@ function syncPagesGroup(): void {
     const header = document.createElement("div");
     header.className =
       "px-row-x pt-2 pb-1 text-[11px] font-medium uppercase tracking-wider text-token-description-foreground select-none";
-    header.textContent = "Tweaks";
+    header.textContent = localize("Tweaks");
     group.appendChild(header);
     outer.appendChild(group);
     state.pagesGroup = group;
@@ -450,7 +484,7 @@ function syncPagesGroup(): void {
 
   for (const p of pages) {
     const icon = p.page.iconSvg ?? defaultPageIconSvg();
-    const btn = makeSidebarItem(p.page.title, icon);
+    const btn = makeSidebarItem(localize(p.page.title), icon);
     btn.dataset.codexpp = `nav-page-${p.id}`;
     btn.addEventListener("click", (e) => {
       e.preventDefault();
@@ -469,11 +503,15 @@ function syncPagesGroup(): void {
   setNavActive(state.activePage);
 }
 
-function makeSidebarItem(label: string, iconSvg: string): HTMLButtonElement {
+function makeSidebarItem(
+  label: string,
+  iconSvg: string,
+  dataKey = label.toLowerCase(),
+): HTMLButtonElement {
   // Class string copied verbatim from Codex's sidebar buttons (General etc).
   const btn = document.createElement("button");
   btn.type = "button";
-  btn.dataset.codexpp = `nav-${label.toLowerCase()}`;
+  btn.dataset.codexpp = `nav-${dataKey}`;
   btn.setAttribute("aria-label", label);
   btn.className =
     "focus-visible:outline-token-border relative px-row-x py-row-y cursor-interaction shrink-0 items-center overflow-hidden rounded-lg text-left text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50 gap-2 flex w-full hover:bg-token-list-hover-background font-normal";
@@ -653,7 +691,10 @@ function rerender(): void {
       restoreCodexView();
       return;
     }
-    const root = panelShell(entry.page.title, entry.page.description);
+    const root = panelShell(
+      localize(entry.page.title),
+      localizeOptional(entry.page.description),
+    );
     host.appendChild(root.outer);
     try {
       // Tear down any prior render before re-rendering (hot reload).
@@ -670,10 +711,10 @@ function rerender(): void {
     return;
   }
 
-  const title = ap.kind === "tweaks" ? "Tweaks" : "Config";
+  const title = ap.kind === "tweaks" ? localize("Tweaks") : localize("Config");
   const subtitle = ap.kind === "tweaks"
-    ? "Manage your installed Codex++ tweaks."
-    : "Configure Codex++ itself.";
+    ? localize("Manage your installed Codex++ tweaks.")
+    : localize("Configure Codex++ itself.");
   const root = panelShell(title, subtitle);
   host.appendChild(root.outer);
   if (ap.kind === "tweaks") renderTweaksPage(root.sectionsWrap);
@@ -1420,7 +1461,10 @@ function findSidebarItemsGroup(): HTMLElement | null {
     }
   }
 
-  // Text-content match against Codex's known sidebar labels.
+  const structural = findSidebarItemsGroupByStructure();
+  if (structural) return structural;
+
+  // Last-resort compatibility fallback for older English-only builds.
   const KNOWN = [
     "General",
     "Appearance",
@@ -1448,6 +1492,32 @@ function findSidebarItemsGroup(): HTMLElement | null {
       for (const m of matches) if (node.contains(m)) count++;
       if (count >= Math.min(3, matches.length)) return node;
       node = node.parentElement;
+    }
+  }
+  return null;
+}
+
+function findSidebarItemsGroupByStructure(): HTMLElement | null {
+  const groups = Array.from(
+    document.querySelectorAll<HTMLElement>("div.flex.flex-col.gap-px"),
+  );
+  for (const group of groups) {
+    if (group.dataset.codexpp) continue;
+    const items = Array.from(group.children).filter(
+      (child): child is HTMLElement =>
+        child instanceof HTMLElement &&
+        !child.dataset.codexpp &&
+        ["BUTTON", "A"].includes(child.tagName),
+    );
+    if (
+      items.length >= 3 &&
+      items.every((item) =>
+        item.classList.contains("px-row-x") &&
+        item.classList.contains("py-row-y") &&
+        item.classList.contains("w-full"),
+      )
+    ) {
+      return group;
     }
   }
   return null;

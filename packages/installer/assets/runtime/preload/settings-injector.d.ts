@@ -4,9 +4,9 @@
  * Codex's settings is a routed page (URL stays at `/index.html?hostId=local`)
  * NOT a modal dialog. The sidebar lives inside a `<div class="flex flex-col
  * gap-1 gap-0">` wrapper that holds one or more `<div class="flex flex-col
- * gap-px">` groups of buttons. There are no stable `role` / `aria-label` /
- * `data-testid` hooks on the shell so we identify the sidebar by text-content
- * match against known item labels (General, Appearance, Configuration, …).
+ * gap-px">` groups of buttons. There are no stable `role` / `data-testid`
+ * hooks on the shell so we identify the sidebar by structure instead of
+ * localized labels.
  *
  * Layout we inject:
  *
