@@ -66,9 +66,7 @@ function installLaunchd(appRoot: string): WatcherKind {
   mkdirSync(dirname(logPath), { recursive: true });
   // Trigger on login + when Codex.app's asar changes. Run this installed CLI
   // directly so auto-repair does not depend on npm availability.
-  const repair = xmlEscape(
-    `sleep 3; ${cliShellCommand("update", ["--watcher", "--quiet"])} || ${cliShellCommand("repair", ["--quiet"])} || true`,
-  );
+  const repair = xmlEscape(launchdWatcherCommand(logPath));
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -281,6 +279,10 @@ function cliShellCommand(command: string, args: string[] = []): string {
     command,
     ...args,
   ].join(" ");
+}
+
+export function launchdWatcherCommand(logPath: string): string {
+  return `: > ${shellSingleQuote(logPath)}; sleep 3; ${cliShellCommand("update", ["--watcher", "--quiet"])} || ${cliShellCommand("repair", ["--quiet"])} || true`;
 }
 
 function currentCliPath(): string {
