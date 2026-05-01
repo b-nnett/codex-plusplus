@@ -323,13 +323,19 @@ function writableError(e: unknown, target: string, platform: string): unknown {
         `  1. Open System Settings → Privacy & Security → App Management\n` +
         `  2. Enable the toggle for your terminal app (Terminal, iTerm2, etc.)\n` +
         `  3. If the file is root-owned or the error is EACCES, run the installer itself with sudo:\n` +
-        `     curl -fsSL https://raw.githubusercontent.com/b-nnett/codex-plusplus/main/install.sh | sudo bash\n` +
+        `     curl -fsSL ${installScriptUrl()} | sudo bash\n` +
         `     or rerun: sudo codexplusplus install\n\n` +
         `Avoid \`sudo curl ... | bash\`; that only runs curl as root, not the installer.\n\n` +
         `(If macOS just showed a permission dialog, click Allow and re-run.)\n`
       : `Check filesystem permissions for the Codex install folder.\n`) +
     `\nOriginal error: ${err.message}`;
   return new Error(msg);
+}
+
+function installScriptUrl(): string {
+  const repo = process.env.CODEX_PLUSPLUS_REPO ?? "b-nnett/codex-plusplus";
+  const ref = process.env.CODEX_PLUSPLUS_REF ?? "main";
+  return `https://raw.githubusercontent.com/${repo}/${ref}/install.sh`;
 }
 
 function preflightSystemTools(platform: string, resign: boolean, hasPlist: boolean): void {

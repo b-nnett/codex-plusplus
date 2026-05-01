@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { homedir, platform } from "node:os";
+import { platform } from "node:os";
 import { join } from "node:path";
 import { userPaths } from "./paths.js";
+import { targetUserHome } from "./ownership.js";
 
 export const MAX_LOG_BYTES = 10 * 1024 * 1024;
 
@@ -23,6 +24,6 @@ export function capKnownLogFiles(): void {
     capLogFile(join(paths.logDir, file));
   }
   if (platform() === "darwin") {
-    capLogFile(join(homedir(), "Library", "Logs", "codex-plusplus-watcher.log"));
+    capLogFile(join(targetUserHome(), "Library", "Logs", "codex-plusplus-watcher.log"));
   }
 }

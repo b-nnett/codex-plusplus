@@ -19,7 +19,7 @@ import { homedir, platform, userInfo } from "node:os";
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { chownForTargetUser, targetUserOwnership } from "./ownership.js";
+import { chownForTargetUser, targetUserHome, targetUserOwnership } from "./ownership.js";
 
 export type WatcherKind = "launchd" | "login-item" | "scheduled-task" | "systemd" | "none";
 
@@ -50,11 +50,11 @@ export function uninstallWatcher(): void {
 const LABEL = "com.codexplusplus.watcher";
 
 function launchdPath(): string {
-  return join(homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
+  return join(targetUserHome(), "Library", "LaunchAgents", `${LABEL}.plist`);
 }
 
 function launchdLogPath(): string {
-  return join(homedir(), "Library", "Logs", "codex-plusplus-watcher.log");
+  return join(targetUserHome(), "Library", "Logs", "codex-plusplus-watcher.log");
 }
 
 function installLaunchd(appRoot: string): WatcherKind {

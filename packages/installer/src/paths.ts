@@ -1,7 +1,7 @@
-import { homedir, platform } from "node:os";
+import { platform } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
-import { chownForTargetUser } from "./ownership.js";
+import { chownForTargetUser, targetUserHome } from "./ownership.js";
 
 /**
  * User-data directory layout. Picked per platform conventions; created lazily.
@@ -54,7 +54,7 @@ export function ensureUserPaths(): UserPaths {
 function userRoot(): string {
   if (process.env.CODEX_PLUSPLUS_HOME) return process.env.CODEX_PLUSPLUS_HOME;
 
-  const home = homedir();
+  const home = targetUserHome();
   switch (platform()) {
     case "darwin":
       return join(home, "Library", "Application Support", "codex-plusplus");

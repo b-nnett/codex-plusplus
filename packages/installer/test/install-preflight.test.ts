@@ -51,6 +51,7 @@ test("install preflight checks Info.plist before patching", { skip: process.plat
       );
       assert.match(String(error), /run the installer itself with sudo/);
       assert.match(String(error), /sudo codexplusplus install/);
+      assert.match(String(error), /https:\/\/raw\.githubusercontent\.com\/b-nnett\/codex-plusplus\/main\/install\.sh/);
       assert.match(String(error), /Avoid `sudo curl \.\.\. \| bash`/);
     } finally {
       chmodSync(metaPath, 0o644);
