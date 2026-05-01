@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, readFileSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { locateCodex } from "../platform.js";
+import { locateCodex, type CodexInstall } from "../platform.js";
 import { ensureUserPaths } from "../paths.js";
 import { backupOnce, patchAsar, readHeaderHash } from "../asar.js";
 import { setIntegrity, getIntegrity } from "../integrity.js";
@@ -44,10 +44,9 @@ export async function install(opts: Opts = {}): Promise<void> {
   step(`Located Codex at ${kleur.cyan(codex.appRoot)}`);
   preflightSystemTools(codex.platform, resign, codex.metaPath !== null);
 
-  // Pre-flight: try to create+remove a probe file inside the app bundle. This
-  // surfaces macOS App Management TCC denials BEFORE we touch anything, and
-  // also tickles the system into showing the permission prompt on first run.
-  preflightWritable(codex.resourcesDir, codex.platform);
+  // Pre-flight every app-bundle target we will mutate so permission failures
+  // surface before we patch app.asar or touch backups.
+  preflightWritableTargets(codex, { fuseFlip });
   step("Bundle is writable");
 
   const codexVersion = readCodexVersion(codex.metaPath);
@@ -273,35 +272,58 @@ function makeStepper(quiet = false) {
   };
 }
 
+export function preflightWritableTargets(
+  codex: Pick<CodexInstall, "resourcesDir" | "asarPath" | "metaPath" | "electronBinary" | "platform">,
+  opts: { fuseFlip: boolean },
+): void {
+  preflightWritableDirectory(codex.resourcesDir, codex.platform);
+  preflightWritableFile(codex.asarPath, codex.platform);
+  if (codex.metaPath) preflightWritableFile(codex.metaPath, codex.platform);
+  if (opts.fuseFlip) preflightWritableFile(codex.electronBinary, codex.platform);
+}
+
 /**
  * Touch a probe file inside the app bundle to surface (and trigger) macOS
  * App Management TCC denials before we begin destructive work.
  */
-function preflightWritable(targetDir: string, platform: string): void {
+function preflightWritableDirectory(targetDir: string, platform: string): void {
   const probe = join(targetDir, ".codexpp-write-probe");
   try {
     const fd = openSync(probe, "w");
     closeSync(fd);
     unlinkSync(probe);
   } catch (e) {
-    const err = e as NodeJS.ErrnoException;
-    if (err.code === "EPERM" || err.code === "EACCES") {
-      const inApps = platform === "darwin" && targetDir.startsWith("/Applications/");
-      const msg =
-        `Cannot write to ${targetDir}.\n\n` +
-        (inApps
-          ? `macOS App Management is blocking modification of ${targetDir}.\n` +
-            `Fix:\n` +
-            `  1. Open System Settings → Privacy & Security → App Management\n` +
-            `  2. Enable the toggle for your terminal app (Terminal, iTerm2, etc.)\n` +
-            `  3. Re-run this command.\n\n` +
-            `(If macOS just showed a permission dialog, click Allow and re-run.)\n`
-          : `Check filesystem permissions for the Codex install folder.\n`) +
-        `\nOriginal error: ${err.message}`;
-      throw new Error(msg);
-    }
-    throw e;
+    throw writableError(e, targetDir, platform);
   }
+}
+
+function preflightWritableFile(targetFile: string, platform: string): void {
+  try {
+    const fd = openSync(targetFile, "r+");
+    closeSync(fd);
+  } catch (e) {
+    throw writableError(e, targetFile, platform);
+  }
+}
+
+function writableError(e: unknown, target: string, platform: string): unknown {
+  const err = e as NodeJS.ErrnoException;
+  if (err.code !== "EPERM" && err.code !== "EACCES") return e;
+
+  const inApps = platform === "darwin" && target.startsWith("/Applications/");
+  const msg =
+    `Cannot write to ${target}.\n\n` +
+    (inApps
+      ? `macOS App Management or file ownership is blocking modification of ${target}.\n` +
+        `Fix:\n` +
+        `  1. Open System Settings → Privacy & Security → App Management\n` +
+        `  2. Enable the toggle for your terminal app (Terminal, iTerm2, etc.)\n` +
+        `  3. Re-run this command.\n\n` +
+        `If you ran \`sudo curl ... | bash\`, only curl ran as root. Use \`curl ... | sudo bash\` or rerun \`sudo codexplusplus install\` instead.\n\n` +
+        `(If macOS just showed a permission dialog, click Allow and re-run.)\n`
+      : `Check filesystem permissions for the Codex install folder.\n`) +
+    `\nOriginal error: ${err.message}`;
+  return new Error(msg);
 }
 
 function preflightSystemTools(platform: string, resign: boolean, hasPlist: boolean): void {
