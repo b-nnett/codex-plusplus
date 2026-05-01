@@ -28,20 +28,30 @@ test("install preflight checks Info.plist before patching", { skip: process.plat
     chmodSync(metaPath, 0o444);
 
     try {
+      let error: unknown;
       assert.throws(
-        () =>
-          preflightWritableTargets(
-            {
-              resourcesDir,
-              asarPath,
-              metaPath,
-              electronBinary,
-              platform: "darwin",
-            },
-            { fuseFlip: true },
-          ),
+        () => {
+          try {
+            preflightWritableTargets(
+              {
+                resourcesDir,
+                asarPath,
+                metaPath,
+                electronBinary,
+                platform: "darwin",
+              },
+              { fuseFlip: true },
+            );
+          } catch (e) {
+            error = e;
+            throw e;
+          }
+        },
         /Cannot write to .*Info\.plist/,
       );
+      assert.match(String(error), /run the installer itself with sudo/);
+      assert.match(String(error), /sudo codexplusplus install/);
+      assert.match(String(error), /Avoid `sudo curl \.\.\. \| bash`/);
     } finally {
       chmodSync(metaPath, 0o644);
     }

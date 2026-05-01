@@ -314,16 +314,18 @@ function writableError(e: unknown, target: string, platform: string): unknown {
   const err = e as NodeJS.ErrnoException;
   if (err.code !== "EPERM" && err.code !== "EACCES") return e;
 
-  const inApps = platform === "darwin" && target.startsWith("/Applications/");
+  const isMac = platform === "darwin";
   const msg =
     `Cannot write to ${target}.\n\n` +
-    (inApps
+    (isMac
       ? `macOS App Management or file ownership is blocking modification of ${target}.\n` +
         `Fix:\n` +
         `  1. Open System Settings → Privacy & Security → App Management\n` +
         `  2. Enable the toggle for your terminal app (Terminal, iTerm2, etc.)\n` +
-        `  3. Re-run this command.\n\n` +
-        `If you ran \`sudo curl ... | bash\`, only curl ran as root. Use \`curl ... | sudo bash\` or rerun \`sudo codexplusplus install\` instead.\n\n` +
+        `  3. If the file is root-owned or the error is EACCES, run the installer itself with sudo:\n` +
+        `     curl -fsSL https://raw.githubusercontent.com/b-nnett/codex-plusplus/main/install.sh | sudo bash\n` +
+        `     or rerun: sudo codexplusplus install\n\n` +
+        `Avoid \`sudo curl ... | bash\`; that only runs curl as root, not the installer.\n\n` +
         `(If macOS just showed a permission dialog, click Allow and re-run.)\n`
       : `Check filesystem permissions for the Codex install folder.\n`) +
     `\nOriginal error: ${err.message}`;
