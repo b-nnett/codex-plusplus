@@ -19,6 +19,13 @@ require_command() {
   fi
 }
 
+chown_to_sudo_user() {
+  local path="$1"
+  if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_UID:-}" ] && [ -n "${SUDO_GID:-}" ]; then
+    chown -R "$SUDO_UID:$SUDO_GID" "$path" 2>/dev/null || true
+  fi
+}
+
 if ! command -v node >/dev/null 2>&1; then
   fail "Node.js 20+ is required but node was not found."
 fi
@@ -75,6 +82,7 @@ if [ -d "$INSTALL_DIR" ]; then
   mv "$INSTALL_DIR" "$INSTALL_DIR.previous"
 fi
 mv "$NEXT" "$INSTALL_DIR"
+chown_to_sudo_user "$INSTALL_DIR"
 
 echo "Running installer..."
 node "$INSTALL_DIR/packages/installer/dist/cli.js" install "$@" ||

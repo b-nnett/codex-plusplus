@@ -1,6 +1,7 @@
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
+import { chownForTargetUser } from "./ownership.js";
 
 /**
  * User-data directory layout. Picked per platform conventions; created lazily.
@@ -45,6 +46,7 @@ export function ensureUserPaths(): UserPaths {
   const p = userPaths();
   for (const dir of [p.root, p.runtime, p.tweaks, p.backup, p.binDir, p.logDir]) {
     mkdirSync(dir, { recursive: true });
+    chownForTargetUser(dir);
   }
   return p;
 }

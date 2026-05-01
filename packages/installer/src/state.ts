@@ -3,6 +3,7 @@
  * we did, and so `doctor` can detect drift.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chownForTargetUser } from "./ownership.js";
 
 export interface InstallerState {
   version: string;
@@ -42,4 +43,5 @@ export function readState(stateFile: string): InstallerState | null {
 
 export function writeState(stateFile: string, state: InstallerState): void {
   writeFileSync(stateFile, JSON.stringify(state, null, 2));
+  chownForTargetUser(stateFile);
 }

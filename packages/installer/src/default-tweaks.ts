@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { extract as extractTar } from "tar";
+import { chownForTargetUser } from "./ownership.js";
 
 export interface DefaultTweak {
   id: string;
@@ -69,6 +70,7 @@ async function installDefaultTweak(tweak: DefaultTweak, target: string): Promise
     const source = findTweakRoot(extractDir) ?? findTweakRoot(work);
     if (!source) throw new Error("release did not contain manifest.json");
     await copyDir(source, target);
+    chownForTargetUser(target, { recursive: true });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

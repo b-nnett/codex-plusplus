@@ -19,6 +19,7 @@ import {
   CODEX_WINDOW_SERVICES_KEY,
   patchCodexWindowServicesSource,
 } from "../codex-window-services.js";
+import { chownForTargetUser } from "../ownership.js";
 
 interface Opts {
   app?: string;
@@ -145,6 +146,7 @@ export async function install(opts: Opts = {}): Promise<void> {
     originalEntryPoint: originalEntry,
     watcher,
   });
+  chownForTargetUser(paths.root, { recursive: true });
 
   if (!opts.quiet) {
     console.log();
@@ -251,12 +253,14 @@ export function stageAssets(runtimeDir: string): void {
   const src = join(assetsDir, "runtime");
   if (existsSync(src)) {
     cpSync(src, runtimeDir, { recursive: true });
+    chownForTargetUser(runtimeDir, { recursive: true });
     return;
   }
   // Dev fallback: copy from the in-tree built runtime.
   const devSrc = resolve(here, "..", "..", "..", "..", "runtime", "dist");
   if (existsSync(devSrc)) {
     cpSync(devSrc, runtimeDir, { recursive: true });
+    chownForTargetUser(runtimeDir, { recursive: true });
     return;
   }
   throw new Error(
