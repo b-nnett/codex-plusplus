@@ -198,11 +198,22 @@ function watcherLogCheck(): WatcherHealthCheck {
     return { name: "watcher log", status: "warn", detail: "no watcher log yet" };
   }
   const tail = readFileSafe(WATCHER_LOG).split(/\r?\n/).slice(-40).join("\n");
+  return analyzeWatcherLogTail(tail);
+}
+
+export function analyzeWatcherLogTail(tail: string): WatcherHealthCheck {
   const hasError = /✗ codex-plusplus failed|codex-plusplus failed|error|failed/i.test(tail);
+  const needsSudoRepair =
+    hasError &&
+    /Cannot write to .*Codex.*\.app|App Management|file ownership|run the installer itself with sudo|sudo codexplusplus (?:install|repair)|EACCES|EPERM/i.test(tail);
   return {
     name: "watcher log",
     status: hasError ? "warn" : "ok",
-    detail: hasError ? "recent watcher log contains an error" : WATCHER_LOG,
+    detail: hasError
+      ? needsSudoRepair
+        ? "auto-repair needs privileges; run `sudo codexplusplus repair`"
+        : "recent watcher log contains an error"
+      : WATCHER_LOG,
   };
 }
 

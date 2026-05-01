@@ -13,4 +13,5 @@ export interface WatcherHealth {
     checks: WatcherHealthCheck[];
 }
 export declare function getWatcherHealth(userRoot: string): WatcherHealth;
+export declare function analyzeWatcherLogTail(tail: string): WatcherHealthCheck;
 export {};
