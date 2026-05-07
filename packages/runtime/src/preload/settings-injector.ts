@@ -184,6 +184,7 @@ interface InjectorState {
   observer: MutationObserver | null;
   fingerprint: string | null;
   sidebarDumped: boolean;
+  sidebarProbeCount: number;
   activePage: ActivePage | null;
   sidebarRoot: HTMLElement | null;
   sidebarRestoreHandler: ((e: Event) => void) | null;
@@ -208,6 +209,7 @@ const state: InjectorState = {
   observer: null,
   fingerprint: null,
   sidebarDumped: false,
+  sidebarProbeCount: 0,
   activePage: null,
   sidebarRoot: null,
   sidebarRestoreHandler: null,
@@ -381,7 +383,9 @@ function tryInject(): void {
   // Codex's items group lives inside an outer wrapper that's already styled
   // to hold multiple groups (`flex flex-col gap-1 gap-0`). We inject our
   // group as a sibling so the natural gap-1 acts as our visual separator.
-  const outer = itemsGroup.parentElement ?? itemsGroup;
+  const outer = itemsGroup.matches("nav[aria-label='Settings']")
+    ? itemsGroup
+    : itemsGroup.parentElement ?? itemsGroup;
   if (!isSettingsSidebarCandidate(itemsGroup) || !isSettingsSidebarCandidate(outer)) {
     scheduleSettingsSurfaceHidden();
     plog("rejected non-settings sidebar candidate", {
@@ -2580,6 +2584,11 @@ async function resolveIconUrl(
 // ─────────────────────────────────────────────────────── DOM heuristics ──
 
 function findSidebarItemsGroup(): HTMLElement | null {
+  const settingsNav = document.querySelector<HTMLElement>("nav[aria-label='Settings']");
+  if (settingsNav && isSettingsSidebarCandidate(settingsNav)) {
+    return settingsNav;
+  }
+
   // Anchor strategy first (would be ideal if Codex switches to <a>).
   const links = Array.from(
     document.querySelectorAll<HTMLAnchorElement>("a[href*='/settings/']"),
@@ -2596,7 +2605,8 @@ function findSidebarItemsGroup(): HTMLElement | null {
     }
   }
 
-  // Text-content match against Codex's known sidebar labels.
+  // Match against Codex's known sidebar labels. Newer Codex builds can hide
+  // sidebar labels visually and expose them only through aria-label.
   const KNOWN = [
     "General",
     "Appearance",
@@ -2613,7 +2623,7 @@ function findSidebarItemsGroup(): HTMLElement | null {
   );
   for (const el of Array.from(all)) {
     if (isForbiddenSettingsSidebarSurface(el)) continue;
-    const t = (el.textContent ?? "").trim();
+    const t = settingsNavLabel(el);
     if (t.length > 30) continue;
     if (KNOWN.some((k) => t === k)) matches.push(el);
     if (matches.length > 50) break;
@@ -2627,7 +2637,33 @@ function findSidebarItemsGroup(): HTMLElement | null {
       node = node.parentElement;
     }
   }
+  logSidebarProbe(matches);
   return null;
+}
+
+function logSidebarProbe(matches: HTMLElement[]): void {
+  state.sidebarProbeCount++;
+  if (state.sidebarProbeCount > 5 && state.sidebarProbeCount % 20 !== 0) return;
+  const controls = Array.from(
+    document.querySelectorAll<HTMLElement>("button, a, [role='button'], [aria-label]"),
+  )
+    .filter((el) => !isForbiddenSettingsSidebarSurface(el))
+    .map((el) => ({
+      tag: el.tagName,
+      label: settingsNavLabel(el).slice(0, 80),
+      text: compactSettingsText(el.textContent || "").slice(0, 80),
+      aria: compactSettingsText(el.getAttribute("aria-label") || "").slice(0, 80),
+      cls: String(el.getAttribute("class") || "").slice(0, 120),
+    }))
+    .filter((x) => x.label || x.text || x.aria)
+    .slice(0, 40);
+  plog("sidebar probe", {
+    url: location.href,
+    body: compactSettingsText(document.body?.textContent || "").slice(0, 300),
+    matchCount: matches.length,
+    matches: matches.map((el) => settingsNavLabel(el)).slice(0, 20),
+    controls,
+  });
 }
 
 const FORBIDDEN_SETTINGS_SIDEBAR_SELECTOR = [
@@ -2654,10 +2690,26 @@ function isSettingsSidebarCandidate(node: HTMLElement): boolean {
   if (isForbiddenSettingsSidebarSurface(root)) return false;
   if (root.querySelector("a[href*='/settings/']")) return true;
   const text = compactSettingsText(root.textContent ?? "");
+  const labels = Array.from(
+    root.querySelectorAll<HTMLElement>("button, a, [role='button'], [aria-label]"),
+  ).map(settingsNavLabel);
+  const hasSettingsNav =
+    node.matches("nav[aria-label='Settings']") ||
+    root.querySelector("nav[aria-label='Settings']") !== null ||
+    labels.includes("Settings");
   return (
-    text.includes("Back to app") &&
-    text.includes("General") &&
-    text.includes("Appearance")
+    (hasSettingsNav || text.includes("Back to app") || labels.includes("Back to app")) &&
+    (text.includes("General") || labels.includes("General")) &&
+    (text.includes("Appearance") || labels.includes("Appearance"))
+  );
+}
+
+function settingsNavLabel(el: HTMLElement): string {
+  return compactSettingsText(
+    el.getAttribute("aria-label") ||
+    el.getAttribute("title") ||
+    el.textContent ||
+    "",
   );
 }
 
