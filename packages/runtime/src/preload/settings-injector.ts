@@ -184,7 +184,6 @@ interface InjectorState {
   observer: MutationObserver | null;
   fingerprint: string | null;
   sidebarDumped: boolean;
-  sidebarProbeCount: number;
   activePage: ActivePage | null;
   sidebarRoot: HTMLElement | null;
   sidebarRestoreHandler: ((e: Event) => void) | null;
@@ -209,7 +208,6 @@ const state: InjectorState = {
   observer: null,
   fingerprint: null,
   sidebarDumped: false,
-  sidebarProbeCount: 0,
   activePage: null,
   sidebarRoot: null,
   sidebarRestoreHandler: null,
@@ -2637,33 +2635,7 @@ function findSidebarItemsGroup(): HTMLElement | null {
       node = node.parentElement;
     }
   }
-  logSidebarProbe(matches);
   return null;
-}
-
-function logSidebarProbe(matches: HTMLElement[]): void {
-  state.sidebarProbeCount++;
-  if (state.sidebarProbeCount > 5 && state.sidebarProbeCount % 20 !== 0) return;
-  const controls = Array.from(
-    document.querySelectorAll<HTMLElement>("button, a, [role='button'], [aria-label]"),
-  )
-    .filter((el) => !isForbiddenSettingsSidebarSurface(el))
-    .map((el) => ({
-      tag: el.tagName,
-      label: settingsNavLabel(el).slice(0, 80),
-      text: compactSettingsText(el.textContent || "").slice(0, 80),
-      aria: compactSettingsText(el.getAttribute("aria-label") || "").slice(0, 80),
-      cls: String(el.getAttribute("class") || "").slice(0, 120),
-    }))
-    .filter((x) => x.label || x.text || x.aria)
-    .slice(0, 40);
-  plog("sidebar probe", {
-    url: location.href,
-    body: compactSettingsText(document.body?.textContent || "").slice(0, 300),
-    matchCount: matches.length,
-    matches: matches.map((el) => settingsNavLabel(el)).slice(0, 20),
-    controls,
-  });
 }
 
 const FORBIDDEN_SETTINGS_SIDEBAR_SELECTOR = [
