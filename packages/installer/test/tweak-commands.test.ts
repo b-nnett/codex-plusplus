@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -10,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildCliFailureIssueUrl, buildPatchFailureIssueUrl } from "../src/alerts";
+import { findCodexMainCandidates } from "../src/commands/install";
 import { createTweak } from "../src/commands/create-tweak";
 import { devTweak } from "../src/commands/dev-tweak";
 import { safeMode } from "../src/commands/safe-mode";
@@ -263,6 +265,24 @@ test("window services patch ignores unrelated buildFlavor factories", () => {
   const source = "let x=Fn({buildFlavor:a,foo:b,bar:c});Other({buildFlavor:a})";
 
   assert.equal(patchCodexWindowServicesSource(source), null);
+});
+
+test("main candidate discovery supports nested recovered app bundle layout", () => {
+  withTempDir((root) => {
+    const buildDir = join(root, "recovered", "app-asar-extracted", ".vite", "build");
+    mkdirSync(buildDir, { recursive: true });
+    const bootstrap = join(buildDir, "bootstrap.js");
+    const main = join(buildDir, "main-SLemWUtC.js");
+    writeFileSync(bootstrap, "");
+    writeFileSync(main, "");
+
+    const candidates = findCodexMainCandidates(
+      root,
+      "recovered/app-asar-extracted/.vite/build/bootstrap.js",
+    );
+
+    assert.deepEqual(candidates, [bootstrap, main]);
+  });
 });
 
 test("patch failure report URL includes a prefilled GitHub issue", () => {

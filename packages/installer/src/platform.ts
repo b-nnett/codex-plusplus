@@ -1,6 +1,6 @@
-import { existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { readPlist } from "./plist.js";
 
 export type Platform = "darwin" | "win32" | "linux";
@@ -167,16 +167,24 @@ function locateWin(override?: string): CodexInstall {
 }
 
 function locateLinux(override?: string): CodexInstall {
-  // Codex isn't yet shipped on Linux at time of writing; assume an Electron-style
-  // unpacked install or a deb/rpm in /opt.
+  // Linux builds are distributed by community ports today. Support unpacked
+  // Electron installs from deb/rpm packages as well as user-local symlinked
+  // installs used by am-will/codex-app.
   const candidates = [
     override,
+    "/usr/lib/codex-desktop",
+    "/opt/codex-desktop/current",
+    "/opt/codex-desktop",
     "/opt/Codex",
     "/opt/codex",
+    join(homedir(), ".local", "opt", "codex-desktop", "current"),
+    join(homedir(), ".local", "opt", "codex-desktop"),
+    join(homedir(), ".local", "share", "codex-desktop", "current"),
+    join(homedir(), ".local", "share", "codex-desktop"),
     join(homedir(), ".local", "share", "Codex"),
   ].filter(Boolean) as string[];
-  const appRoot = candidates.find((p) => existsSync(join(p, "resources", "app.asar")));
-  if (!appRoot) {
+  const install = candidates.map(resolveLinuxInstall).find((p): p is LinuxInstallCandidate => p !== null);
+  if (!install) {
     throw new Error(
       `[!] Codex App Not Found\n\n` +
         `Ensure Codex is installed in a supported Linux location.\n` +
@@ -184,17 +192,64 @@ function locateLinux(override?: string): CodexInstall {
         `If Codex is somewhere else, rerun with --app pointing at its install folder.`,
     );
   }
-  const resourcesDir = join(appRoot, "resources");
+  const { appRoot, resourcesDir, executable } = install;
   return {
     appRoot,
     resourcesDir,
     asarPath: join(resourcesDir, "app.asar"),
     metaPath: null,
-    electronBinary: join(appRoot, "codex"),
-    executable: join(appRoot, "codex"),
+    electronBinary: executable,
+    executable,
     appName: "Codex",
     bundleId: null,
     channel: "stable",
     platform: "linux",
   };
+}
+
+interface LinuxInstallCandidate {
+  appRoot: string;
+  resourcesDir: string;
+  executable: string;
+}
+
+function resolveLinuxInstall(candidate: string): LinuxInstallCandidate | null {
+  let resolved = candidate;
+  try {
+    resolved = realpathSync(candidate);
+  } catch {
+    // Keep the original path so the directory checks below can fail normally.
+  }
+
+  const roots: string[] = [];
+  if (existsSync(resolved)) {
+    try {
+      const stat = statSync(resolved);
+      if (stat.isDirectory()) {
+        roots.push(resolved);
+        if (basename(resolved) === "resources") roots.push(resolve(resolved, ".."));
+      } else if (stat.isFile()) {
+        roots.push(resolve(resolved, ".."));
+      }
+    } catch {}
+  }
+  roots.push(resolved);
+
+  for (const root of [...new Set(roots)]) {
+    const resourcesDir = join(root, "resources");
+    if (!existsSync(join(resourcesDir, "app.asar"))) continue;
+    const executable = findLinuxExecutable(root);
+    if (!executable) continue;
+    return { appRoot: root, resourcesDir, executable };
+  }
+  return null;
+}
+
+function findLinuxExecutable(appRoot: string): string | null {
+  const candidates = [
+    "Codex",
+    "codex-desktop",
+    "codex",
+  ].map((name) => join(appRoot, name));
+  return candidates.find((p) => existsSync(p)) ?? null;
 }
