@@ -66,6 +66,19 @@ interface CodexPlusPlusUpdateCheck {
   error?: string;
 }
 
+interface CodexCdpStatus {
+  enabled: boolean;
+  active: boolean;
+  configuredPort: number;
+  activePort: number | null;
+  restartRequired: boolean;
+  source: "argv" | "env" | "config" | "off";
+  jsonListUrl: string | null;
+  jsonVersionUrl: string | null;
+  launchCommand: string;
+  appRoot: string | null;
+}
+
 interface WatcherHealth {
   checkedAt: string;
   status: "ok" | "warn" | "error";
@@ -742,6 +755,15 @@ function renderConfigPage(sectionsWrap: HTMLElement, subtitle?: HTMLElement): vo
   sectionsWrap.appendChild(watcher);
   renderWatcherHealthCard(watcherCard);
 
+  const cdp = document.createElement("section");
+  cdp.className = "flex flex-col gap-2";
+  cdp.appendChild(sectionTitle("Developer / CDP"));
+  const cdpCard = roundedCard();
+  cdpCard.appendChild(rowSimple("Checking CDP", "Reading Chrome DevTools Protocol status."));
+  cdp.appendChild(cdpCard);
+  sectionsWrap.appendChild(cdp);
+  renderCdpCard(cdpCard);
+
   const maintenance = document.createElement("section");
   maintenance.className = "flex flex-col gap-2";
   maintenance.appendChild(sectionTitle("Maintenance"));
@@ -843,6 +865,165 @@ function releaseNotesRow(check: CodexPlusPlusUpdateCheck): HTMLElement {
   body.appendChild(renderReleaseNotesMarkdown(check.releaseNotes?.trim() || check.error || "No release notes available."));
   row.appendChild(body);
   return row;
+}
+
+function renderCdpCard(card: HTMLElement): void {
+  void ipcRenderer
+    .invoke("codexpp:get-cdp-status")
+    .then((status) => {
+      card.textContent = "";
+      renderCdpStatus(card, status as CodexCdpStatus);
+    })
+    .catch((e) => {
+      card.textContent = "";
+      card.appendChild(rowSimple("Could not read CDP status", String(e)));
+    });
+}
+
+function renderCdpStatus(card: HTMLElement, status: CodexCdpStatus): void {
+  card.appendChild(cdpToggleRow(card, status));
+  card.appendChild(cdpPortRow(card, status));
+  card.appendChild(cdpEndpointRow(status));
+  card.appendChild(cdpLaunchRow(status));
+  if (status.restartRequired) {
+    card.appendChild(
+      rowSimple(
+        "Restart required",
+        status.enabled
+          ? "CDP will use the saved port after Codex restarts."
+          : "CDP is still active for this process and will turn off after Codex restarts.",
+      ),
+    );
+  }
+}
+
+function cdpToggleRow(card: HTMLElement, status: CodexCdpStatus): HTMLElement {
+  const row = document.createElement("div");
+  row.className = "flex items-center justify-between gap-4 p-3";
+
+  const left = document.createElement("div");
+  left.className = "flex min-w-0 items-start gap-3";
+  left.appendChild(cdpStatusBadge(status));
+
+  const stack = document.createElement("div");
+  stack.className = "flex min-w-0 flex-col gap-1";
+  const title = document.createElement("div");
+  title.className = "min-w-0 text-sm text-token-text-primary";
+  title.textContent = "Chrome DevTools Protocol";
+  const desc = document.createElement("div");
+  desc.className = "text-token-text-secondary min-w-0 text-sm";
+  desc.textContent = cdpStatusSummary(status);
+  stack.append(title, desc);
+  left.appendChild(stack);
+  row.appendChild(left);
+
+  row.appendChild(
+    switchControl(status.enabled, async (enabled) => {
+      await ipcRenderer.invoke("codexpp:set-cdp-config", {
+        enabled,
+        port: status.configuredPort,
+      });
+      refreshCdpCard(card);
+    }),
+  );
+
+  return row;
+}
+
+function cdpPortRow(card: HTMLElement, status: CodexCdpStatus): HTMLElement {
+  const row = actionRow(
+    "Remote debugging port",
+    status.activePort
+      ? `Current process is listening on ${status.activePort}.`
+      : `Saved port is ${status.configuredPort}.`,
+  );
+  const action = row.querySelector<HTMLElement>("[data-codexpp-row-actions]");
+  const input = document.createElement("input");
+  input.type = "number";
+  input.min = "1";
+  input.max = "65535";
+  input.step = "1";
+  input.value = String(status.configuredPort);
+  input.className =
+    "h-8 w-24 rounded-lg border border-token-border bg-transparent px-2 text-sm text-token-text-primary focus:outline-none focus:ring-2 focus:ring-token-focus-border";
+  action?.appendChild(input);
+  action?.appendChild(
+    compactButton("Save", () => {
+      const port = Number(input.value);
+      void ipcRenderer
+        .invoke("codexpp:set-cdp-config", {
+          enabled: status.enabled,
+          port: Number.isInteger(port) ? port : status.configuredPort,
+        })
+        .then(() => refreshCdpCard(card))
+        .catch((e) => plog("CDP port save failed", String(e)));
+    }),
+  );
+  return row;
+}
+
+function cdpEndpointRow(status: CodexCdpStatus): HTMLElement {
+  const row = actionRow(
+    status.active ? "Local CDP endpoints" : "Local CDP endpoints",
+    status.active && status.jsonListUrl
+      ? `${status.jsonListUrl}`
+      : "Not exposed by the current Codex process.",
+  );
+  const action = row.querySelector<HTMLElement>("[data-codexpp-row-actions]");
+  const openTargets = compactButton("Open Targets", () => {
+    if (!status.jsonListUrl) return;
+    void ipcRenderer.invoke("codexpp:open-cdp-url", status.jsonListUrl);
+  });
+  openTargets.disabled = !status.jsonListUrl;
+  const copyTargets = compactButton("Copy URL", () => {
+    if (!status.jsonListUrl) return;
+    void ipcRenderer.invoke("codexpp:copy-text", status.jsonListUrl);
+  });
+  copyTargets.disabled = !status.jsonListUrl;
+  const openVersion = compactButton("Version", () => {
+    if (!status.jsonVersionUrl) return;
+    void ipcRenderer.invoke("codexpp:open-cdp-url", status.jsonVersionUrl);
+  });
+  openVersion.disabled = !status.jsonVersionUrl;
+  action?.append(openTargets, copyTargets, openVersion);
+  return row;
+}
+
+function cdpLaunchRow(status: CodexCdpStatus): HTMLElement {
+  const row = actionRow(
+    "Launch command",
+    status.appRoot ? status.appRoot : "Codex app path was not found in installer state.",
+  );
+  const action = row.querySelector<HTMLElement>("[data-codexpp-row-actions]");
+  action?.appendChild(
+    compactButton("Copy Command", () => {
+      void ipcRenderer.invoke("codexpp:copy-text", status.launchCommand);
+    }),
+  );
+  return row;
+}
+
+function refreshCdpCard(card: HTMLElement): void {
+  card.textContent = "";
+  card.appendChild(rowSimple("Checking CDP", "Reading Chrome DevTools Protocol status."));
+  renderCdpCard(card);
+}
+
+function cdpStatusBadge(status: CodexCdpStatus): HTMLElement {
+  if (status.active) return statusBadge(status.restartRequired ? "warn" : "ok", "Active");
+  if (status.restartRequired) return statusBadge("warn", "Restart");
+  return statusBadge(status.enabled ? "warn" : "warn", status.enabled ? "Saved" : "Off");
+}
+
+function cdpStatusSummary(status: CodexCdpStatus): string {
+  if (status.activePort) {
+    const source = status.source === "argv" ? "launch arg" : status.source;
+    return `Active on 127.0.0.1:${status.activePort} from ${source}.`;
+  }
+  if (status.enabled) {
+    return `Enabled for next launch on 127.0.0.1:${status.configuredPort}.`;
+  }
+  return "Disabled for Codex launches managed by Codex++.";
 }
 
 function renderReleaseNotesMarkdown(markdown: string): HTMLElement {

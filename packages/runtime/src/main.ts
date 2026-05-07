@@ -45,6 +45,11 @@ const SIGNED_CODEX_BACKUP = join(userRoot, "backup", "Codex.app");
 const CODEX_PLUSPLUS_VERSION = "0.1.3";
 const CODEX_PLUSPLUS_REPO = "b-nnett/codex-plusplus";
 const CODEX_WINDOW_SERVICES_KEY = "__codexpp_window_services__";
+const DEFAULT_CDP_STABLE_PORT = 9222;
+const DEFAULT_CDP_BETA_PORT = 9223;
+const CDP_PORT_MIN = 1;
+const CDP_PORT_MAX = 65535;
+const REMOTE_DEBUGGING_SWITCH = "remote-debugging-port";
 
 mkdirSync(LOG_DIR, { recursive: true });
 mkdirSync(TWEAKS_DIR, { recursive: true });
@@ -57,12 +62,12 @@ mkdirSync(TWEAKS_DIR, { recursive: true });
 // because it's a Chromium command-line switch processed before app init.
 //
 // Off by default. Set CODEXPP_REMOTE_DEBUG=1 (optionally CODEXPP_REMOTE_DEBUG_PORT)
-// to turn it on. Must be appended before `app` becomes ready; we're at module
-// top-level so that's fine.
-if (process.env.CODEXPP_REMOTE_DEBUG === "1") {
-  const port = process.env.CODEXPP_REMOTE_DEBUG_PORT ?? "9222";
-  app.commandLine.appendSwitch("remote-debugging-port", port);
-  log("info", `remote debugging enabled on port ${port}`);
+// or enable it from Codex++ Settings. Must be appended before `app` becomes
+// ready; we're at module top-level so that's fine.
+const startupCdp = resolveStartupCdpConfig();
+if (startupCdp.enabled && !hasRemoteDebuggingSwitch()) {
+  app.commandLine.appendSwitch(REMOTE_DEBUGGING_SWITCH, String(startupCdp.port));
+  log("info", `remote debugging enabled on port ${startupCdp.port} via ${startupCdp.source}`);
 }
 
 interface PersistedState {
@@ -70,11 +75,30 @@ interface PersistedState {
     autoUpdate?: boolean;
     safeMode?: boolean;
     updateCheck?: CodexPlusPlusUpdateCheck;
+    cdp?: CodexCdpConfig;
   };
   /** Per-tweak enable flags. Missing entries default to enabled. */
   tweaks?: Record<string, { enabled?: boolean }>;
   /** Cached GitHub release checks. Runtime never auto-installs updates. */
   tweakUpdateChecks?: Record<string, TweakUpdateCheck>;
+}
+
+interface CodexCdpConfig {
+  enabled?: boolean;
+  port?: number;
+}
+
+interface CodexCdpStatus {
+  enabled: boolean;
+  active: boolean;
+  configuredPort: number;
+  activePort: number | null;
+  restartRequired: boolean;
+  source: "argv" | "env" | "config" | "off";
+  jsonListUrl: string | null;
+  jsonVersionUrl: string | null;
+  launchCommand: string;
+  appRoot: string | null;
 }
 
 interface CodexPlusPlusUpdateCheck {
@@ -121,6 +145,15 @@ function setCodexPlusPlusAutoUpdate(enabled: boolean): void {
   s.codexPlusPlus.autoUpdate = enabled;
   writeState(s);
 }
+function setCodexCdpConfig(config: CodexCdpConfig): void {
+  const s = readState();
+  s.codexPlusPlus ??= {};
+  s.codexPlusPlus.cdp = {
+    enabled: config.enabled === true,
+    port: normalizeCdpPort(config.port),
+  };
+  writeState(s);
+}
 function isCodexPlusPlusSafeModeEnabled(): boolean {
   return readState().codexPlusPlus?.safeMode === true;
 }
@@ -147,6 +180,133 @@ function readInstallerState(): InstallerState | null {
   } catch {
     return null;
   }
+}
+
+function readEarlyCdpConfig(): CodexCdpConfig {
+  try {
+    const parsed = JSON.parse(readFileSync(CONFIG_FILE, "utf8")) as PersistedState;
+    return parsed.codexPlusPlus?.cdp ?? {};
+  } catch {
+    return {};
+  }
+}
+
+function resolveStartupCdpConfig(): { enabled: boolean; port: number; source: CodexCdpStatus["source"] } {
+  const argvPort = getActiveRemoteDebuggingPort();
+  if (argvPort !== null) {
+    return { enabled: true, port: argvPort, source: "argv" };
+  }
+
+  if (process.env.CODEXPP_REMOTE_DEBUG === "1") {
+    return {
+      enabled: true,
+      port: normalizeCdpPort(readNumber(process.env.CODEXPP_REMOTE_DEBUG_PORT)),
+      source: "env",
+    };
+  }
+
+  const cdp = readEarlyCdpConfig();
+  if (cdp.enabled === true) {
+    return {
+      enabled: true,
+      port: normalizeCdpPort(cdp.port),
+      source: "config",
+    };
+  }
+
+  return { enabled: false, port: normalizeCdpPort(cdp.port), source: "off" };
+}
+
+function hasRemoteDebuggingSwitch(): boolean {
+  try {
+    if (app.commandLine.hasSwitch(REMOTE_DEBUGGING_SWITCH)) return true;
+  } catch {}
+  return getActiveRemoteDebuggingPort() !== null;
+}
+
+function getActiveRemoteDebuggingPort(): number | null {
+  try {
+    const fromApp = app.commandLine.getSwitchValue(REMOTE_DEBUGGING_SWITCH);
+    const parsed = readNumber(fromApp);
+    if (isValidCdpPort(parsed)) return parsed;
+  } catch {}
+
+  for (let i = 0; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    if (arg.startsWith(`--${REMOTE_DEBUGGING_SWITCH}=`)) {
+      const parsed = readNumber(arg.slice(`--${REMOTE_DEBUGGING_SWITCH}=`.length));
+      if (isValidCdpPort(parsed)) return parsed;
+    }
+    if (arg === `--${REMOTE_DEBUGGING_SWITCH}`) {
+      const parsed = readNumber(process.argv[i + 1]);
+      if (isValidCdpPort(parsed)) return parsed;
+    }
+  }
+
+  return null;
+}
+
+function getCodexCdpStatus(): CodexCdpStatus {
+  const state = readState();
+  const configured = state.codexPlusPlus?.cdp ?? {};
+  const enabled = configured.enabled === true;
+  const configuredPort = normalizeCdpPort(configured.port);
+  const activePort = getActiveRemoteDebuggingPort();
+  const active = activePort !== null;
+  const startup = resolveStartupCdpConfig();
+  const urlPort = activePort ?? configuredPort;
+  const appRoot = readInstallerState()?.appRoot ?? null;
+
+  return {
+    enabled,
+    active,
+    configuredPort,
+    activePort,
+    restartRequired: enabled && activePort !== configuredPort,
+    source: active ? startup.source : enabled ? "config" : "off",
+    jsonListUrl: active ? cdpUrl(urlPort, "json/list") : null,
+    jsonVersionUrl: active ? cdpUrl(urlPort, "json/version") : null,
+    launchCommand: buildCdpLaunchCommand(appRoot, configuredPort),
+    appRoot,
+  };
+}
+
+function cdpUrl(port: number, path: string): string {
+  return `http://127.0.0.1:${port}/${path}`;
+}
+
+function buildCdpLaunchCommand(appRoot: string | null, port: number): string {
+  const appPath = appRoot ?? "/Applications/Codex.app";
+  return `open -na ${shellQuote(appPath)} --args --remote-debugging-port=${port}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function normalizeCdpPort(port: unknown): number {
+  const parsed = typeof port === "number" ? port : readNumber(String(port ?? ""));
+  return isValidCdpPort(parsed) ? parsed : defaultCdpPort();
+}
+
+function defaultCdpPort(): number {
+  const appRoot = readInstallerState()?.appRoot ?? "";
+  let appName = "";
+  try {
+    appName = app.getName();
+  } catch {}
+  return /\bbeta\b/i.test(`${appRoot} ${appName}`) ? DEFAULT_CDP_BETA_PORT : DEFAULT_CDP_STABLE_PORT;
+}
+
+function isValidCdpPort(port: number | null): port is number {
+  return port !== null && Number.isInteger(port) && port >= CDP_PORT_MIN && port <= CDP_PORT_MAX;
+}
+
+function readNumber(value: unknown): number | null {
+  if (typeof value === "number") return value;
+  if (typeof value !== "string" || value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function log(level: "info" | "warn" | "error", ...args: unknown[]): void {
@@ -463,6 +623,13 @@ ipcMain.handle("codexpp:set-auto-update", (_e, enabled: boolean) => {
   return { autoUpdate: isCodexPlusPlusAutoUpdateEnabled() };
 });
 
+ipcMain.handle("codexpp:get-cdp-status", () => getCodexCdpStatus());
+
+ipcMain.handle("codexpp:set-cdp-config", (_e, config: CodexCdpConfig) => {
+  setCodexCdpConfig(config);
+  return getCodexCdpStatus();
+});
+
 ipcMain.handle("codexpp:check-codexpp-update", async (_e, force?: boolean) => {
   return ensureCodexPlusPlusUpdateCheck(force === true);
 });
@@ -564,6 +731,18 @@ ipcMain.handle("codexpp:open-external", (_e, url: string) => {
   const parsed = new URL(url);
   if (parsed.protocol !== "https:" || parsed.hostname !== "github.com") {
     throw new Error("only github.com links can be opened from tweak metadata");
+  }
+  shell.openExternal(parsed.toString()).catch(() => {});
+});
+
+ipcMain.handle("codexpp:open-cdp-url", (_e, url: string) => {
+  const parsed = new URL(url);
+  const isLocalHttp =
+    parsed.protocol === "http:" &&
+    ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname) &&
+    (parsed.pathname === "/json/list" || parsed.pathname === "/json/version");
+  if (!isLocalHttp) {
+    throw new Error("only local CDP /json/list and /json/version URLs can be opened");
   }
   shell.openExternal(parsed.toString()).catch(() => {});
 });
