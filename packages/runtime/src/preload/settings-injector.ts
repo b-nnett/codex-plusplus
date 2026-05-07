@@ -418,6 +418,19 @@ function tryInject(): void {
     state.panelHost = null;
   }
 
+  const existingCodexPpNavGroup =
+    outer.querySelector<HTMLElement>(':scope > [data-codexpp="nav-group"]') ??
+    outer.querySelector<HTMLElement>('[data-codexpp="nav-group"]');
+
+  if (existingCodexPpNavGroup) {
+    state.navGroup = existingCodexPpNavGroup;
+    state.sidebarRoot = outer;
+    syncPagesGroup();
+    if (state.activePage !== null) syncCodexNativeNavActive(true);
+    return;
+  }
+
+
   // ── Group container ───────────────────────────────────────────────────
   const group = document.createElement("div");
   group.dataset.codexpp = "nav-group";
@@ -486,18 +499,106 @@ function scheduleSettingsSurfaceHidden(): void {
 }
 
 function isSettingsTextVisible(): boolean {
-  const text = compactSettingsText(document.body?.textContent || "").toLowerCase();
-  return (
-    text.includes("back to app") &&
-    text.includes("general") &&
-    text.includes("appearance") &&
-    (text.includes("configuration") || text.includes("default permissions"))
-  );
+  return isCodexPpSettingsLabelSet(codexPpSettingsLabelsFrom(document));
 }
 
 function compactSettingsText(value: string): string {
   return String(value || "").replace(/\s+/g, " ").trim();
 }
+
+const CODEXPP_CORE_SETTINGS_LABELS = [
+  "General",
+  "Appearance",
+  "Configuration",
+  "Personalization",
+].map(normalizeCodexPpSettingsLabel);
+
+const CODEXPP_EXTENDED_SETTINGS_LABELS = [
+  "Account",
+  "General",
+  "Appearance",
+  "Configuration",
+  "Personalization",
+  "Keyboard shortcuts",
+  "Archived chats",
+  "Usage",
+  "Computer use",
+  "Browser use",
+  "MCP servers",
+  "Git",
+  "Environments",
+  "Cloud Environments",
+  "Worktrees",
+  "Connections",
+  "Plugins",
+  "Skills",
+].map(normalizeCodexPpSettingsLabel);
+
+function normalizeCodexPpSettingsLabel(value: string): string {
+  return compactSettingsText(value)
+    .toLocaleLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[’‘`´]/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function codexPpControlLabel(el: HTMLElement): string {
+  return normalizeCodexPpSettingsLabel(
+    el.getAttribute("aria-label") ||
+      el.getAttribute("title") ||
+      el.textContent ||
+      "",
+  );
+}
+
+function codexPpSettingsLabelsFrom(root: ParentNode): string[] {
+  const controls = Array.from(
+    root.querySelectorAll<HTMLElement>("button,a,[role='button'],[role='link']"),
+  );
+
+  return [
+    ...new Set(
+      controls
+        .map(codexPpControlLabel)
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function codexPpSettingsLabelScore(labels: string[]): { core: number; total: number } {
+  const core = new Set<string>();
+  const total = new Set<string>();
+
+  for (const label of labels) {
+    for (const marker of CODEXPP_CORE_SETTINGS_LABELS) {
+      if (label === marker || label.includes(marker)) core.add(marker);
+    }
+
+    for (const marker of CODEXPP_EXTENDED_SETTINGS_LABELS) {
+      if (label === marker || label.includes(marker)) total.add(marker);
+    }
+  }
+
+  return { core: core.size, total: total.size };
+}
+
+function isCodexPpSettingsLabelSet(labels: string[]): boolean {
+  const score = codexPpSettingsLabelScore(labels);
+  return score.core >= 2 && score.total >= 3;
+}
+
+function codexPpVisibleBox(el: HTMLElement): DOMRect | null {
+  if (!el.isConnected) return null;
+  const style = getComputedStyle(el);
+  if (style.display === "none" || style.visibility === "hidden") return null;
+
+  const rect = el.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  return rect;
+}
+
 
 function setSettingsSurfaceVisible(visible: boolean, reason: string): void {
   if (state.settingsSurfaceVisible === visible) return;
@@ -2580,54 +2681,32 @@ async function resolveIconUrl(
 // ─────────────────────────────────────────────────────── DOM heuristics ──
 
 function findSidebarItemsGroup(): HTMLElement | null {
-  // Anchor strategy first (would be ideal if Codex switches to <a>).
-  const links = Array.from(
-    document.querySelectorAll<HTMLAnchorElement>("a[href*='/settings/']"),
+  const candidates = Array.from(
+    document.querySelectorAll<HTMLElement>("aside,nav,[role='navigation'],div"),
   );
-  if (links.length >= 2) {
-    let node: HTMLElement | null = links[0].parentElement;
-    while (node) {
-      const inside = node.querySelectorAll("a[href*='/settings/']");
-      if (
-        inside.length >= Math.max(2, links.length - 1) &&
-        isSettingsSidebarCandidate(node)
-      ) return node;
-      node = node.parentElement;
+
+  let best: HTMLElement | null = null;
+  let bestScore = -1;
+  let bestArea = Number.POSITIVE_INFINITY;
+
+  for (const candidate of candidates) {
+    if (candidate.dataset.codexpp) continue;
+    if (!isSettingsSidebarCandidate(candidate)) continue;
+
+    const labels = codexPpSettingsLabelsFrom(candidate);
+    const score = codexPpSettingsLabelScore(labels);
+    const rect = candidate.getBoundingClientRect();
+    const area = rect.width * rect.height;
+    const weighted = score.core * 100 + score.total;
+
+    if (weighted > bestScore || (weighted === bestScore && area < bestArea)) {
+      best = candidate;
+      bestScore = weighted;
+      bestArea = area;
     }
   }
 
-  // Text-content match against Codex's known sidebar labels.
-  const KNOWN = [
-    "General",
-    "Appearance",
-    "Configuration",
-    "Personalization",
-    "MCP servers",
-    "MCP Servers",
-    "Git",
-    "Environments",
-  ];
-  const matches: HTMLElement[] = [];
-  const all = document.querySelectorAll<HTMLElement>(
-    "button, a, [role='button'], li, div",
-  );
-  for (const el of Array.from(all)) {
-    if (isForbiddenSettingsSidebarSurface(el)) continue;
-    const t = (el.textContent ?? "").trim();
-    if (t.length > 30) continue;
-    if (KNOWN.some((k) => t === k)) matches.push(el);
-    if (matches.length > 50) break;
-  }
-  if (matches.length >= 2) {
-    let node: HTMLElement | null = matches[0].parentElement;
-    while (node) {
-      let count = 0;
-      for (const m of matches) if (node.contains(m)) count++;
-      if (count >= Math.min(3, matches.length) && isSettingsSidebarCandidate(node)) return node;
-      node = node.parentElement;
-    }
-  }
-  return null;
+  return best;
 }
 
 const FORBIDDEN_SETTINGS_SIDEBAR_SELECTOR = [
@@ -2648,17 +2727,16 @@ function isForbiddenSettingsSidebarSurface(node: Element | null): boolean {
   return false;
 }
 
-function isSettingsSidebarCandidate(node: HTMLElement): boolean {
-  if (isForbiddenSettingsSidebarSurface(node)) return false;
-  const root = node.parentElement ?? node;
-  if (isForbiddenSettingsSidebarSurface(root)) return false;
-  if (root.querySelector("a[href*='/settings/']")) return true;
-  const text = compactSettingsText(root.textContent ?? "");
-  return (
-    text.includes("Back to app") &&
-    text.includes("General") &&
-    text.includes("Appearance")
-  );
+function isSettingsSidebarCandidate(el: HTMLElement): boolean {
+  const rect = codexPpVisibleBox(el);
+  if (!rect) return false;
+
+  // Current Codex Settings sidebar: left column, not the main content panel.
+  if (rect.width < 120 || rect.width > 620) return false;
+  if (rect.height < 80) return false;
+  if (rect.left > window.innerWidth * 0.65) return false;
+
+  return isCodexPpSettingsLabelSet(codexPpSettingsLabelsFrom(el));
 }
 
 function removeMisplacedSettingsGroups(): void {
