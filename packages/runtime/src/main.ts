@@ -84,6 +84,7 @@ interface PersistedState {
   codexPlusPlus?: {
     autoUpdate?: boolean;
     safeMode?: boolean;
+    settingsInjector?: boolean;
     updateChannel?: SelfUpdateChannel;
     updateRepo?: string;
     updateRef?: string;
@@ -535,6 +536,7 @@ ipcMain.handle("codexpp:get-config", () => {
     version: CODEX_PLUSPLUS_VERSION,
     autoUpdate: s.codexPlusPlus?.autoUpdate !== false,
     safeMode: s.codexPlusPlus?.safeMode === true,
+    settingsInjector: s.codexPlusPlus?.settingsInjector !== false,
     updateChannel: s.codexPlusPlus?.updateChannel ?? "stable",
     updateRepo: s.codexPlusPlus?.updateRepo ?? CODEX_PLUSPLUS_REPO,
     updateRef: s.codexPlusPlus?.updateRef ?? "",

@@ -423,6 +423,8 @@ function preflightAppClosed(codex: CodexInstall): void {
 
   const exePath = codex.executable;
   const processName = basename(exePath, ".exe");
+  const managedStoreCopy =
+    /\\codex-plusplus\\store-apps\\/i.test(`${codex.appRoot.replace(/\//g, "\\")}\\`);
   try {
     const out = execFileSync(
       "powershell.exe",
@@ -434,9 +436,10 @@ function preflightAppClosed(codex: CodexInstall): void {
         [
           `$exe = '${escapePowerShellSingleQuotedString(exePath)}';`,
           `$name = '${escapePowerShellSingleQuotedString(processName)}';`,
+          `$managedStoreCopy = ${managedStoreCopy ? "$true" : "$false"};`,
           "$match = Get-Process -ErrorAction SilentlyContinue | Where-Object {",
           "$path = $null; try { $path = $_.Path } catch {}",
-          "($path -and $path -ieq $exe) -or ($_.ProcessName -ieq $name)",
+          "($path -and $path -ieq $exe) -or (-not $managedStoreCopy -and $_.ProcessName -ieq $name)",
           "} | Select-Object -First 1 Id, ProcessName, Path;",
           "if ($match) { $match | ConvertTo-Json -Compress }",
         ].join(" "),

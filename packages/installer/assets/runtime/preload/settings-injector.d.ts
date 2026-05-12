@@ -51,4 +51,5 @@ export declare function clearSections(): void;
 export declare function registerPage(tweakId: string, manifest: TweakManifest, page: SettingsPage): SettingsHandle;
 /** Called by the tweak host after fetching the tweak list from main. */
 export declare function setListedTweaks(list: ListedTweak[]): void;
+export declare function mountFloatingSettingsLauncher(): void;
 export {};

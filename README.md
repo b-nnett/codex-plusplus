@@ -175,6 +175,12 @@ See [`SECURITY.md`](./SECURITY.md) for the security model and reporting policy.
 Windows also keeps the managed patched Codex app mirror in
 `%LOCALAPPDATA%/codex-plusplus/store-apps/`.
 
+If a Codex release changes the Settings sidebar markup and Codex++'s injected
+settings entries interfere with native Settings, set
+`codexPlusPlus.settingsInjector` to `false` in `config.json`. Codex++ will skip
+the native Settings sidebar injection and show a small `++` launcher for its
+standalone Config/Tweaks panel instead.
+
 See [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md) for details.
 
 ## Contributors

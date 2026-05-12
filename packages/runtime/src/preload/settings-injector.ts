@@ -218,6 +218,14 @@ const state: InjectorState = {
   tweakStoreError: null,
 };
 
+let standaloneLauncher: HTMLButtonElement | null = null;
+let standaloneOverlay: HTMLElement | null = null;
+let standaloneNavRoot: HTMLElement | null = null;
+let standalonePanel: HTMLElement | null = null;
+let standaloneNavButtons: { config: HTMLButtonElement; tweaks: HTMLButtonElement; store: HTMLButtonElement } | null = null;
+let standalonePageButtons = new Map<string, HTMLButtonElement>();
+let standaloneKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+
 function plog(msg: string, extra?: unknown): void {
   ipcRenderer.send(
     "codexpp:preload-log",
@@ -309,13 +317,14 @@ export function clearSections(): void {
   }
   state.pages.clear();
   syncPagesGroup();
+  refreshStandaloneNav();
   // If we were on a registered page that no longer exists, fall back to
   // restoring Codex's view.
   if (
     state.activePage?.kind === "registered" &&
     !state.pages.has(state.activePage.id)
   ) {
-    restoreCodexView();
+    fallbackAfterRegisteredPageRemoved();
   } else if (state.activePage?.kind === "tweaks") {
     rerender();
   }
@@ -336,6 +345,7 @@ export function registerPage(
   state.pages.set(id, entry);
   plog("registerPage", { id, title: page.title, tweakId });
   syncPagesGroup();
+  refreshStandaloneNav();
   // If the user was already on this page (hot reload), re-mount its body.
   if (state.activePage?.kind === "registered" && state.activePage.id === id) {
     rerender();
@@ -349,8 +359,9 @@ export function registerPage(
       } catch {}
       state.pages.delete(id);
       syncPagesGroup();
+      refreshStandaloneNav();
       if (state.activePage?.kind === "registered" && state.activePage.id === id) {
-        restoreCodexView();
+        fallbackAfterRegisteredPageRemoved();
       }
     },
   };
@@ -360,6 +371,60 @@ export function registerPage(
 export function setListedTweaks(list: ListedTweak[]): void {
   state.listedTweaks = list;
   if (state.activePage?.kind === "tweaks") rerender();
+}
+
+export function mountFloatingSettingsLauncher(): void {
+  if (standaloneLauncher?.isConnected) return;
+
+  const mount = () => {
+    if (!document.body) return;
+    const existing = document.querySelector<HTMLButtonElement>(
+      "[data-codexpp-standalone-launcher='true']",
+    );
+    if (existing) {
+      standaloneLauncher = existing;
+      return;
+    }
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.dataset.codexppStandaloneLauncher = "true";
+    btn.title = "Codex++ Settings";
+    btn.textContent = "++";
+    btn.style.cssText = [
+      "position:fixed",
+      "right:16px",
+      "bottom:16px",
+      "z-index:2147483645",
+      "width:38px",
+      "height:38px",
+      "border-radius:10px",
+      "border:1px solid var(--color-token-border, rgba(127,127,127,0.35))",
+      "background:var(--color-token-main-surface-primary, rgba(24,24,24,0.92))",
+      "color:var(--color-token-text-primary, currentColor)",
+      "box-shadow:0 10px 28px rgba(0,0,0,0.28)",
+      "font:700 14px system-ui, sans-serif",
+      "letter-spacing:0",
+      "cursor:pointer",
+    ].join(";");
+    btn.addEventListener("mouseenter", () => {
+      btn.style.background = "var(--color-token-bg-fog, rgba(127,127,127,0.18))";
+    });
+    btn.addEventListener("mouseleave", () => {
+      btn.style.background = "var(--color-token-main-surface-primary, rgba(24,24,24,0.92))";
+    });
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openStandaloneSettingsPanel();
+    });
+    document.body.appendChild(btn);
+    standaloneLauncher = btn;
+    plog("standalone launcher mounted");
+  };
+
+  if (document.body) mount();
+  else document.addEventListener("DOMContentLoaded", mount, { once: true });
 }
 
 // ───────────────────────────────────────────────────────────── injection ──
@@ -688,11 +753,318 @@ function applyNavActive(btn: HTMLButtonElement, active: boolean): void {
     }
 }
 
+function openStandaloneSettingsPanel(page?: ActivePage): void {
+  if (!document.body) return;
+
+  if (!standaloneOverlay?.isConnected) {
+    const overlay = document.createElement("div");
+    overlay.dataset.codexppStandaloneOverlay = "true";
+    overlay.style.cssText = [
+      "position:fixed",
+      "inset:0",
+      "z-index:2147483646",
+      "display:flex",
+      "align-items:center",
+      "justify-content:center",
+      "padding:24px",
+      "background:rgba(0,0,0,0.38)",
+    ].join(";");
+
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-label", "Codex++ Settings");
+    dialog.className =
+      "bg-token-main-surface-primary text-token-text-primary border-token-border";
+    dialog.style.cssText = [
+      "display:flex",
+      "flex-direction:column",
+      "width:min(1000px, calc(100vw - 32px))",
+      "height:min(760px, calc(100vh - 32px))",
+      "overflow:hidden",
+      "border:1px solid var(--color-token-border, rgba(127,127,127,0.35))",
+      "border-radius:12px",
+      "background:var(--color-token-main-surface-primary, var(--color-background, #111))",
+      "color:var(--color-token-text-primary, inherit)",
+      "box-shadow:0 24px 80px rgba(0,0,0,0.45)",
+    ].join(";");
+    dialog.addEventListener("click", (e) => e.stopPropagation());
+    overlay.appendChild(dialog);
+
+    const chrome = document.createElement("div");
+    chrome.style.cssText = [
+      "display:flex",
+      "align-items:center",
+      "justify-content:space-between",
+      "gap:12px",
+      "min-height:52px",
+      "padding:0 16px",
+      "border-bottom:1px solid var(--color-token-border, rgba(127,127,127,0.22))",
+    ].join(";");
+    const title = document.createElement("div");
+    title.textContent = "Codex++";
+    title.style.cssText = "font:600 15px system-ui, sans-serif;letter-spacing:0;";
+    chrome.appendChild(title);
+    chrome.appendChild(standaloneChromeButton("Close", closeStandaloneSettingsPanel));
+    dialog.appendChild(chrome);
+
+    const body = document.createElement("div");
+    body.style.cssText = "display:flex;min-height:0;flex:1;";
+    dialog.appendChild(body);
+
+    const nav = document.createElement("nav");
+    nav.setAttribute("aria-label", "Codex++ Settings");
+    nav.style.cssText = [
+      "width:220px",
+      "flex:0 0 220px",
+      "overflow:auto",
+      "padding:12px",
+      "border-right:1px solid var(--color-token-border, rgba(127,127,127,0.22))",
+    ].join(";");
+    body.appendChild(nav);
+
+    const panel = document.createElement("main");
+    panel.dataset.codexpp = "standalone-panel";
+    panel.style.cssText = "min-width:0;min-height:0;flex:1;overflow:hidden;";
+    body.appendChild(panel);
+
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) closeStandaloneSettingsPanel();
+    });
+    standaloneKeyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeStandaloneSettingsPanel();
+    };
+    document.addEventListener("keydown", standaloneKeyHandler, true);
+
+    document.body.appendChild(overlay);
+    standaloneOverlay = overlay;
+    standaloneNavRoot = nav;
+    standalonePanel = panel;
+  }
+
+  setSettingsSurfaceVisible(true, "standalone-open");
+  refreshStandaloneNav();
+  activateStandalonePage(normalizeStandalonePage(page ?? state.activePage) ?? { kind: "tweaks" });
+}
+
+function closeStandaloneSettingsPanel(): void {
+  const panel = standalonePanel;
+  const active = state.activePage;
+  if (active?.kind === "registered") {
+    const entry = state.pages.get(active.id);
+    try {
+      entry?.teardown?.();
+    } catch (e) {
+      plog("standalone page teardown failed", { id: active.id, err: String(e) });
+    }
+    if (entry) entry.teardown = null;
+  }
+
+  standaloneOverlay?.remove();
+  standaloneOverlay = null;
+  standaloneNavRoot = null;
+  standalonePanel = null;
+  standaloneNavButtons = null;
+  standalonePageButtons = new Map();
+
+  if (standaloneKeyHandler) {
+    document.removeEventListener("keydown", standaloneKeyHandler, true);
+    standaloneKeyHandler = null;
+  }
+  if (panel && state.panelHost === panel) {
+    state.panelHost = null;
+    state.activePage = null;
+  }
+  setSettingsSurfaceVisible(false, "standalone-closed");
+}
+
+function activateStandalonePage(page: ActivePage): void {
+  if (!standalonePanel?.isConnected) {
+    openStandaloneSettingsPanel(page);
+    return;
+  }
+  const normalized = normalizeStandalonePage(page) ?? { kind: "tweaks" };
+  state.activePage = normalized;
+  state.panelHost = standalonePanel;
+  plog("standalone activate", { page: normalized });
+  rerender();
+  syncStandaloneNavActive();
+}
+
+function fallbackAfterRegisteredPageRemoved(): void {
+  if (standalonePanel?.isConnected) {
+    activateStandalonePage({ kind: "tweaks" });
+  } else {
+    restoreCodexView();
+  }
+}
+
+function normalizeStandalonePage(page: ActivePage | null | undefined): ActivePage | null {
+  if (!page) return null;
+  if (page.kind === "registered" && !state.pages.has(page.id)) return null;
+  return page;
+}
+
+function refreshStandaloneNav(): void {
+  const root = standaloneNavRoot;
+  if (!root?.isConnected) return;
+
+  root.textContent = "";
+  standalonePageButtons = new Map();
+
+  const builtins = document.createElement("div");
+  builtins.style.cssText = "display:flex;flex-direction:column;gap:3px;";
+  builtins.appendChild(standaloneNavHeader("Codex++"));
+
+  const configBtn = makeStandaloneNavButton("Config", configIconSvg(), () => {
+    activateStandalonePage({ kind: "config" });
+  });
+  const tweaksBtn = makeStandaloneNavButton("Tweaks", tweaksIconSvg(), () => {
+    activateStandalonePage({ kind: "tweaks" });
+  });
+  const storeBtn = makeStandaloneNavButton("Tweak Store", storeIconSvg(), () => {
+    activateStandalonePage({ kind: "store" });
+  });
+  builtins.append(configBtn, tweaksBtn, storeBtn);
+  root.appendChild(builtins);
+  standaloneNavButtons = { config: configBtn, tweaks: tweaksBtn, store: storeBtn };
+
+  const pages = [...state.pages.values()];
+  if (pages.length > 0) {
+    const pageGroup = document.createElement("div");
+    pageGroup.style.cssText = "display:flex;flex-direction:column;gap:3px;margin-top:14px;";
+    pageGroup.appendChild(standaloneNavHeader("Tweak Pages"));
+    for (const p of pages) {
+      const btn = makeStandaloneNavButton(
+        p.page.title,
+        p.page.iconSvg ?? defaultPageIconSvg(),
+        () => activateStandalonePage({ kind: "registered", id: p.id }),
+      );
+      standalonePageButtons.set(p.id, btn);
+      pageGroup.appendChild(btn);
+    }
+    root.appendChild(pageGroup);
+  }
+
+  syncStandaloneNavActive();
+}
+
+function standaloneNavHeader(text: string): HTMLElement {
+  const header = document.createElement("div");
+  header.textContent = text;
+  header.style.cssText = [
+    "padding:6px 10px 4px",
+    "font:600 11px system-ui, sans-serif",
+    "letter-spacing:0",
+    "text-transform:uppercase",
+    "color:var(--color-token-text-secondary, rgba(127,127,127,0.9))",
+  ].join(";");
+  return header;
+}
+
+function makeStandaloneNavButton(
+  label: string,
+  iconSvg: string,
+  onClick: () => void,
+): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.style.cssText = [
+    "width:100%",
+    "display:flex",
+    "align-items:center",
+    "gap:9px",
+    "border:0",
+    "border-radius:8px",
+    "background:transparent",
+    "color:var(--color-token-text-primary, inherit)",
+    "padding:8px 10px",
+    "text-align:left",
+    "font:400 13px system-ui, sans-serif",
+    "cursor:pointer",
+    "letter-spacing:0",
+  ].join(";");
+
+  const icon = document.createElement("span");
+  icon.style.cssText = "display:inline-flex;width:20px;height:20px;align-items:center;justify-content:center;flex:0 0 20px;";
+  icon.innerHTML = iconSvg;
+  btn.appendChild(icon);
+
+  const text = document.createElement("span");
+  text.textContent = label;
+  text.style.cssText = "min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;";
+  btn.appendChild(text);
+
+  btn.addEventListener("mouseenter", () => {
+    if (btn.dataset.active !== "true") {
+      btn.style.background = "var(--color-token-bg-fog, rgba(127,127,127,0.10))";
+    }
+  });
+  btn.addEventListener("mouseleave", () => {
+    if (btn.dataset.active !== "true") btn.style.background = "transparent";
+  });
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
+function standaloneChromeButton(label: string, onClick: () => void): HTMLButtonElement {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.textContent = label;
+  btn.style.cssText = [
+    "height:32px",
+    "border-radius:8px",
+    "border:1px solid var(--color-token-border, rgba(127,127,127,0.35))",
+    "background:transparent",
+    "color:var(--color-token-text-primary, inherit)",
+    "padding:0 10px",
+    "font:500 12px system-ui, sans-serif",
+    "cursor:pointer",
+    "letter-spacing:0",
+  ].join(";");
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
+function syncStandaloneNavActive(): void {
+  const active = state.activePage;
+  if (standaloneNavButtons) {
+    setStandaloneButtonActive(standaloneNavButtons.config, active?.kind === "config");
+    setStandaloneButtonActive(standaloneNavButtons.tweaks, active?.kind === "tweaks");
+    setStandaloneButtonActive(standaloneNavButtons.store, active?.kind === "store");
+  }
+  for (const [id, btn] of standalonePageButtons) {
+    setStandaloneButtonActive(
+      btn,
+      active?.kind === "registered" && active.id === id,
+    );
+  }
+}
+
+function setStandaloneButtonActive(btn: HTMLButtonElement, active: boolean): void {
+  btn.dataset.active = active ? "true" : "false";
+  btn.style.background = active
+    ? "var(--color-token-bg-fog, rgba(127,127,127,0.16))"
+    : "transparent";
+  btn.style.fontWeight = active ? "600" : "400";
+}
+
 // ─────────────────────────────────────────────────────────── activation ──
 
 function activatePage(page: ActivePage): void {
   const content = findContentArea();
   if (!content) {
+    if (standalonePanel?.isConnected) {
+      activateStandalonePage(page);
+      return;
+    }
     plog("activate: content area not found");
     return;
   }

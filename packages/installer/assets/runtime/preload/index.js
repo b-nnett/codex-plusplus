@@ -40,6 +40,7 @@ function safeStringify(v) {
     }
 }
 fileLog("preload entry", { url: location.href });
+let standaloneSettingsEnabled = false;
 // React hook must be installed *before* Codex's bundle runs.
 try {
     (0, react_hook_1.installReactHook)();
@@ -59,12 +60,23 @@ queueMicrotask(() => {
 async function boot() {
     fileLog("boot start", { readyState: document.readyState });
     try {
-        (0, settings_injector_1.startSettingsInjector)();
-        fileLog("settings injector started");
+        const config = await electron_1.ipcRenderer.invoke("codexpp:get-config").catch(() => null);
+        standaloneSettingsEnabled = config?.settingsInjector === false;
+        if (standaloneSettingsEnabled) {
+            fileLog("settings injector disabled by config");
+        }
+        else {
+            (0, settings_injector_1.startSettingsInjector)();
+            fileLog("settings injector started");
+        }
         await (0, tweak_host_1.startTweakHost)();
         fileLog("tweak host started");
         await (0, manager_1.mountManager)();
         fileLog("manager mounted");
+        if (standaloneSettingsEnabled) {
+            (0, settings_injector_1.mountFloatingSettingsLauncher)();
+            fileLog("standalone settings launcher mounted");
+        }
         subscribeReload();
         fileLog("boot complete");
     }
@@ -86,6 +98,8 @@ function subscribeReload() {
                 (0, tweak_host_1.teardownTweakHost)();
                 await (0, tweak_host_1.startTweakHost)();
                 await (0, manager_1.mountManager)();
+                if (standaloneSettingsEnabled)
+                    (0, settings_injector_1.mountFloatingSettingsLauncher)();
             }
             catch (e) {
                 console.error("[codex-plusplus] hot reload failed:", e);
