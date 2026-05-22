@@ -57,6 +57,25 @@ const state = {
 function plog(msg, extra) {
     electron_1.ipcRenderer.send("codexpp:preload-log", "info", `[settings-injector] ${msg}${extra === undefined ? "" : " " + safeStringify(extra)}`);
 }
+let pendingInject = false;
+let lastSidebarMissingLogAt = 0;
+function plogThrottled(msg, extra) {
+    const now = Date.now();
+    if (now - lastSidebarMissingLogAt < 5000)
+        return;
+    lastSidebarMissingLogAt = now;
+    plog(msg, extra);
+}
+function scheduleInject() {
+    if (pendingInject)
+        return;
+    pendingInject = true;
+    setTimeout(() => {
+        pendingInject = false;
+        tryInject();
+        maybeDumpDom();
+    }, 250);
+}
 function safeStringify(v) {
     try {
         return typeof v === "string" ? v : JSON.stringify(v);
@@ -70,8 +89,7 @@ function startSettingsInjector() {
     if (state.observer)
         return;
     const obs = new MutationObserver(() => {
-        tryInject();
-        maybeDumpDom();
+        scheduleInject();
     });
     obs.observe(document.documentElement, { childList: true, subtree: true });
     state.observer = obs;
@@ -194,7 +212,7 @@ function tryInject() {
     const itemsGroup = findSidebarItemsGroup();
     if (!itemsGroup) {
         scheduleSettingsSurfaceHidden();
-        plog("sidebar not found");
+        plogThrottled("sidebar not found");
         return;
     }
     if (state.settingsSurfaceHideTimer) {
