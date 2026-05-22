@@ -60,7 +60,6 @@ export function buildManagedMcpBlock(
     const baseName = mcpServerNameFromTweakId(tweak.manifest.id);
     if (manualNames.has(baseName)) {
       skippedServerNames.push(baseName);
-      continue;
     }
 
     const serverName = reserveUniqueName(baseName, usedNames);

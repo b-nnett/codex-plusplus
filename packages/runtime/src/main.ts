@@ -826,7 +826,7 @@ function syncMcpServersFromEnabledTweaks(): void {
     if (result.skippedServerNames.length > 0) {
       log(
         "info",
-        `skipped Codex++ managed MCP server(s) already configured by user: ${result.skippedServerNames.join(", ")}`,
+        `detected user-managed MCP server name collision(s): ${result.skippedServerNames.join(", ")} (Codex++ used suffixed names)`,
       );
     }
   } catch (e) {

@@ -39,12 +39,13 @@ test("buildManagedMcpBlock creates TOML entries and resolves local server script
     assert.equal(built.skippedServerNames.length, 0);
     assert.match(built.block, /\[mcp_servers\.native-widgets\]/);
     assert.match(built.block, /command = "node"/);
-    assert.match(built.block, new RegExp(`args = \\["${escapeRegExp(join(tweakDir, "mcp-server.js"))}"\\]`));
+    const expectedArgPath = JSON.stringify(join(tweakDir, "mcp-server.js"));
+    assert.match(built.block, new RegExp(`args = \\[${escapeRegExp(expectedArgPath)}\\]`));
     assert.match(built.block, /env = \{ WIDGETS = "1" \}/);
   });
 });
 
-test("buildManagedMcpBlock skips user-managed server names", () => {
+test("buildManagedMcpBlock keeps user-managed names and allocates a suffixed managed name", () => {
   withTempDir((root) => {
     const built = buildManagedMcpBlock(
       [
@@ -59,9 +60,34 @@ test("buildManagedMcpBlock skips user-managed server names", () => {
       `[mcp_servers.project-home]\ncommand = "node"\n`,
     );
 
-    assert.equal(built.block, "");
-    assert.deepEqual(built.serverNames, []);
+    assert.match(built.block, /\[mcp_servers\.project-home-2\]/);
+    assert.deepEqual(built.serverNames, ["project-home-2"]);
     assert.deepEqual(built.skippedServerNames, ["project-home"]);
+  });
+});
+
+test("buildManagedMcpBlock allows computer-use tweak to coexist with an existing computer-use server", () => {
+  withTempDir((root) => {
+    const tweakDir = join(root, "co.bennett.computer-use");
+    mkdirSync(tweakDir, { recursive: true });
+    writeFileSync(join(tweakDir, "computer-use-mcp.js"), "");
+
+    const built = buildManagedMcpBlock(
+      [
+        {
+          dir: tweakDir,
+          manifest: {
+            id: "co.bennett.computer-use",
+            mcp: { command: "node", args: ["./computer-use-mcp.js"] },
+          },
+        },
+      ],
+      `[mcp_servers.computer-use]\ncommand = "node"\n`,
+    );
+
+    assert.match(built.block, /\[mcp_servers\.computer-use-2\]/);
+    assert.deepEqual(built.serverNames, ["computer-use-2"]);
+    assert.deepEqual(built.skippedServerNames, ["computer-use"]);
   });
 });
 
