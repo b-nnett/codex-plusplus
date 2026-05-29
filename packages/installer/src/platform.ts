@@ -73,21 +73,57 @@ function locateMac(override?: string): CodexInstall {
     resourcesDir,
     asarPath: join(resourcesDir, "app.asar"),
     metaPath: join(appRoot, "Contents", "Info.plist"),
-    electronBinary: join(
-      appRoot,
-      "Contents",
-      "Frameworks",
-      "Electron Framework.framework",
-      "Versions",
-      "A",
-      "Electron Framework",
-    ),
+    electronBinary: resolveMacFrameworkBinary(appRoot),
     executable: join(appRoot, "Contents", "MacOS", info.executable),
     appName: info.name,
     bundleId: info.bundleId,
     channel: inferCodexChannel(info.bundleId, info.name),
     platform: "darwin",
   };
+}
+
+function resolveMacFrameworkBinary(appRoot: string): string {
+  const frameworksDir = join(appRoot, "Contents", "Frameworks");
+  const preferred = [
+    join(frameworksDir, "Electron Framework.framework", "Versions", "A", "Electron Framework"),
+    join(frameworksDir, "Electron Framework.framework", "Electron Framework"),
+    join(frameworksDir, "Codex Framework.framework", "Codex Framework"),
+    join(frameworksDir, "Codex Framework.framework", "Versions", "Current", "Codex Framework"),
+  ];
+  const foundPreferred = preferred.find((candidate) => existsSync(candidate));
+  if (foundPreferred) return foundPreferred;
+
+  if (existsSync(frameworksDir)) {
+    try {
+      for (const entry of readdirSync(frameworksDir)) {
+        if (!/^(Electron|Codex) Framework\.framework$/i.test(entry)) continue;
+        const framework = join(frameworksDir, entry);
+        const binaryName = entry.replace(/\.framework$/i, "");
+        const candidates = [
+          join(framework, binaryName),
+          join(framework, "Versions", "Current", binaryName),
+          join(framework, "Versions", "A", binaryName),
+          ...versionedFrameworkBinaries(framework, binaryName),
+        ];
+        const found = candidates.find((candidate) => existsSync(candidate));
+        if (found) return found;
+      }
+    } catch {}
+  }
+
+  return preferred[0];
+}
+
+function versionedFrameworkBinaries(framework: string, binaryName: string): string[] {
+  const versionsDir = join(framework, "Versions");
+  if (!existsSync(versionsDir)) return [];
+  try {
+    return readdirSync(versionsDir)
+      .filter((version) => version !== "Current")
+      .map((version) => join(versionsDir, version, binaryName));
+  } catch {
+    return [];
+  }
 }
 
 function findMacCodexApps(dir: string): string[] {

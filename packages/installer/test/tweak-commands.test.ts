@@ -15,6 +15,7 @@ import { buildCliFailureIssueUrl, buildPatchFailureIssueUrl, isMacAppManagementE
 import { findCodexMainCandidates } from "../src/commands/install";
 import { createTweak } from "../src/commands/create-tweak";
 import { devTweak } from "../src/commands/dev-tweak";
+import { shouldPromptToQuitBeforeRepair } from "../src/commands/repair";
 import { safeMode } from "../src/commands/safe-mode";
 import {
   ensureCliExecutable,
@@ -420,6 +421,17 @@ test("watcher runs self-update and app repair as separate steps", () => {
   assert.match(script, /update --watcher --quiet --no-repair/);
   assert.match(script, /repair --watcher --quiet/);
   assert.match(script, /update[\s\S]+\|\| true;[\s\S]+repair/);
+});
+
+test("watcher repair does not block on pre-patch quit prompt", () => {
+  assert.equal(shouldPromptToQuitBeforeRepair(true, {}, {}, "darwin"), true);
+  assert.equal(shouldPromptToQuitBeforeRepair(true, { watcher: true }, {}, "darwin"), false);
+  assert.equal(
+    shouldPromptToQuitBeforeRepair(true, {}, { CODEX_PLUSPLUS_WATCHER: "1" }, "darwin"),
+    false,
+  );
+  assert.equal(shouldPromptToQuitBeforeRepair(false, { watcher: true }, {}, "darwin"), false);
+  assert.equal(shouldPromptToQuitBeforeRepair(true, {}, {}, "linux"), false);
 });
 
 test("launchd watcher script clears stale log entries before each run", () => {

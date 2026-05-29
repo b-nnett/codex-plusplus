@@ -8,9 +8,22 @@
  */
 import asar from "@electron/asar";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync, mkdtempSync, rmSync, cpSync, existsSync, renameSync, unlinkSync } from "node:fs";
+import {
+  createReadStream,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  cpSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 export interface AsarHeaderInfo {
@@ -49,17 +62,14 @@ export async function patchAsar(
   const outAsar = join(work, "app.asar");
 
   // Snapshot which files were unpacked in the ORIGINAL asar before we touch
-  // anything; we'll feed that exact set back to createPackageWithOptions.
-  const originalUnpackGlob = collectUnpackGlob(asarPath);
+  // anything; we'll feed that exact set back during repack.
+  const originalUnpackedPaths = collectUnpackedPaths(asarPath);
 
   try {
     asar.extractAll(asarPath, extractDir);
     await mutate(extractDir);
 
-    await asar.createPackageWithOptions(extractDir, outAsar, {
-      globOptions: { dot: true },
-      ...(originalUnpackGlob ? { unpack: originalUnpackGlob } : {}),
-    });
+    await createPackagePreservingUnpacked(extractDir, outAsar, originalUnpackedPaths);
 
     // Atomic-ish replace: write next to the target, then rename. This prevents
     // a denied write (e.g. macOS App Management TCC) from leaving the bundle
@@ -77,6 +87,7 @@ export async function patchAsar(
       try { unlinkSync(stagingPath); } catch { /* best effort */ }
       throw annotatePermError(e, asarPath);
     }
+    asar.uncache(asarPath);
     return readHeaderHash(asarPath);
   } finally {
     await cleanupTempTree(work);
@@ -113,19 +124,88 @@ function isTransientCleanupError(error: unknown): boolean {
  * MODULE_NOT_FOUND when something requires the module — exactly the failure
  * mode we hit before this fix.
  */
-function collectUnpackGlob(asarPath: string): string | undefined {
+async function createPackagePreservingUnpacked(
+  extractDir: string,
+  outAsar: string,
+  unpackedPaths: Set<string>,
+): Promise<void> {
+  if (unpackedPaths.size === 0) {
+    await asar.createPackageWithOptions(extractDir, outAsar, {
+      globOptions: { dot: true },
+    });
+    return;
+  }
+
+  const streams = collectAsarStreams(extractDir, unpackedPaths);
+  await asar.createPackageFromStreams(outAsar, streams);
+}
+
+function collectAsarStreams(
+  root: string,
+  unpackedPaths: Set<string>,
+): Parameters<typeof asar.createPackageFromStreams>[1] {
+  const streams: Parameters<typeof asar.createPackageFromStreams>[1] = [];
+  collectAsarStreamsInto(root, root, unpackedPaths, streams);
+  return streams;
+}
+
+function collectAsarStreamsInto(
+  root: string,
+  current: string,
+  unpackedPaths: Set<string>,
+  streams: Parameters<typeof asar.createPackageFromStreams>[1],
+): void {
+  const entries = readdirSync(current).sort((a, b) => a.localeCompare(b));
+  for (const name of entries) {
+    const full = join(current, name);
+    const stat = lstatSync(full);
+    const archivePath = toArchivePath(root, full);
+    if (!archivePath) continue;
+
+    if (stat.isDirectory()) {
+      streams.push({ type: "directory", path: archivePath, unpacked: false });
+      collectAsarStreamsInto(root, full, unpackedPaths, streams);
+      continue;
+    }
+
+    const unpacked = unpackedPaths.has(archivePath);
+    if (stat.isSymbolicLink()) {
+      streams.push({
+        type: "link",
+        path: archivePath,
+        streamGenerator: () => createReadStream(full),
+        unpacked,
+        stat,
+        symlink: readlinkSync(full),
+      });
+      continue;
+    }
+
+    if (stat.isFile()) {
+      streams.push({
+        type: "file",
+        path: archivePath,
+        streamGenerator: () => createReadStream(full),
+        unpacked,
+        stat,
+      });
+    }
+  }
+}
+
+function toArchivePath(root: string, full: string): string {
+  return relative(root, full).split(sep).join("/");
+}
+
+function collectUnpackedPaths(asarPath: string): Set<string> {
   const sibling = `${asarPath}.unpacked`;
-  if (!existsSync(sibling)) return undefined;
+  if (!existsSync(sibling)) return new Set();
   const raw = (asar as unknown as {
     getRawHeader: (p: string) => { header: { files?: Record<string, unknown> } };
   }).getRawHeader(asarPath);
   const paths: string[] = [];
   walk(raw.header as Record<string, unknown>, "", paths);
-  if (paths.length === 0) return undefined;
-  // `unpack` is matched against absolute filenames, so prefix each archive path
-  // with `**` to match regardless of the temporary extraction directory.
-  const patterns = paths.map((p) => `**${p}`);
-  return patterns.length === 1 ? patterns[0] : `{${patterns.join(",")}}`;
+  return new Set(paths.map((path) => path.replace(/^\//, "")));
 }
 
 function walk(node: Record<string, unknown>, prefix: string, out: string[]): void {
