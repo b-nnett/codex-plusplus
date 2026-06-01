@@ -131,7 +131,15 @@ export async function repair(opts: Opts = {}): Promise<void> {
     const codex = locateCodex(opts.app ?? state?.appRoot);
     repairedAppRoot = codex.appRoot;
     codexWasRunning = isCodexRunning(codex.appRoot);
-    if (codexWasRunning && process.platform === "darwin" && promptRestartCodexToRepatch(codex.appRoot)) {
+    if (shouldPatchWhileCodexRuns({
+      codexWasRunning,
+      watcherRepair: isWatcherRepair(opts),
+      platform: process.platform,
+    })) {
+      if (!opts.quiet) {
+        console.log(kleur.yellow("Codex is running; patching the app on disk and prompting for restart after repair."));
+      }
+    } else if (codexWasRunning && process.platform === "darwin" && promptRestartCodexToRepatch(codex.appRoot)) {
       reopenAfterRepair = true;
       codexWasRunning = false;
     } else if (codexWasRunning && process.platform === "darwin") {
@@ -221,6 +229,14 @@ function settleOptions(opts: Opts, updateModeFile: string): SettleOptions {
 
 function isWatcherRepair(opts: Opts): boolean {
   return opts.watcher === true || process.env.CODEX_PLUSPLUS_WATCHER === "1";
+}
+
+export function shouldPatchWhileCodexRuns(opts: {
+  codexWasRunning: boolean;
+  watcherRepair: boolean;
+  platform: NodeJS.Platform;
+}): boolean {
+  return opts.codexWasRunning && opts.watcherRepair && opts.platform === "darwin";
 }
 
 async function waitForMacAppUpdateToSettle(appRoot: string | undefined, opts: SettleOptions = {}): Promise<void> {
