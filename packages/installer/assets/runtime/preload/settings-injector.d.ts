@@ -6,7 +6,8 @@
  * gap-1 gap-0">` wrapper that holds one or more `<div class="flex flex-col
  * gap-px">` groups of buttons. There are no stable `role` / `aria-label` /
  * `data-testid` hooks on the shell so we identify the sidebar by text-content
- * match against known item labels (General, Appearance, Configuration, …).
+ * match against known item labels (General, Appearance, Configuration, …)
+ * across Codex's supported UI languages.
  *
  * Layout we inject:
  *
