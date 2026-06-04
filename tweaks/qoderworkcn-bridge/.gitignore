@@ -1,0 +1,5 @@
+.codexpp-dev-reload
+node_modules/
+tmp/
+*.log
+codexbar-qoderworkcn-usage.jsonl

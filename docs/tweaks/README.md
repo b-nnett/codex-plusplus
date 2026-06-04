@@ -11,6 +11,7 @@ Segmented docs for building Codex++ tweaks.
 - [MCP servers](./mcp.md)
 - [TypeScript and bundling](./typescript-and-bundling.md)
 - [Distribution and debugging](./distribution-debugging.md)
+- [QoderWork CN Bridge tweak](./qoderworkcn-bridge.md)
 - [Owl runtime surface](../OWL-RUNTIME.md)
 - [Owl bridge roadmap](../OWL-BRIDGE-ROADMAP.md)
 

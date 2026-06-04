@@ -1,0 +1,15 @@
+{
+  "name": "qoderworkcn-responses-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local OpenAI Responses-compatible bridge for QoderWork CN CLI.",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

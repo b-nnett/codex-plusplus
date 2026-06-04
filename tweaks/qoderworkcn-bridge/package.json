@@ -1,0 +1,11 @@
+{
+  "name": "codex-plusplus-qoderworkcn-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "test": "node --test test/*.test.cjs bridge/test/*.test.mjs",
+    "validate": "codexplusplus validate-tweak .",
+    "smoke": "node bridge/scripts/smoke.mjs"
+  }
+}

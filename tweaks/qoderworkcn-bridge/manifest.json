@@ -1,0 +1,23 @@
+{
+  "id": "com.qoderworkcn.responses-bridge",
+  "name": "QoderWork CN Bridge",
+  "version": "0.1.0",
+  "githubRepo": "qoderworkcn/codex-plusplus-bridge",
+  "description": "Runs a local OpenAI Responses-compatible bridge for QoderWork CN qmodel/Qwen3.7-Max.",
+  "author": {
+    "name": "QoderWork CN local integration"
+  },
+  "tags": [
+    "models",
+    "responses",
+    "qoderworkcn",
+    "windows"
+  ],
+  "scope": "both",
+  "main": "index.js",
+  "permissions": [
+    "settings",
+    "filesystem",
+    "network"
+  ]
+}

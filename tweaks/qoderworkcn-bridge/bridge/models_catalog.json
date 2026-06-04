@@ -1,0 +1,46 @@
+{
+  "models": [
+    {
+      "slug": "qoderworkcn-codex",
+      "display_name": "QoderWork CN Qwen3.7-Max",
+      "description": "Local QoderWork CN bridge model using the qmodel lane, labeled Qwen3.7-Max by QoderWork CN.",
+      "default_reasoning_level": "low",
+      "supported_reasoning_levels": [
+        {
+          "effort": "low",
+          "description": "Fast local bridge mode"
+        }
+      ],
+      "shell_type": "shell_command",
+      "visibility": "list",
+      "supported_in_api": true,
+      "priority": 99,
+      "additional_speed_tiers": [],
+      "service_tiers": [],
+      "availability_nux": null,
+      "upgrade": null,
+      "base_instructions": "You are Codex, a coding agent. Answer directly in text unless a Codex tool is needed. When tools are available, follow the local QoderWork bridge tool-call envelope exactly.",
+      "context_window": 128000,
+      "max_context_window": 128000,
+      "auto_compact_token_limit": null,
+      "effective_context_window_percent": 95,
+      "input_modalities": [
+        "text"
+      ],
+      "supports_reasoning_summaries": false,
+      "default_reasoning_summary": "none",
+      "support_verbosity": false,
+      "default_verbosity": null,
+      "apply_patch_tool_type": null,
+      "web_search_tool_type": "text",
+      "truncation_policy": {
+        "mode": "bytes",
+        "limit": 10000
+      },
+      "supports_parallel_tool_calls": true,
+      "supports_image_detail_original": false,
+      "experimental_supported_tools": [],
+      "supports_search_tool": false
+    }
+  ]
+}
