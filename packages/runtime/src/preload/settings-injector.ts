@@ -34,6 +34,11 @@ import {
   type TweakStoreEntry,
   type TweakStorePublishSubmission,
 } from "../tweak-store";
+import {
+  selectInjectedSettingsGroupsToRemove,
+  type InjectedSettingsGroupCandidate,
+  type InjectedSettingsGroupKind,
+} from "./settings-sidebar-dedupe";
 
 const CODEX_PLUSPLUS_RELEASES_URL = "https://github.com/b-nnett/codex-plusplus/releases";
 
@@ -744,14 +749,27 @@ function syncPagesGroup(): void {
   const desiredKey = pages.length === 0
     ? "EMPTY"
     : pages.map((p) => `${p.id}|${p.page.title}|${p.page.iconSvg ?? ""}`).join("\n");
-  const groupAttached = !!state.pagesGroup && outer.contains(state.pagesGroup);
-  if (state.pagesGroupKey === desiredKey && (pages.length === 0 ? !groupAttached : groupAttached)) {
+  const previousPagesGroup = state.pagesGroup;
+  const attachedPagesGroup =
+    state.pagesGroup && outer.contains(state.pagesGroup)
+      ? state.pagesGroup
+      : findExistingPagesGroup(outer);
+  const adoptedPagesGroup = !!attachedPagesGroup && previousPagesGroup !== attachedPagesGroup;
+  if (adoptedPagesGroup) {
+    state.pagesGroup = attachedPagesGroup;
+  }
+  const groupAttached = !!attachedPagesGroup && outer.contains(attachedPagesGroup);
+  if (
+    !adoptedPagesGroup &&
+    state.pagesGroupKey === desiredKey &&
+    (pages.length === 0 ? !groupAttached : groupAttached)
+  ) {
     return;
   }
 
   if (pages.length === 0) {
-    if (state.pagesGroup) {
-      state.pagesGroup.remove();
+    if (attachedPagesGroup) {
+      attachedPagesGroup.remove();
       state.pagesGroup = null;
     }
     for (const p of state.pages.values()) p.navButton = null;
@@ -759,8 +777,8 @@ function syncPagesGroup(): void {
     return;
   }
 
-  let group = state.pagesGroup;
-  if (!group || !outer.contains(group)) {
+  let group = attachedPagesGroup;
+  if (!group) {
     group = document.createElement("div");
     group.dataset.codexpp = "pages-group";
     group.className = "flex flex-col gap-px";
@@ -791,6 +809,13 @@ function syncPagesGroup(): void {
   });
   // Reflect current active state across the rebuilt buttons.
   setNavActive(state.activePage);
+}
+
+function findExistingPagesGroup(outer: HTMLElement): HTMLElement | null {
+  return (
+    outer.querySelector<HTMLElement>(':scope > [data-codexpp="pages-group"]') ??
+    outer.querySelector<HTMLElement>('[data-codexpp="pages-group"]')
+  );
 }
 
 function makeSidebarItem(label: string, iconSvg: string): HTMLButtonElement {
@@ -3004,24 +3029,50 @@ function removeMisplacedSettingsGroups(): void {
   const groups = document.querySelectorAll<HTMLElement>(
     "[data-codexpp='nav-group'], [data-codexpp='pages-group'], [data-codexpp='native-nav-header']",
   );
-  for (const group of Array.from(groups)) {
-    if (isCodexPpInjectedSettingsGroupPlacementValid(group)) continue;
+  const groupsToRemove = selectInjectedSettingsGroupsToRemove(
+    Array.from(groups).map((group): InjectedSettingsGroupCandidate<HTMLElement> => {
+      const sidebar = codexPpInjectedSettingsGroupSidebar(group);
+      return {
+        group,
+        kind: codexPpInjectedSettingsGroupKind(group),
+        parent: sidebar,
+        validPlacement: sidebar !== null,
+        current: isCurrentCodexPpInjectedSettingsGroup(group),
+      };
+    }),
+  );
+
+  for (const group of groupsToRemove) {
     resetCodexPpInjectedSettingsGroupState(group);
     group.remove();
   }
 }
 
+function codexPpInjectedSettingsGroupKind(group: HTMLElement): InjectedSettingsGroupKind {
+  if (group.dataset.codexpp === "pages-group") return "pages-group";
+  if (group.dataset.codexpp === "native-nav-header") return "native-nav-header";
+  return "nav-group";
+}
+
+function isCurrentCodexPpInjectedSettingsGroup(group: HTMLElement): boolean {
+  return group === state.navGroup || group === state.pagesGroup || group === state.nativeNavHeader;
+}
+
 function isCodexPpInjectedSettingsGroupPlacementValid(group: HTMLElement): boolean {
-  if (isForbiddenSettingsSidebarSurface(group)) return false;
+  return codexPpInjectedSettingsGroupSidebar(group) !== null;
+}
+
+function codexPpInjectedSettingsGroupSidebar(group: HTMLElement): HTMLElement | null {
+  if (isForbiddenSettingsSidebarSurface(group)) return null;
 
   let node = group.parentElement;
   for (let depth = 0; node && depth < 4; depth++) {
-    if (isForbiddenSettingsSidebarSurface(node)) return false;
-    if (isSettingsSidebarCandidate(node)) return true;
+    if (isForbiddenSettingsSidebarSurface(node)) return null;
+    if (isSettingsSidebarCandidate(node)) return node;
     node = node.parentElement;
   }
 
-  return false;
+  return null;
 }
 
 function resetCodexPpInjectedSettingsGroupState(group: HTMLElement): void {
