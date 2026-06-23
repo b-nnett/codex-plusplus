@@ -30,6 +30,7 @@ exports.registerPage = registerPage;
 exports.setListedTweaks = setListedTweaks;
 const electron_1 = require("electron");
 const tweak_store_1 = require("../tweak-store");
+const settings_sidebar_dedupe_1 = require("./settings-sidebar-dedupe");
 const CODEX_PLUSPLUS_RELEASES_URL = "https://github.com/b-nnett/codex-plusplus/releases";
 const state = {
     sections: new Map(),
@@ -534,13 +535,23 @@ function syncPagesGroup() {
     const desiredKey = pages.length === 0
         ? "EMPTY"
         : pages.map((p) => `${p.id}|${p.page.title}|${p.page.iconSvg ?? ""}`).join("\n");
-    const groupAttached = !!state.pagesGroup && outer.contains(state.pagesGroup);
-    if (state.pagesGroupKey === desiredKey && (pages.length === 0 ? !groupAttached : groupAttached)) {
+    const previousPagesGroup = state.pagesGroup;
+    const attachedPagesGroup = state.pagesGroup && outer.contains(state.pagesGroup)
+        ? state.pagesGroup
+        : findExistingPagesGroup(outer);
+    const adoptedPagesGroup = !!attachedPagesGroup && previousPagesGroup !== attachedPagesGroup;
+    if (adoptedPagesGroup) {
+        state.pagesGroup = attachedPagesGroup;
+    }
+    const groupAttached = !!attachedPagesGroup && outer.contains(attachedPagesGroup);
+    if (!adoptedPagesGroup &&
+        state.pagesGroupKey === desiredKey &&
+        (pages.length === 0 ? !groupAttached : groupAttached)) {
         return;
     }
     if (pages.length === 0) {
-        if (state.pagesGroup) {
-            state.pagesGroup.remove();
+        if (attachedPagesGroup) {
+            attachedPagesGroup.remove();
             state.pagesGroup = null;
         }
         for (const p of state.pages.values())
@@ -548,8 +559,8 @@ function syncPagesGroup() {
         state.pagesGroupKey = desiredKey;
         return;
     }
-    let group = state.pagesGroup;
-    if (!group || !outer.contains(group)) {
+    let group = attachedPagesGroup;
+    if (!group) {
         group = document.createElement("div");
         group.dataset.codexpp = "pages-group";
         group.className = "flex flex-col gap-px";
@@ -581,6 +592,10 @@ function syncPagesGroup() {
     });
     // Reflect current active state across the rebuilt buttons.
     setNavActive(state.activePage);
+}
+function findExistingPagesGroup(outer) {
+    return (outer.querySelector(':scope > [data-codexpp="pages-group"]') ??
+        outer.querySelector('[data-codexpp="pages-group"]'));
 }
 function makeSidebarItem(label, iconSvg) {
     // Class string copied verbatim from Codex's sidebar buttons (General etc).
@@ -2592,25 +2607,46 @@ function isSettingsSidebarCandidate(el) {
 }
 function removeMisplacedSettingsGroups() {
     const groups = document.querySelectorAll("[data-codexpp='nav-group'], [data-codexpp='pages-group'], [data-codexpp='native-nav-header']");
-    for (const group of Array.from(groups)) {
-        if (isCodexPpInjectedSettingsGroupPlacementValid(group))
-            continue;
+    const groupsToRemove = (0, settings_sidebar_dedupe_1.selectInjectedSettingsGroupsToRemove)(Array.from(groups).map((group) => {
+        const sidebar = codexPpInjectedSettingsGroupSidebar(group);
+        return {
+            group,
+            kind: codexPpInjectedSettingsGroupKind(group),
+            parent: sidebar,
+            validPlacement: sidebar !== null,
+            current: isCurrentCodexPpInjectedSettingsGroup(group),
+        };
+    }));
+    for (const group of groupsToRemove) {
         resetCodexPpInjectedSettingsGroupState(group);
         group.remove();
     }
 }
+function codexPpInjectedSettingsGroupKind(group) {
+    if (group.dataset.codexpp === "pages-group")
+        return "pages-group";
+    if (group.dataset.codexpp === "native-nav-header")
+        return "native-nav-header";
+    return "nav-group";
+}
+function isCurrentCodexPpInjectedSettingsGroup(group) {
+    return group === state.navGroup || group === state.pagesGroup || group === state.nativeNavHeader;
+}
 function isCodexPpInjectedSettingsGroupPlacementValid(group) {
+    return codexPpInjectedSettingsGroupSidebar(group) !== null;
+}
+function codexPpInjectedSettingsGroupSidebar(group) {
     if (isForbiddenSettingsSidebarSurface(group))
-        return false;
+        return null;
     let node = group.parentElement;
     for (let depth = 0; node && depth < 4; depth++) {
         if (isForbiddenSettingsSidebarSurface(node))
-            return false;
+            return null;
         if (isSettingsSidebarCandidate(node))
-            return true;
+            return node;
         node = node.parentElement;
     }
-    return false;
+    return null;
 }
 function resetCodexPpInjectedSettingsGroupState(group) {
     if (state.navGroup === group || (state.navGroup && group.contains(state.navGroup))) {
