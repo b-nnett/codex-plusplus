@@ -10,7 +10,8 @@ import { setIntegrity, getIntegrity } from "../integrity.js";
 import { writeFuse } from "../fuses.js";
 import { adHocSign, clearQuarantine, signatureInfo } from "../codesign.js";
 import { readPlist } from "../plist.js";
-import { writeState } from "../state.js";
+import { readState, writeState } from "../state.js";
+import { prepareBackupSet } from "../backups.js";
 import { installWatcher, type WatcherKind } from "../watcher.js";
 import { CODEX_PLUSPLUS_VERSION } from "../version.js";
 import { installDefaultTweaks } from "../default-tweaks.js";
@@ -59,6 +60,13 @@ export async function install(opts: Opts = {}): Promise<void> {
   step(formatCliShimResult(installCliShims(paths.binDir)));
 
   // 1. Backup originals.
+  const backupRotated = prepareBackupSet({
+    appRoot: codex.appRoot,
+    asarPath: codex.asarPath,
+    backupDir: paths.backup,
+    previousState: readState(paths.stateFile),
+  });
+  if (backupRotated) step("Retired backup from previous Codex build");
   const pristineAppBackup = codex.platform === "darwin" ? join(paths.backup, "Codex.app") : null;
   const backupAsar = join(paths.backup, "app.asar");
   const backupAsarUnpacked = join(paths.backup, "app.asar.unpacked");

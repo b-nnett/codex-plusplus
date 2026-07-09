@@ -251,6 +251,20 @@ test("window services patch does not depend on Codex minified function names", (
   );
 });
 
+test("window services patch supports appBrand before buildFlavor", () => {
+  const source =
+    "let R=Une({appBrand:a.U(),buildFlavor:o,allowDevtools:g,allowDebugMenu:v,allowInspectElement:_,globalState:I.globalState,settingsStore:I.settingsStore,desktopRoot:I.desktopRoot,preloadPath:I.preloadPath,repoRoot:I.repoRoot,disposables:P}),trusted=e=>R.isTrustedIpcSender(e.sender);H6({buildFlavor:o,isTrustedIpcEvent:trusted})";
+
+  const patched = patchCodexWindowServicesSource(source);
+
+  assert.ok(patched);
+  assert.equal(patched.serviceVar, "R");
+  assert.match(
+    patched.source,
+    /;globalThis\.__codexpp_window_services__=R;H6\(\{buildFlavor:o/,
+  );
+});
+
 test("window services patch is idempotent when the marker is already present", () => {
   const source = `let M=FM({buildFlavor:a,allowDevtools:p,globalState:j.globalState,getGlobalStateForHost:j.getGlobalStateForHost,desktopRoot:j.desktopRoot,preloadPath:j.preloadPath,repoRoot:j.repoRoot,disposables:k});globalThis.${CODEX_WINDOW_SERVICES_KEY}=M;wD({buildFlavor:a})`;
 

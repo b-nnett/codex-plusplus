@@ -13,7 +13,8 @@ interface ServiceFactoryAssignment {
 }
 
 const IDENT_RE = /^[$A-Za-z_][$A-Za-z0-9_]*$/;
-const BUILD_FLAVOR_CALL_RE = /([$A-Za-z_][$A-Za-z0-9_]*)\(\{\s*buildFlavor\s*:/g;
+const BUILD_FLAVOR_CALL_RE =
+  /([$A-Za-z_][$A-Za-z0-9_]*)\(\{[^{}]*?\bbuildFlavor\s*:/g;
 const WINDOW_SERVICE_FINGERPRINTS = [
   "allowDevtools:",
   "allowDebugMenu:",
