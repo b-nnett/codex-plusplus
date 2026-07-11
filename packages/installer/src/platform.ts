@@ -306,6 +306,10 @@ function isWinCodexRoot(appRoot: string): boolean {
 
 function findWinExecutable(appRoot: string): string {
   try {
+    // Newer Microsoft Store builds ship a small Codex.exe helper alongside
+    // ChatGPT.exe, which is the actual Electron desktop application.
+    const chatGpt = join(appRoot, "ChatGPT.exe");
+    if (existsSync(chatGpt)) return chatGpt;
     const exe = readdirSync(appRoot).find((name) => /\.exe$/i.test(name) && /\bcodex\b/i.test(name));
     if (exe) return join(appRoot, exe);
   } catch {}

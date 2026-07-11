@@ -42,6 +42,24 @@ test("locateCodex reads beta bundle metadata from override path on macOS", { ski
   }
 });
 
+test("locateCodex prefers the Store desktop executable over the Codex helper on Windows", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "codexpp-platform-"));
+  try {
+    const app = join(root, "OpenAI.Codex", "app");
+    mkdirSync(join(app, "resources"), { recursive: true });
+    writeFileSync(join(app, "resources", "app.asar"), "");
+    writeFileSync(join(app, "ChatGPT.exe"), "desktop");
+    writeFileSync(join(app, "Codex.exe"), "helper");
+
+    const codex = locateCodex(app);
+    assert.equal(codex.executable, join(app, "ChatGPT.exe"));
+    assert.equal(codex.electronBinary, join(app, "ChatGPT.exe"));
+    assert.equal(codex.appName, "ChatGPT");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("resolveLinuxInstall supports am-will codex-app install directory", () => {
   const root = mkdtempSync(join(tmpdir(), "codexpp-platform-"));
   try {
