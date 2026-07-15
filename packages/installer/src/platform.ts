@@ -31,6 +31,7 @@ export interface CodexInstall {
 
 const MAC_DEFAULT = "/Applications/Codex.app";
 const MAC_BETA_DEFAULT = "/Applications/Codex (Beta).app";
+const MAC_CHATGPT_DEFAULT = "/Applications/ChatGPT.app";
 
 export function detectPlatform(): Platform {
   const p = platform();
@@ -50,8 +51,10 @@ function locateMac(override?: string): CodexInstall {
     override,
     MAC_DEFAULT,
     MAC_BETA_DEFAULT,
+    MAC_CHATGPT_DEFAULT,
     join(homedir(), "Applications", "Codex.app"),
     join(homedir(), "Applications", "Codex (Beta).app"),
+    join(homedir(), "Applications", "ChatGPT.app"),
     ...findMacCodexApps("/Applications"),
     ...findMacCodexApps(join(homedir(), "Applications")),
   ].filter(Boolean) as string[];
@@ -60,10 +63,10 @@ function locateMac(override?: string): CodexInstall {
   if (!appRoot) {
     throw new Error(
       `[!] Codex App Not Found\n\n` +
-        `Ensure Codex.app or Codex (Beta).app is installed in /Applications or ~/Applications.\n` +
+        `Ensure ChatGPT.app, Codex.app, or Codex (Beta).app is installed in /Applications or ~/Applications.\n` +
         `Tried:\n  ${unique(candidates).join("\n  ")}\n\n` +
         `If Codex is somewhere else, rerun with:\n` +
-        `  codex-plusplus install --app /path/to/Codex.app`,
+        `  codex-plusplus install --app /path/to/ChatGPT.app`,
     );
   }
   const info = readMacAppInfo(appRoot);
@@ -90,11 +93,11 @@ function locateMac(override?: string): CodexInstall {
   };
 }
 
-function findMacCodexApps(dir: string): string[] {
+export function findMacCodexApps(dir: string): string[] {
   if (!existsSync(dir)) return [];
   try {
     return readdirSync(dir)
-      .filter((name) => /\.app$/i.test(name) && /\bcodex\b/i.test(name))
+      .filter((name) => /\.app$/i.test(name) && /\b(?:codex|chatgpt)\b/i.test(name))
       .map((name) => join(dir, name));
   } catch {
     return [];

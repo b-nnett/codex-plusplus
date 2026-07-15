@@ -3,12 +3,29 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { inferCodexChannel, locateCodex, resolveLinuxInstall } from "../src/platform";
+import { findMacCodexApps, inferCodexChannel, locateCodex, resolveLinuxInstall } from "../src/platform";
 
 test("inferCodexChannel detects stable and beta metadata", () => {
   assert.equal(inferCodexChannel("com.openai.codex", "Codex"), "stable");
+  assert.equal(inferCodexChannel("com.openai.codex", "ChatGPT"), "stable");
   assert.equal(inferCodexChannel("com.openai.codex.beta", "Codex (Beta)"), "beta");
   assert.equal(inferCodexChannel(null, "Codex (Beta)"), "beta");
+});
+
+test("findMacCodexApps discovers Codex and ChatGPT app names", { skip: process.platform !== "darwin" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "codexpp-platform-"));
+  try {
+    for (const name of ["Codex.app", "ChatGPT.app", "Other.app", "ChatGPT.txt"]) {
+      mkdirSync(join(root, name));
+    }
+
+    assert.deepEqual(
+      findMacCodexApps(root).sort(),
+      [join(root, "ChatGPT.app"), join(root, "Codex.app")].sort(),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("locateCodex reads beta bundle metadata from override path on macOS", { skip: process.platform !== "darwin" }, () => {
