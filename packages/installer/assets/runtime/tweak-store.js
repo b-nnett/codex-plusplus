@@ -6,12 +6,14 @@ exports.normalizeStoreRegistry = normalizeStoreRegistry;
 exports.shuffleStoreEntries = shuffleStoreEntries;
 exports.normalizeStoreEntry = normalizeStoreEntry;
 exports.storeArchiveUrl = storeArchiveUrl;
+exports.isStoreUpdateAvailable = isStoreUpdateAvailable;
 exports.buildTweakPublishIssueUrl = buildTweakPublishIssueUrl;
 exports.isFullCommitSha = isFullCommitSha;
 exports.DEFAULT_TWEAK_STORE_INDEX_URL = "https://b-nnett.github.io/codex-plusplus/store/index.json";
 exports.TWEAK_STORE_REVIEW_ISSUE_URL = "https://github.com/b-nnett/codex-plusplus/issues/new";
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const FULL_SHA_RE = /^[a-f0-9]{40}$/i;
+const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/i;
 function normalizeGitHubRepo(input) {
     const raw = input.trim();
     if (!raw)
@@ -86,6 +88,18 @@ function storeArchiveUrl(entry) {
         throw new Error(`Store entry ${entry.id} is not pinned to a full commit SHA`);
     }
     return `https://codeload.github.com/${entry.repo}/tar.gz/${entry.approvedCommitSha}`;
+}
+function isStoreUpdateAvailable(installedVersion, approvedVersion) {
+    const installed = VERSION_RE.exec(installedVersion.trim());
+    const approved = VERSION_RE.exec(approvedVersion.trim());
+    if (!installed || !approved)
+        return false;
+    for (let i = 1; i <= 3; i++) {
+        const diff = Number(approved[i]) - Number(installed[i]);
+        if (diff !== 0)
+            return diff > 0;
+    }
+    return false;
 }
 function buildTweakPublishIssueUrl(submission) {
     const repo = normalizeGitHubRepo(submission.repo);

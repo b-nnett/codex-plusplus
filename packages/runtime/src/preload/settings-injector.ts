@@ -31,6 +31,7 @@ import type {
 } from "@codex-plusplus/sdk";
 import {
   buildTweakPublishIssueUrl,
+  isStoreUpdateAvailable,
   type TweakStoreEntry,
   type TweakStorePublishSubmission,
 } from "../tweak-store";
@@ -193,6 +194,7 @@ interface InjectorState {
   sidebarRestoreHandler: ((e: Event) => void) | null;
   settingsSurfaceVisible: boolean;
   settingsSurfaceHideTimer: ReturnType<typeof setTimeout> | null;
+  sidebarMissingLogged: boolean;
   tweakStore: TweakStoreRegistryView | null;
   tweakStorePromise: Promise<TweakStoreRegistryView> | null;
   tweakStoreError: unknown;
@@ -218,6 +220,7 @@ const state: InjectorState = {
   sidebarRestoreHandler: null,
   settingsSurfaceVisible: false,
   settingsSurfaceHideTimer: null,
+  sidebarMissingLogged: false,
   tweakStore: null,
   tweakStorePromise: null,
   tweakStoreError: null,
@@ -375,9 +378,13 @@ function tryInject(): void {
   const itemsGroup = findSidebarItemsGroup();
   if (!itemsGroup) {
     scheduleSettingsSurfaceHidden();
-    plog("sidebar not found");
+    if (!state.sidebarMissingLogged) {
+      state.sidebarMissingLogged = true;
+      plog("sidebar not found");
+    }
     return;
   }
+  state.sidebarMissingLogged = false;
   if (state.settingsSurfaceHideTimer) {
     clearTimeout(state.settingsSurfaceHideTimer);
     state.settingsSurfaceHideTimer = null;
@@ -1750,7 +1757,7 @@ function tweakStoreCard(entry: TweakStoreEntryView): HTMLElement {
       }),
     );
   }
-  const hasUpdate = !!entry.installed && entry.installed.version !== entry.manifest.version;
+  const hasUpdate = !!entry.installed && isStoreUpdateAvailable(entry.installed.version, entry.manifest.version);
   if (entry.installed && !hasUpdate) {
     actions.appendChild(storeStatusPill("Installed"));
   } else if (entry.platform && !entry.platform.compatible) {
@@ -2082,7 +2089,9 @@ function currentStoreUpdateBadgeCount(): number {
 }
 
 function outdatedInstalledStoreCount(entries: TweakStoreEntryView[]): number {
-  return entries.filter((entry) => !!entry.installed && entry.installed.version !== entry.manifest.version).length;
+  return entries.filter(
+    (entry) => !!entry.installed && isStoreUpdateAvailable(entry.installed.version, entry.manifest.version),
+  ).length;
 }
 
 function storeToolbarButton(
@@ -2150,15 +2159,18 @@ function verifiedSafeBadge(): HTMLElement {
 function tweakStoreVersionBadge(entry: TweakStoreEntryView, installedOverride?: string): HTMLElement {
   const installed = installedOverride ?? entry.installed?.version ?? null;
   const latest = entry.manifest.version;
-  const hasUpdate = !!installed && installed !== latest;
+  const hasUpdate = !!installed && isStoreUpdateAvailable(installed, latest);
+  const installedAhead = !!installed && isStoreUpdateAvailable(latest, installed);
   const badge = storeVersionBadgeShell(hasUpdate);
   const label = document.createElement("span");
   label.className = "truncate";
   label.textContent = installed
-    ? `Installed v${installed} · Latest v${latest}`
+    ? installedAhead
+      ? `Installed v${installed} · Approved v${latest}`
+      : `Installed v${installed} · Latest v${latest}`
     : `Latest v${latest}`;
   badge.title = installed
-    ? `Installed version ${installed}. Latest approved version ${latest}.`
+    ? `Installed version ${installed}. ${installedAhead ? "Store-approved" : "Latest approved"} version ${latest}.`
     : `Latest approved version ${latest}.`;
   badge.appendChild(label);
   return badge;

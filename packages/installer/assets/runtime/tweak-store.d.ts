@@ -36,5 +36,6 @@ export declare function normalizeStoreRegistry(input: unknown): TweakStoreRegist
 export declare function shuffleStoreEntries<T>(entries: readonly T[], randomIndex?: (exclusiveMax: number) => number): T[];
 export declare function normalizeStoreEntry(input: unknown): TweakStoreEntry;
 export declare function storeArchiveUrl(entry: TweakStoreEntry): string;
+export declare function isStoreUpdateAvailable(installedVersion: string, approvedVersion: string): boolean;
 export declare function buildTweakPublishIssueUrl(submission: TweakStorePublishSubmission): string;
 export declare function isFullCommitSha(value: string): boolean;

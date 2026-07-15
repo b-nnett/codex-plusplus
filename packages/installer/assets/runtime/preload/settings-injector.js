@@ -51,6 +51,7 @@ const state = {
     sidebarRestoreHandler: null,
     settingsSurfaceVisible: false,
     settingsSurfaceHideTimer: null,
+    sidebarMissingLogged: false,
     tweakStore: null,
     tweakStorePromise: null,
     tweakStoreError: null,
@@ -195,9 +196,13 @@ function tryInject() {
     const itemsGroup = findSidebarItemsGroup();
     if (!itemsGroup) {
         scheduleSettingsSurfaceHidden();
-        plog("sidebar not found");
+        if (!state.sidebarMissingLogged) {
+            state.sidebarMissingLogged = true;
+            plog("sidebar not found");
+        }
         return;
     }
+    state.sidebarMissingLogged = false;
     if (state.settingsSurfaceHideTimer) {
         clearTimeout(state.settingsSurfaceHideTimer);
         state.settingsSurfaceHideTimer = null;
@@ -1487,7 +1492,7 @@ function tweakStoreCard(entry) {
             void electron_1.ipcRenderer.invoke("codexpp:open-external", entry.releaseUrl);
         }));
     }
-    const hasUpdate = !!entry.installed && entry.installed.version !== entry.manifest.version;
+    const hasUpdate = !!entry.installed && (0, tweak_store_1.isStoreUpdateAvailable)(entry.installed.version, entry.manifest.version);
     if (entry.installed && !hasUpdate) {
         actions.appendChild(storeStatusPill("Installed"));
     }
@@ -1798,7 +1803,7 @@ function currentStoreUpdateBadgeCount() {
     return Number.isFinite(parsed) ? parsed : 0;
 }
 function outdatedInstalledStoreCount(entries) {
-    return entries.filter((entry) => !!entry.installed && entry.installed.version !== entry.manifest.version).length;
+    return entries.filter((entry) => !!entry.installed && (0, tweak_store_1.isStoreUpdateAvailable)(entry.installed.version, entry.manifest.version)).length;
 }
 function storeToolbarButton(label, onClick, variant = "secondary") {
     const btn = document.createElement("button");
@@ -1851,15 +1856,18 @@ function verifiedSafeBadge() {
 function tweakStoreVersionBadge(entry, installedOverride) {
     const installed = installedOverride ?? entry.installed?.version ?? null;
     const latest = entry.manifest.version;
-    const hasUpdate = !!installed && installed !== latest;
+    const hasUpdate = !!installed && (0, tweak_store_1.isStoreUpdateAvailable)(installed, latest);
+    const installedAhead = !!installed && (0, tweak_store_1.isStoreUpdateAvailable)(latest, installed);
     const badge = storeVersionBadgeShell(hasUpdate);
     const label = document.createElement("span");
     label.className = "truncate";
     label.textContent = installed
-        ? `Installed v${installed} · Latest v${latest}`
+        ? installedAhead
+            ? `Installed v${installed} · Approved v${latest}`
+            : `Installed v${installed} · Latest v${latest}`
         : `Latest v${latest}`;
     badge.title = installed
-        ? `Installed version ${installed}. Latest approved version ${latest}.`
+        ? `Installed version ${installed}. ${installedAhead ? "Store-approved" : "Latest approved"} version ${latest}.`
         : `Latest approved version ${latest}.`;
     badge.appendChild(label);
     return badge;
