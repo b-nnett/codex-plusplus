@@ -41,6 +41,7 @@ export interface TweakStorePublishSubmission {
 
 const GITHUB_REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const FULL_SHA_RE = /^[a-f0-9]{40}$/i;
+const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/i;
 
 export function normalizeGitHubRepo(input: string): string {
   const raw = input.trim();
@@ -121,6 +122,17 @@ export function storeArchiveUrl(entry: TweakStoreEntry): string {
     throw new Error(`Store entry ${entry.id} is not pinned to a full commit SHA`);
   }
   return `https://codeload.github.com/${entry.repo}/tar.gz/${entry.approvedCommitSha}`;
+}
+
+export function isStoreUpdateAvailable(installedVersion: string, approvedVersion: string): boolean {
+  const installed = VERSION_RE.exec(installedVersion.trim());
+  const approved = VERSION_RE.exec(approvedVersion.trim());
+  if (!installed || !approved) return false;
+  for (let i = 1; i <= 3; i++) {
+    const diff = Number(approved[i]) - Number(installed[i]);
+    if (diff !== 0) return diff > 0;
+  }
+  return false;
 }
 
 export function buildTweakPublishIssueUrl(submission: TweakStorePublishSubmission): string {

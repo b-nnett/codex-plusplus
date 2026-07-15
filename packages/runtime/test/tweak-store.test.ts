@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildTweakPublishIssueUrl,
+  isStoreUpdateAvailable,
   normalizeGitHubRepo,
   normalizeStoreRegistry,
   shuffleStoreEntries,
@@ -46,6 +47,14 @@ test("storeArchiveUrl installs from the approved commit archive", () => {
     storeArchiveUrl(entry),
     `https://codeload.github.com/example/good/tar.gz/${entry.approvedCommitSha}`,
   );
+});
+
+test("store updates only move installed tweaks to a newer approved version", () => {
+  assert.equal(isStoreUpdateAvailable("1.0.0", "1.3.0"), true);
+  assert.equal(isStoreUpdateAvailable("1.3.0", "1.3.0"), false);
+  assert.equal(isStoreUpdateAvailable("1.3.0", "1.0.0"), false);
+  assert.equal(isStoreUpdateAvailable("v1.2.9", "1.3.0"), true);
+  assert.equal(isStoreUpdateAvailable("local", "1.3.0"), false);
 });
 
 test("shuffleStoreEntries randomizes presentation order without mutating the registry", () => {
