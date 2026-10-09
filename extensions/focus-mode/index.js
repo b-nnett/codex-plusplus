@@ -12,12 +12,14 @@ const dwellClass = 'codexpp-focus-mode-dwell';
 const edgeDwellMs = 250;
 const edgeWidth = 8;
 const windowControlsDelayMs = 250;
+const shellLossGraceMs = 400;
 let restoreSidebarOnExit = false;
 let closingSidebar = false;
 let closeSidebarTimer = null;
 let peekTimer = null;
 let windowControlsTimer = null;
 let heartbeat = null;
+let shellLossTimer = null;
 let generation = 0;
 let pointerX = null;
 let pointerY = null;
@@ -92,6 +94,30 @@ function clearControlsTimer() {
   if (windowControlsTimer !== null) window.clearTimeout(windowControlsTimer);
   windowControlsTimer = null;
 }
+function clearShellLossTimer() {
+  if (shellLossTimer !== null) window.clearTimeout(shellLossTimer);
+  shellLossTimer = null;
+}
+function currentShell() {
+  const current = shell.snapshot();
+  if (current) clearShellLossTimer();
+  else if (isFocused() && shellLossTimer === null) {
+    // React can briefly unmount/swap a surface during native navigation. Never
+    // guess at a replacement: revalidate the owned contract after a short grace.
+    const epoch = generation;
+    shellLossTimer = window.setTimeout(() => {
+      shellLossTimer = null;
+      if (epoch !== generation || !isFocused()) return;
+      const recovered = shell.snapshot();
+      if (recovered) reconcileShell(recovered);
+      else {
+        api.log('Focus Mode exited: the shell contract remained unavailable.');
+        exitFocusMode({immediateWindowControls: true});
+      }
+    }, shellLossGraceMs);
+  }
+  return current;
+}
 function publishControls(hidden, epoch = generation) {
   return shell.windowControls(hidden).catch(error => {
     api.log(String(error));
@@ -114,6 +140,7 @@ function enterFocusMode() {
   const current = shell.snapshot();
   if (isFocused() || !current) return;
   generation++;
+  pointerX = pointerY = null;
   restoreSidebarOnExit = current.sidebarOpen;
   closingSidebar = current.sidebarOpen;
   try { shell.setSidebarOpen(false); }
@@ -128,8 +155,10 @@ function enterFocusMode() {
   clearControlsTimer();
   void publishControls(true); // Immediate native hide; no delayed entry.
   heartbeat = window.setInterval(() => {
-    const latest = shell.snapshot();
-    if (!latest) { exitFocusMode({immediateWindowControls: true}); return; }
+    const latest = currentShell();
+    if (!latest) return;
+    reconcileShell(latest);
+    if (!isFocused()) return;
     root().style.setProperty('--codexpp-focus-rail-width', latest.railWidth);
     void publishControls(true);
   }, 1000);
@@ -142,6 +171,7 @@ function exitFocusMode({keepNativeSidebar = false, immediateWindowControls = fal
   generation++;
   clearPeekTimer();
   clearControlsTimer();
+  clearShellLossTimer();
   if (heartbeat !== null) window.clearInterval(heartbeat);
   heartbeat = null;
   if (closeSidebarTimer !== null) window.clearTimeout(closeSidebarTimer);
@@ -162,20 +192,23 @@ function exitFocusMode({keepNativeSidebar = false, immediateWindowControls = fal
 }
 function handlePointerMove(event) {
   if (!isFocused()) return;
+  if (event.pointerType === 'touch' || event.buttons > 0) {
+    clearPeekTimer();
+    return;
+  }
   pointerX = event.clientX;
   pointerY = event.clientY;
   if (root().classList.contains(dwellClass)) { closeDwellWhenFinished(); return; }
   if (event.clientX >= 0 && event.clientX <= edgeWidth) {
+    const epoch = generation;
     if (peekTimer === null) peekTimer = window.setTimeout(() => {
       peekTimer = null;
-      if (shell.snapshot()) setDwellMode(true);
+      if (epoch === generation && isFocused() && pointerX >= 0 && pointerX <= edgeWidth && currentShell())
+        setDwellMode(true);
     }, edgeDwellMs);
   } else clearPeekTimer();
 }
-const observer = new MutationObserver(() => {
-  if (!isFocused()) return;
-  const current = shell.snapshot();
-  if (!current) { exitFocusMode({immediateWindowControls: true}); return; }
+function reconcileShell(current) {
   if (closingSidebar && !current.sidebarOpen) {
     closingSidebar = false;
     window.clearTimeout(closeSidebarTimer);
@@ -183,6 +216,17 @@ const observer = new MutationObserver(() => {
   }
   if (!closingSidebar && current.sidebarOpen) exitFocusMode({keepNativeSidebar: true});
   else if (root().classList.contains(dwellClass)) closeDwellWhenFinished();
+}
+const roleSelector = '[data-codexpp-shell-role]';
+const observer = new MutationObserver(records => {
+  if (!isFocused()) return;
+  // Streaming chat text and unrelated widget updates are not shell changes.
+  const changed = records.some(record => record.type === 'attributes' ||
+    [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 &&
+      (node.matches(roleSelector) || node.querySelector(roleSelector))));
+  if (!changed) return;
+  const current = currentShell();
+  if (current) reconcileShell(current);
 });
 observer.observe(root(), {subtree: true, childList: true, attributes: true,
   attributeFilter: ['data-codexpp-shell-sidebar-open', 'data-codexpp-shell-peeking', 'data-codexpp-shell-role']});
@@ -197,13 +241,16 @@ api.on(window, 'keydown', event => {
   if (isFocused()) exitFocusMode(); else enterFocusMode();
 }, true);
 api.on(document, 'pointermove', handlePointerMove, true);
+api.on(document, 'pointerdown', clearPeekTimer, true);
+api.on(document, 'pointercancel', () => setDwellMode(false), true);
 // Native embedded views can take over pointer delivery: pointerout still tells
 // us the last boundary crossed without depending on their DOM ancestry.
 api.on(document, 'pointerout', event => {
-  if (!isFocused() || !root().classList.contains(dwellClass)) return;
+  if (!isFocused()) return;
   pointerX = event.clientX;
   pointerY = event.clientY;
-  closeDwellWhenFinished();
+  if (event.clientX < 0 || event.clientX > edgeWidth) clearPeekTimer();
+  if (root().classList.contains(dwellClass)) closeDwellWhenFinished();
 }, true);
 api.on(document, 'pointerleave', event => {
   if (event.target !== document && event.target !== root()) return;
@@ -211,6 +258,9 @@ api.on(document, 'pointerleave', event => {
   setDwellMode(false);
 }, true);
 api.on(window, 'blur', () => setDwellMode(false));
+api.on(document, 'visibilitychange', () => {
+  if (document.hidden) setDwellMode(false);
+});
 api.on(window, 'pagehide', () => exitFocusMode({keepNativeSidebar: true, immediateWindowControls: true}));
 api.onCleanup(() => {
   observer.disconnect();

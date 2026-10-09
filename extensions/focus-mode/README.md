@@ -42,3 +42,16 @@ Traffic lights use Electron's public `setWindowButtonVisibility` API, never a
 fake window zoom. Native acknowledgements and renewable four-second leases
 restore controls after renderer failure, navigation, extension pause/removal,
 or lost heartbeats. Missing shell capabilities exit focus and restore the UI.
+
+Brief native re-renders get a bounded 400 ms recovery window. Focus Mode stays
+active only if the owned shell contract becomes valid again; persistent absence
+or ambiguity still exits safely. The one-second heartbeat also checks for a
+native sidebar opening when a renderer mutation was missed. Streaming message
+text does not trigger shell scans.
+
+Edge dwell is hover-only: touch and dragging do not activate it. Clicking,
+pointer cancellation, leaving the edge/window, hiding the document, or losing
+window focus cancels a pending dwell. Cleanup cancels recovery/dwell timers so
+an old instance cannot affect the replacement after a hot update. The shortcut
+accepts the logical backslash/pipe key on British/ISO layouts as well as the
+original ANSI physical key, with the same strict modifier checks.

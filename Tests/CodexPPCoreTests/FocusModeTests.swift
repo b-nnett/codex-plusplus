@@ -291,6 +291,148 @@ final class FocusModeTests: XCTestCase {
         XCTAssertEqual(untouched, "true")
     }
 
+    @MainActor func testTransientShellReplacementAndAmbiguityDoNotExitFocus() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        globalThis.savedMain = document.querySelector('main');
+        globalThis.savedParent = savedMain.parentNode;
+        savedMain.remove();
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        _ = try await evaluate("savedParent.append(savedMain)", in: view)
+        try await Task.sleep(for: .milliseconds(500))
+        let survivedReplacement = try await evaluate("String(document.documentElement.classList.contains('codexpp-focus-mode'))", in: view)
+        XCTAssertEqual(survivedReplacement, "true")
+        _ = try await evaluate("""
+        globalThis.transitionMain = savedMain.cloneNode(true);
+        savedParent.append(transitionMain);
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        _ = try await evaluate("transitionMain.remove()", in: view)
+        try await Task.sleep(for: .milliseconds(500))
+        let survivedAmbiguity = try await evaluate("String(document.documentElement.classList.contains('codexpp-focus-mode'))", in: view)
+        XCTAssertEqual(survivedAmbiguity, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testNativeSidebarOpenDuringShellReplacementStillExitsFocus() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        globalThis.savedMain = document.querySelector('main');
+        globalThis.savedParent = savedMain.parentNode;
+        savedMain.remove();
+        document.querySelector('button').click();
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        _ = try await evaluate("savedParent.append(savedMain)", in: view)
+        try await Task.sleep(for: .milliseconds(300))
+        let exited = try await evaluate("""
+        String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+          __codexPPShell.snapshot().sidebarOpen && bridgeMessages.at(-1).hidden === false);
+        """, in: view)
+        XCTAssertEqual(exited, "true")
+    }
+
+    @MainActor func testStreamingContentDoesNotTriggerShellScans() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        globalThis.originalComputedStyle = window.getComputedStyle;
+        globalThis.shellStyleReads = 0;
+        window.getComputedStyle = (...args) => {shellStyleReads++; return originalComputedStyle(...args)};
+        for (let i=0;i<200;i++) document.querySelector('main').append(document.createElement('span'));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(30))
+        let untouched = try await evaluate("""
+        window.getComputedStyle = originalComputedStyle;
+        String(shellStyleReads === 0 && document.documentElement.classList.contains('codexpp-focus-mode'));
+        """, in: view)
+        XCTAssertEqual(untouched, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testHeartbeatDetectsLayoutLossWithoutOwnedAttributeMutations() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        document.querySelector('main').style.display = 'none';
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(1600))
+        let exited = try await evaluate("""
+        String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+          bridgeMessages.at(-1).hidden === false);
+        """, in: view)
+        XCTAssertEqual(exited, "true")
+    }
+
+    @MainActor func testPersistentShellAmbiguityExitsInsteadOfChoosingANode() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        const main = document.querySelector('main');
+        main.parentNode.append(main.cloneNode(true));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(500))
+        let exited = try await evaluate("""
+        String(__codexPPShell.snapshot() === null &&
+          !document.documentElement.classList.contains('codexpp-focus-mode') &&
+          bridgeMessages.at(-1).hidden === false);
+        """, in: view)
+        XCTAssertEqual(exited, "true")
+    }
+
+    @MainActor func testCancelledOrNonHoverPointersNeverOpenDwell() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}))", in: view)
+        for cancellation in [
+            "window.dispatchEvent(new Event('blur'))",
+            "document.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true}))",
+            "document.dispatchEvent(new PointerEvent('pointercancel', {bubbles:true}))",
+            "document.dispatchEvent(new PointerEvent('pointerout', {clientX:500, clientY:200, bubbles:true}))",
+            "document.dispatchEvent(new PointerEvent('pointerleave', {bubbles:true}))",
+            "document.dispatchEvent(new PointerEvent('pointermove', {pointerType:'touch', clientX:1, clientY:200, bubbles:true}))",
+            "document.dispatchEvent(new PointerEvent('pointermove', {buttons:1, clientX:1, clientY:200, bubbles:true}))"
+        ] {
+            _ = try await evaluate("""
+            document.dispatchEvent(new PointerEvent('pointermove', {pointerType:'mouse', clientX:1, clientY:200, bubbles:true}));
+            \(cancellation);
+            """, in: view)
+            try await Task.sleep(for: .milliseconds(300))
+            let cancelled = try await evaluate("""
+            String(document.documentElement.classList.contains('codexpp-focus-mode') &&
+              !document.documentElement.classList.contains('codexpp-focus-mode-dwell'));
+            """, in: view)
+            XCTAssertEqual(cancelled, "true", cancellation)
+        }
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testCleanupCancelsShellRecoveryBeforeHotReload() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        globalThis.savedMain = document.querySelector('main');
+        globalThis.savedParent = savedMain.parentNode;
+        savedMain.remove();
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(30))
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+        try await Task.sleep(for: .milliseconds(30))
+        _ = try await evaluate("savedParent.append(savedMain); void __codexPP.sync(extensionPackage)", in: view)
+        try await Task.sleep(for: .milliseconds(30))
+        _ = try await evaluate("document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}))", in: view)
+        try await Task.sleep(for: .milliseconds(500))
+        let reloaded = try await evaluate("""
+        String(document.documentElement.classList.contains('codexpp-focus-mode') &&
+          document.querySelectorAll('style[data-codexpp="focus-mode"]').length === 1 &&
+          bridgeMessages.at(-1).hidden === true);
+        """, in: view)
+        XCTAssertEqual(reloaded, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
     @MainActor func testCleanupWithoutEnteringFocusDoesNotChangeNativeControls() async throws {
         let view = try await fixture()
         _ = try await evaluate("void __codexPP.sync([])", in: view)
