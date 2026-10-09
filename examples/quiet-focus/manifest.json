@@ -1,0 +1,9 @@
+{
+  "id": "dev.codexpp.quiet-focus",
+  "name": "Quiet Focus",
+  "version": "0.1.0",
+  "description": "Press Option + Shift + F to dim images and video while you focus.",
+  "scope": "renderer",
+  "main": "index.js",
+  "githubRepo": "b-nnett/codex-pp"
+}

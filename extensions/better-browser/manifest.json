@@ -1,0 +1,8 @@
+{
+  "id": "better-browser",
+  "name": "better-browser",
+  "version": "0.2.0",
+  "description": "Enable native macOS AutoFill when you right-click an editable field in the browser.",
+  "scope": "renderer",
+  "main": "index.js"
+}

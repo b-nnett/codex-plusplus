@@ -1,0 +1,94 @@
+import XCTest
+@testable import CodexPPCore
+
+final class AsarPatchTests: XCTestCase {
+    static func fixture() throws -> (URL, Data, PatchAdapter) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("codexpp-patch-test-\(UUID().uuidString)").resolvingSymlinksInPath()
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = Data("module.exports = 'original';".utf8)
+        let package = Data("{\"name\":\"openai-codex-electron\",\"main\":\"main.js\"}".utf8)
+        let native: [String: Any] = ["size": 10, "unpacked": true, "integrity": ["algorithm": "SHA256", "hash": "native-hash"]]
+        func entry(_ bytes: Data, _ offset: Int) -> [String: Any] { ["size": bytes.count, "offset": String(offset), "integrity": ["algorithm": "SHA256", "hash": sha256(bytes), "blockSize": 4194304, "blocks": [sha256(bytes)]]] }
+        let tree: [String: Any] = ["files": ["main.js": entry(source, 0), "package.json": entry(package, source.count), "native.node": native]]
+        let header = try JSONSerialization.data(withJSONObject: tree, options: [.sortedKeys])
+        let padded = (header.count + 3) & ~3
+        var data = Data()
+        for value in [4, padded + 8, padded + 4, header.count] { var int = UInt32(value).littleEndian; withUnsafeBytes(of: &int) { data.append(contentsOf: $0) } }
+        data.append(header); data.append(Data(repeating: 0, count: padded - header.count)); data.append(source); data.append(package)
+        let path = root.appendingPathComponent("app.asar"); try data.write(to: path)
+        let adapter = PatchAdapter(id: "fixture", version: "1", build: "1", main: "main.js", mainHash: sha256(source), headerHash: sha256(header))
+        return (path, source, adapter)
+    }
+    func testReplacementPreservesOtherPayloadsAndOriginalArchive() throws {
+        let (path, source, _) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let original = try Data(contentsOf: path), input = try AsarArchive(path)
+        let output = path.appendingPathExtension("patched")
+        let replacement = Data("/* patched */\n".utf8) + source
+        let hash = try input.replacing("main.js", with: replacement, output: output)
+        let result = try AsarArchive(output)
+        XCTAssertEqual(hash, result.headerHash)
+        XCTAssertEqual(try result.data(at: "main.js"), replacement)
+        XCTAssertEqual(try result.data(at: "package.json"), try input.data(at: "package.json"))
+        XCTAssertEqual(try Data(contentsOf: path), original)
+        let bytes = try Data(contentsOf: output)
+        let jsonLength = (0..<4).reduce(0) { $0 | Int(bytes[12 + $1]) << ($1 * 8) }
+        let tree = try JSONSerialization.jsonObject(with: bytes.subdata(in: 16..<16 + jsonLength)) as! [String: Any]
+        let entries = tree["files"] as! [String: Any]
+        XCTAssertEqual((entries["native.node"] as! [String: Any])["unpacked"] as? Bool, true)
+        XCTAssertThrowsError(try result.data(at: "native.node"))
+    }
+    func testCorruptionAndTruncationAreRejected() throws {
+        let (path, _, _) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let archive = try AsarArchive(path)
+        var bytes = try Data(contentsOf: path); bytes[Int(archive.payloadOffset)] ^= 1; try bytes.write(to: path)
+        XCTAssertThrowsError(try AsarArchive(path).data(at: "main.js"))
+        try bytes.prefix(14).write(to: path)
+        XCTAssertThrowsError(try AsarArchive(path))
+    }
+    func testUnknownBuildAndModifiedBootstrapAreRejected() throws {
+        let (path, source, adapter) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let archive = try AsarArchive(path)
+        XCTAssertEqual(try adapter.validate(version: "1", build: "1", archive: archive), source)
+        XCTAssertThrowsError(try adapter.validate(version: "2", build: "1", archive: archive))
+        XCTAssertThrowsError(try adapter.validate(version: "1", build: "2", archive: archive))
+        let other = PatchAdapter(id: "fixture", version: "1", build: "1", main: "main.js", mainHash: "wrong", headerHash: archive.headerHash)
+        XCTAssertThrowsError(try other.validate(version: "1", build: "1", archive: archive))
+    }
+    func testUnsafePathsAndInPlacePatchAreRejected() throws {
+        let (path, source, _) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let archive = try AsarArchive(path)
+        for unsafe in ["../main.js", "/main.js", "./main.js", "main.js/"] { XCTAssertThrowsError(try archive.data(at: unsafe)) }
+        XCTAssertThrowsError(try archive.replacing("main.js", with: source, output: path))
+    }
+    func testBootstrapContainsQuotedConfigurationAndPreservesOriginalEntry() throws {
+        let (path, source, adapter) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let bootstrap = try adapter.bootstrap(original: source, port: 9222, helper: URL(fileURLWithPath: "/tmp/Example 'quoted' ++.app"), support: URL(fileURLWithPath: "/tmp/Support"))
+        let text = String(decoding: bootstrap, as: UTF8.self)
+        XCTAssertTrue(text.hasSuffix(String(decoding: source, as: UTF8.self)))
+        XCTAssertTrue(text.contains("127.0.0.1"))
+        XCTAssertTrue(text.contains("--codexpp-probe"))
+        XCTAssertTrue(text.contains("computer-use-start-capture"))
+        XCTAssertTrue(text.contains("TeamIdentifier=2DC432GLL2"))
+        XCTAssertTrue(text.contains("cua-repl.mjs"))
+        XCTAssertTrue(text.contains("NODE_REPL_TRUSTED_SERVICES"))
+        XCTAssertTrue(text.contains("sky.get_app_state"))
+        XCTAssertTrue(text.contains("__CODEXPP_APPSHOT_V1__"))
+        XCTAssertTrue(text.contains("update: {type: 'completed'}"))
+        XCTAssertFalse(text.contains("bare-modifier-monitor --key DoubleCommand"))
+        XCTAssertFalse(text.contains("Runtime.addBinding"))
+        XCTAssertFalse(text.contains("CODEX_ELECTRON_START_IN_BACKGROUND"))
+        XCTAssertFalse(text.contains("ppStartBroker"))
+        XCTAssertTrue(text.contains("ppNativeBrowser.setEnabled(event, request.enabled)"))
+        XCTAssertTrue(text.contains("type:'codexpp-browser-autofill-result'"))
+        XCTAssertFalse(text.contains("shell:true"))
+        let script = path.deletingLastPathComponent().appendingPathComponent("bootstrap.js")
+        try bootstrap.write(to: script)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["node", "--check", script.path]
+        let output = Pipe(); process.standardOutput = output; process.standardError = output
+        try process.run(); process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
+        XCTAssertThrowsError(try adapter.bootstrap(original: source, port: 80, helper: URL(fileURLWithPath: "/tmp/Helper.app"), support: URL(fileURLWithPath: "/tmp/Support")))
+    }
+}

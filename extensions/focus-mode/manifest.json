@@ -1,0 +1,8 @@
+{
+  "id": "focus-mode",
+  "name": "Focus Mode",
+  "version": "0.3.2",
+  "description": "Press Command + Shift + \\ to hide both left sidebars and give the current view the full window.",
+  "scope": "renderer",
+  "main": "index.js"
+}

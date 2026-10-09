@@ -1,0 +1,109 @@
+import Foundation
+
+public struct PatchAdapter: Codable, Sendable {
+    public let id: String
+    public let version: String
+    public let build: String
+    public let main: String
+    public let mainHash: String
+    public let headerHash: String
+    public let frameworkPath: String?
+    public let frameworkHash: String?
+    public let integrityOffset: Int?
+    public static let current = PatchAdapter(id: "chatgpt-macos-20052-v20", version: "26.1007.21159", build: "20052", main: ".vite/build/early-bootstrap.js", mainHash: "24286bb6b5fe449e6d4f1b8cfc061c35be57e54fe4ea0802b3e257f32c45fc33", headerHash: "c497f508930f223a999ec4c436a7526252914d380339db9e229cb023d200b41f", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.40/Codex Framework", frameworkHash: "156ac7655cf758be69a3a441aeb3ef488a4d8b77c30b2a3f3fed6c26f7e6bc8b", integrityOffset: 267257136)
+    public init(id: String, version: String, build: String, main: String, mainHash: String, headerHash: String, frameworkPath: String? = nil, frameworkHash: String? = nil, integrityOffset: Int? = nil) {
+        self.id = id; self.version = version; self.build = build; self.main = main; self.mainHash = mainHash; self.headerHash = headerHash
+        self.frameworkPath = frameworkPath; self.frameworkHash = frameworkHash; self.integrityOffset = integrityOffset
+    }
+    public func validate(version: String, build: String, archive: AsarArchive) throws -> Data {
+        guard version == self.version, build == self.build, archive.headerHash == headerHash else { throw PatchError.invalid("Unsupported ChatGPT build \(version) (\(build)). A reviewed patch adapter is required; the app has been left untouched.") }
+        let package = try JSONSerialization.jsonObject(with: archive.data(at: "package.json")) as? [String: Any]
+        guard package?["name"] as? String == "openai-codex-electron", package?["main"] as? String == main else { throw PatchError.invalid("Unexpected ChatGPT entry point.") }
+        let source = try archive.data(at: main)
+        guard sha256(source) == mainHash else { throw PatchError.invalid("The ChatGPT bootstrap does not match the reviewed adapter.") }
+        return source
+    }
+    public func bootstrap(original: Data, port: Int, helper: URL, support: URL) throws -> Data {
+        guard (1024...65535).contains(port), helper.pathExtension == "app", helper.path.hasPrefix("/"), support.path.hasPrefix("/") else { throw PatchError.invalid("Invalid bootstrap configuration.") }
+        func literal(_ text: String) throws -> String { String(decoding: try JSONSerialization.data(withJSONObject: text, options: [.fragmentsAllowed, .withoutEscapingSlashes]), as: UTF8.self) }
+        guard let browserURL = Bundle.module.url(forResource: "native-browser", withExtension: "js") else {
+            throw PatchError.invalid("The native browser bridge is missing.")
+        }
+        let browserRuntime = try String(contentsOf: browserURL, encoding: .utf8)
+        guard let shellURL = Bundle.module.url(forResource: "native-shell", withExtension: "js") else {
+            throw PatchError.invalid("The native shell bridge is missing.")
+        }
+        let shellRuntime = try String(contentsOf: shellURL, encoding: .utf8)
+        guard let captureURL = Bundle.module.url(forResource: "native-capture", withExtension: "js") else {
+            throw PatchError.invalid("The native capture bridge is missing.")
+        }
+        let captureRuntime = try String(contentsOf: captureURL, encoding: .utf8)
+        let code = """
+        /* Codex++ bootstrap schema 2; adapter \(id). */
+        {
+          const ppElectron = require('electron');
+          const ppProbe = process.argv.includes('--codexpp-probe');
+          try {
+            ppElectron.app.commandLine.removeSwitch('remote-debugging-port');
+            ppElectron.app.commandLine.removeSwitch('remote-debugging-address');
+            ppElectron.app.commandLine.appendSwitch('remote-debugging-port', '\(port)');
+            ppElectron.app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1');
+            ppElectron.app.whenReady().then(() => {
+              const fs = require('fs'), path = require('path');
+              const dir = path.join(\(try literal(support.path)), 'Diagnostics');
+              fs.mkdirSync(dir, {recursive:true, mode:0o700});
+              const file = path.join(dir, ppProbe ? 'probe.json' : 'boot.json');
+              const temp = file + '.' + process.pid;
+              fs.writeFileSync(temp, JSON.stringify({schema:1, adapter:\(try literal(id)), pid:process.pid, app:ppElectron.app.getAppPath(), port:\(port), electron:process.versions.electron, time:new Date().toISOString()}), {mode:0o600});
+              fs.renameSync(temp, file);
+              if (ppProbe) ppElectron.app.exit(0);
+            }).catch(error => { console.error('[Codex++] boot:', error); if (ppProbe) ppElectron.app.exit(1); });
+            if (!ppProbe) {
+              let ppBrowserNative;
+              try { ppBrowserNative = require(require('path').join(\(try literal(helper.path)), 'Contents', 'Resources', 'browser-native.node')); }
+              catch (error) { console.error('[Codex++] native browser module:', error); }
+              const ppNativeBrowser = \(browserRuntime)(ppElectron, \(try literal(support.path)), ppBrowserNative);
+              const ppNativeShell = \(shellRuntime)(ppElectron, \(try literal(support.path)));
+              const ppCaptureRequestChannel = 'codex_desktop:message-from-view';
+              const ppCaptureResponseChannel = 'codex_desktop:message-for-view';
+              const ppNativeCapture = \(captureRuntime)(ppElectron);
+
+              const ppHandle = ppElectron.ipcMain.handle.bind(ppElectron.ipcMain);
+              ppElectron.ipcMain.handle = (channel, listener) => ppHandle(channel, channel === ppCaptureRequestChannel
+                ? (event, request) => {
+                    if (request?.type === 'codexpp-shell-controls') {
+                      let result;
+                      try { result = ppNativeShell.controls(event, request); }
+                      catch { result = {supported:false, hidden:false}; }
+                      if (typeof request.requestId === 'string' && request.requestId.length <= 128) {
+                        event.sender.send(ppCaptureResponseChannel, {type:'codexpp-shell-controls-result', requestId:request.requestId, ...result});
+                      }
+                      return;
+                    }
+                    if (request?.type === 'codexpp-browser-autofill') {
+                      const result = ppNativeBrowser.setEnabled(event, request.enabled);
+                      if (typeof request.requestId === 'string' && request.requestId.length <= 128) {
+                        event.sender.send(ppCaptureResponseChannel, {type:'codexpp-browser-autofill-result', requestId:request.requestId, ...result});
+                      }
+                      return;
+                    }
+                    if (ppNativeCapture.handles(request)) {
+                      void ppNativeCapture.relay(event.sender, request);
+                      return;
+                    }
+                    return listener(event, request);
+                  }
+                : listener);
+              void ppElectron.app.whenReady().then(() => ppNativeCapture.warmup()).catch(error => console.error('[Codex++] headless Appshot warmup:', error));
+              ppElectron.app.on('before-quit', () => ppNativeCapture.dispose());
+
+              const child = require('child_process').spawn('/usr/bin/open', ['-g', \(try literal(helper.path))], {detached:true, stdio:'ignore'});
+              child.on('error', error => console.error('[Codex++] helper:', error)); child.unref();
+            }
+          } catch (error) { console.error('[Codex++] bootstrap:', error); if (ppProbe) ppElectron.app.exit(1); }
+          if (ppProbe) return;
+        }
+        """
+        var result = Data(code.utf8); result.append(Data("\n".utf8)); result.append(original); return result
+    }
+}
