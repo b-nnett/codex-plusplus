@@ -2,7 +2,11 @@
 """Build/package signed recipes for exact, verified vendor archives."""
 import argparse,base64,hashlib,json,pathlib,struct,subprocess,shutil
 ROOT=pathlib.Path(__file__).resolve().parent.parent
-TRANSFORMS=['Sources/CodexPPCore/'+n+'.swift' for n in ['NativeSettingsAdapter','NativeBrowserAdapter','AppToolsAdapter','ShellAdapter','BookmarksAdapter']]+['Sources/CodexPPCore/Resources/'+n for n in ['acorn.js','settings-adapter.js','browser-adapter.js','bookmarks-adapter.js','shell-adapter.js','bookmarks-runtime.js','shell-runtime.js','parser-runner.js','app-tools-parent.mjs']]+['Sources/CodexPP/Resources/native-settings.js']
+TRANSFORMS=(
+ ['Sources/CodexPPCore/'+n+'.swift' for n in ['PatchAdapter','NativeSettingsAdapter','NativeBrowserAdapter','AppToolsAdapter','ShellAdapter','BookmarksAdapter']]
+ +['Sources/CodexPPCore/Resources/'+n for n in ['acorn.js','settings-adapter.js','browser-adapter.js','bookmarks-adapter.js','shell-adapter.js','bookmarks-runtime.js','shell-runtime.js','parser-runner.js','app-tools-parent.mjs','native-browser.js','native-bookmarks.js','native-shell.js','native-capture.js']]
+ +['Sources/CodexPP/Resources/native-settings.js']
+)
 def fingerprint():
  h=hashlib.sha256()
  for name in TRANSFORMS:h.update(name.encode()+b'\0'+(ROOT/name).read_bytes()+b'\0')

@@ -136,6 +136,8 @@ test('headless capture preserves the signed-launch, MCP, approval, and renderer 
   const call = h.messages.find(message => message.method === 'tools/call');
   assert.equal(call.params.name, 'js');
   assert.equal(call.params.arguments.timeout_ms, 45000);
+  assert.match(call.params.arguments.code, /^await \(async\(\)=>\{/);
+  assert.match(call.params.arguments.code, /\}\)\(\);$/);
   assert.match(call.params.arguments.code, /sky\.get_app_state\(\{app:"com\.example\.Target",disableDiff:true\}\)/);
   assert.match(call.params.arguments.code, /image\.length>16777216/);
   assert.match(call.params.arguments.code, /text\.length>2097152/);
@@ -208,13 +210,18 @@ test('live signed runtime still satisfies the Appshot contract', {skip: !process
   const factory = vm.runInNewContext(source, {console, process: liveProcess, setTimeout, clearTimeout, require: hostRequire}, {filename: 'native-capture.js'});
   const bridge = factory({});
   t.after(() => bridge.dispose());
-  const view = sender();
-  await bridge.relay(view, validRequest(process.env.CODEXPP_LIVE_APPSHOT_APP));
-  const response = view.sent[0]?.message;
-  assert.equal(response?.responseType, 'success', response?.error ?? 'missing Appshot response');
-  const updates = view.sent.slice(1).map(item => item.message.update);
-  assert.deepEqual(updates.map(update => update.type), ['metadata', 'axText', 'screenshot', 'completed']);
-  assert.equal(typeof updates[1].text, 'string');
-  assert.match(updates[2].screenshotDataURL, /^data:image\/(png|jpeg);base64,/);
-  assert.ok(updates[2].screenshotDataURL.length > 32);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const view = sender();
+    const request = validRequest(process.env.CODEXPP_LIVE_APPSHOT_APP);
+    request.requestId = `fetch-${attempt}`;
+    request.body = JSON.stringify({requestId: `capture-${attempt}`, bundleIdentifier: process.env.CODEXPP_LIVE_APPSHOT_APP});
+    await bridge.relay(view, request);
+    const response = view.sent[0]?.message;
+    assert.equal(response?.responseType, 'success', `attempt ${attempt}: ${response?.error ?? 'missing Appshot response'}`);
+    const updates = view.sent.slice(1).map(item => item.message.update);
+    assert.deepEqual(updates.map(update => update.type), ['metadata', 'axText', 'screenshot', 'completed']);
+    assert.equal(typeof updates[1].text, 'string');
+    assert.match(updates[2].screenshotDataURL, /^data:image\/(png|jpeg);base64,/);
+    assert.ok(updates[2].screenshotDataURL.length > 32);
+  }
 });
