@@ -200,21 +200,24 @@
   }
 
   async function relay(sender, request) {
+    let started = false;
+    let captureId = null;
     try {
       const body = JSON.parse(request.body || '{}');
-      const captureId = body.requestId;
+      captureId = body.requestId;
       const app = body.bundleIdentifier;
       if (typeof captureId !== 'string' || captureId.length === 0 || captureId.length > 128 ||
           typeof app !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(app)) {
         throw new Error('The Appshot request is invalid.');
       }
-      const payload = await capture(app);
       emit(sender, {
         type: 'fetch-response', responseType: 'success', requestId: request.requestId, status: 200,
         headers: {'content-type': 'application/json'},
         bodyJsonString: JSON.stringify({result: 'started'})
       });
+      started = true;
       emit(sender, {type: 'computer-use-capture-updated', requestId: captureId, update: {type: 'metadata', app: {bundleIdentifier: app}}});
+      const payload = await capture(app);
       emit(sender, {type: 'computer-use-capture-updated', requestId: captureId, update: {type: 'axText', text: payload.text}});
       emit(sender, {
         type: 'computer-use-capture-updated', requestId: captureId,
@@ -223,7 +226,11 @@
       emit(sender, {type: 'computer-use-capture-updated', requestId: captureId, update: {type: 'completed'}});
     } catch (error) {
       console.error('[Codex++] headless Appshot:', error);
-      fetchError(sender, request, error);
+      if (started) {
+        if (typeof captureId === 'string') {
+          emit(sender, {type: 'computer-use-capture-updated', requestId: captureId, update: {type: 'failed', failureReason: 'start_request_failed'}});
+        }
+      } else { fetchError(sender, request, error); }
     }
   }
 

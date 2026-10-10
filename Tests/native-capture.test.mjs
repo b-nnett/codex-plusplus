@@ -113,7 +113,10 @@ test('headless capture preserves the signed-launch, MCP, approval, and renderer 
   assert.equal(h.bridge.handles(validRequest()), true);
   assert.equal(h.bridge.handles({...validRequest(), url: 'vscode://codex/computer-use-frontmost-window'}), false);
 
-  await h.bridge.relay(view, validRequest());
+  const relay = h.bridge.relay(view, validRequest());
+  assert.deepEqual(view.sent.map(item => item.message.type), ['fetch-response', 'computer-use-capture-updated']);
+  assert.equal(view.sent[1].message.update.type, 'metadata');
+  await relay;
 
   assert.equal(h.signatureCalls.length, 4);
   assert.deepEqual(h.signatureCalls.map(call => call.args[0]), ['--verify', '-d', '--verify', '-d']);
@@ -167,7 +170,7 @@ test('elicitation scope changes fail closed until connector, tool, and app all m
   assert.deepEqual(runtime.approvals, ['decline', 'decline', 'decline', 'accept']);
 });
 
-test('response-shape changes become one bounded fetch error and emit no partial capture', async t => {
+test('response-shape changes fail the acknowledged capture without emitting partial content', async t => {
   for (const result of [
     {content: [{type: 'text', text: 'the marker changed'}]},
     {content: [{type: 'text', text: marker + JSON.stringify({text: [], screenshotDataURL: 'file:///tmp/image.png'})}]},
@@ -181,11 +184,12 @@ test('response-shape changes become one bounded fetch error and emit no partial 
     t.after(() => h.bridge.dispose());
     const view = sender();
     await h.bridge.relay(view, validRequest());
-    assert.equal(view.sent.length, 1);
+    assert.equal(view.sent.length, 3);
     assert.equal(view.sent[0].message.type, 'fetch-response');
-    assert.equal(view.sent[0].message.responseType, 'error');
-    assert.equal(view.sent[0].message.status, 432);
-    assert.ok(view.sent[0].message.error.length > 0);
+    assert.equal(view.sent[0].message.responseType, 'success');
+    assert.equal(view.sent[1].message.update.type, 'metadata');
+    assert.equal(view.sent[2].message.update.type, 'failed');
+    assert.equal(view.sent[2].message.update.failureReason, 'start_request_failed');
   }
 });
 
@@ -215,7 +219,9 @@ test('live signed runtime still satisfies the Appshot contract', {skip: !process
     const request = validRequest(process.env.CODEXPP_LIVE_APPSHOT_APP);
     request.requestId = `fetch-${attempt}`;
     request.body = JSON.stringify({requestId: `capture-${attempt}`, bundleIdentifier: process.env.CODEXPP_LIVE_APPSHOT_APP});
-    await bridge.relay(view, request);
+    const relay = bridge.relay(view, request);
+    assert.equal(view.sent[0]?.message?.responseType, 'success', `attempt ${attempt}: capture was not acknowledged synchronously`);
+    await relay;
     const response = view.sent[0]?.message;
     assert.equal(response?.responseType, 'success', `attempt ${attempt}: ${response?.error ?? 'missing Appshot response'}`);
     const updates = view.sent.slice(1).map(item => item.message.update);
