@@ -1,0 +1,477 @@
+{
+  "schema": 1,
+  "date": "2026-10-09",
+  "objective": "Three real updates from different older official releases to the latest fixed app, with zero Keychain prompts during staging, startup, update, or restart",
+  "status": "passed",
+  "qualifiedRunCount": 3,
+  "target": {
+    "version": "26.1007.21159",
+    "build": "20052",
+    "adapter": "chatgpt-macos-20052-v30"
+  },
+  "officialAppcast": "https://persistent.oaistatic.com/codex-app-prod/appcast-26.1007.21159.xml",
+  "method": {
+    "scheduledCheck": "Existing automatic-check and automatic-download preferences retained; last-check date made overdue for each older release",
+    "installer": "Stock Sparkle automatic download, EdDSA verification, preparation and install on normal quit",
+    "rehearsalCLI": "--begin-update-validation opens a verified older patched bundle; --finish-background-update-validation requests ordinary quit only",
+    "replacement": "Resident helper waits for installer exit, authenticates and patches vendor replacement, probes, commits, then restarts",
+    "manualReplacementInstall": false,
+    "desktopLocked": true,
+    "uiLimitation": "Final runs use the real background updater. About and signed-in UI were unavailable while the desktop was locked; no UI verification is claimed for these runs. A preliminary foreground v29 run verified the signed-in app and About version, but is excluded from this count."
+  },
+  "keychain": {
+    "signerType": "Apple-issued Developer ID Application",
+    "team": "X522N436T7",
+    "certificateFingerprint": "0925DE1ECA0C873F884246D0B6D27D0C3B3C997D",
+    "nativeInteractionPolicy": "Disabled before Electron framework initialization; boot and probe require false",
+    "normalProfileEncryption": "Real Keychain encryption; mock Keychain used only in disposable probes",
+    "accessRulesModified": false,
+    "secretValuesReadByValidation": false,
+    "accessMetadataUnchangedAcrossAllRuns": true,
+    "designatedRequirementIdenticalAcrossAllTargets": true,
+    "designatedRequirement": "Executable=/Applications/ChatGPT.app/Contents/MacOS/ChatGPT\ndesignated => identifier \"com.openai.codex\" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = X522N436T7"
+  },
+  "monitoring": {
+    "start": "2026-10-09T21:17:42.395167+00:00",
+    "end": "2026-10-09T22:16:25.075925+00:00",
+    "processSampleIntervalSeconds": 0.1,
+    "timelineEmitsChangesOnly": true,
+    "securityAgentObserved": false,
+    "securitydPromptEventObserved": false,
+    "timelineSHA256": "acbd0b7db9798c18f62b500bce441357198e0d60d117a5c409f3e674c5a166eb",
+    "securitydLogSHA256": "e87da759f719c52e62988b310493e8ffe3e89e27294ad81dce3f481490571f98",
+    "rawLogsLocation": "/tmp/codexpp-three-updates and /tmp/codexpp-zero-prompt-*"
+  },
+  "checks": {
+    "exitCode": 0,
+    "swiftPassed": 81,
+    "swiftSkipped": 5,
+    "javascriptPassed": 44,
+    "javascriptSkipped": 11,
+    "nativeHarnessesPassed": 3,
+    "fixtureSkips": "Vendor fixture environment variables were not set in the final aggregate check; real app probes and updater cycles separately passed",
+    "logSHA256": "9408ee54100015bb27a79a4f18aaf64124d215128805b828c43c413015302cc9"
+  },
+  "finalUpdaterPreferences": {
+    "SUEnableAutomaticChecks": "1",
+    "SUAutomaticallyUpdate": "1",
+    "SULastCheckTime": "2026-10-09 22:09:55 +0000"
+  },
+  "helperExecutableSHA256": "109316eca5bc27edd8572cdd89822ac487e30693c3ce635f4259846b1ec378a5",
+  "runs": [
+    {
+      "run": 1,
+      "passed": true,
+      "source": {
+        "version": "26.930.61225",
+        "build": "13520",
+        "adapter": "chatgpt-macos-13520-v30",
+        "pid": 68375,
+        "bootTime": "2026-10-09T21:55:35.774Z",
+        "keychainInteractionAllowed": false,
+        "arguments": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+      },
+      "target": {
+        "version": "26.1007.21159",
+        "build": "20052",
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 72162,
+        "bootTime": "2026-10-09T22:01:13.111Z",
+        "keychainInteractionAllowed": false,
+        "arguments": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+      },
+      "method": "normal automatic download and install on quit",
+      "archiveVerification": {
+        "installerPID": 69007,
+        "verified": true,
+        "logTimeZone": "Europe/London",
+        "log": "2026-10-09 22:56:26.132 Df Autoupdate[69007:5a9932] [org.sparkle-project.Sparkle:Sparkle] OK: EdDSA signature is correct for update"
+      },
+      "normalQuitRequestedAt": "2026-10-09T21:59:28.235672+00:00",
+      "automaticRepatch": {
+        "adapter": "chatgpt-macos-20052-v30",
+        "fromPID": 68375,
+        "schema": 1,
+        "state": "patched",
+        "targetBuild": "20052",
+        "time": "2026-10-09T22:01:12Z"
+      },
+      "startupProbe": {
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 72046,
+        "electron": "155.0.8059.40",
+        "keychainInteractionAllowed": false,
+        "time": "2026-10-09T22:01:09.068Z"
+      },
+      "helper": {
+        "activeExtensions": 3,
+        "connected": true,
+        "extensionsPaused": false,
+        "installedExtensions": 3,
+        "pid": 68383,
+        "running": true,
+        "runtimeErrors": {},
+        "schema": 1,
+        "settingsSessions": 6,
+        "time": "2026-10-09T22:03:15Z"
+      },
+      "strictNestedSignatureVerified": true,
+      "normalLaunchUsesMockKeychain": false,
+      "keychainAccessMetadataUnchanged": true,
+      "keychainAccessMetadataHash": "35544c552e13588639b0286597a2d0d63b7fdbb617ad97fe9ef2547be2d96fd5",
+      "unchangedBookmarkAndSettingsHashes": {
+        "bookmarks.json": "ce0092a8dcf2678d9f6f189107a9bec957a6e70aedbd38ca79ba3bf9d1767fa4",
+        "settings.json": "ab691d6460d6aad8af911b7ae3a30f04a2715a2aef9b2a87f9728271ffb78934"
+      },
+      "securityAgentObserved": false,
+      "systemKeychainPromptEventObserved": false,
+      "unpatchedReplacementProcessObserved": false,
+      "aboutUIVersionVerified": false,
+      "signedInUIObserved": false,
+      "completedAt": "2026-10-09T22:03:17.620115+00:00",
+      "timeline": [
+        {
+          "time": "2026-10-09T21:55:35.777300+00:00",
+          "appPIDs": [
+            68375
+          ],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T21:56:20.235985+00:00",
+          "appPIDs": [
+            68375
+          ],
+          "installerRunning": true,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T21:56:26.579986+00:00",
+          "appPIDs": [
+            68375
+          ],
+          "installerRunning": true,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T21:59:31.783673+00:00",
+          "appPIDs": [],
+          "installerRunning": true,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T21:59:31.918937+00:00",
+          "appPIDs": [],
+          "installerRunning": true,
+          "patchedReceiptPresent": false,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T21:59:32.493970+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": false,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:01:11.857427+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:01:12.829008+00:00",
+          "appPIDs": [
+            72162
+          ],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        }
+      ],
+      "rawResultSHA256": "c25ba04dd3a60676c5a2442aeef33834c3b577d39e68249510d92ba453d7327a"
+    },
+    {
+      "run": 2,
+      "passed": true,
+      "source": {
+        "version": "26.930.51102",
+        "build": "13100",
+        "adapter": "chatgpt-macos-13100-v29",
+        "pid": 73689,
+        "bootTime": "2026-10-09T22:03:23.344Z",
+        "keychainInteractionAllowed": false,
+        "arguments": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+      },
+      "target": {
+        "version": "26.1007.21159",
+        "build": "20052",
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 76276,
+        "bootTime": "2026-10-09T22:07:16.495Z",
+        "keychainInteractionAllowed": false,
+        "arguments": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+      },
+      "method": "normal automatic download and install on quit",
+      "archiveVerification": {
+        "installerPID": 74350,
+        "verified": true,
+        "logTimeZone": "Europe/London",
+        "log": "2026-10-09 23:04:15.759 Df Autoupdate[74350:5aef05] [org.sparkle-project.Sparkle:Sparkle] OK: EdDSA signature is correct for update"
+      },
+      "normalQuitRequestedAt": "2026-10-09T22:05:30.905160+00:00",
+      "automaticRepatch": {
+        "adapter": "chatgpt-macos-20052-v30",
+        "fromPID": 73689,
+        "schema": 1,
+        "state": "patched",
+        "targetBuild": "20052",
+        "time": "2026-10-09T22:07:15Z"
+      },
+      "startupProbe": {
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 76169,
+        "electron": "155.0.8059.40",
+        "keychainInteractionAllowed": false,
+        "time": "2026-10-09T22:07:11.949Z"
+      },
+      "helper": {
+        "activeExtensions": 3,
+        "connected": true,
+        "extensionsPaused": false,
+        "installedExtensions": 3,
+        "pid": 68383,
+        "running": true,
+        "runtimeErrors": {},
+        "schema": 1,
+        "settingsSessions": 6,
+        "time": "2026-10-09T22:08:59Z"
+      },
+      "strictNestedSignatureVerified": true,
+      "normalLaunchUsesMockKeychain": false,
+      "keychainAccessMetadataUnchanged": true,
+      "keychainAccessMetadataHash": "35544c552e13588639b0286597a2d0d63b7fdbb617ad97fe9ef2547be2d96fd5",
+      "unchangedBookmarkAndSettingsHashes": {
+        "bookmarks.json": "ce0092a8dcf2678d9f6f189107a9bec957a6e70aedbd38ca79ba3bf9d1767fa4",
+        "settings.json": "ab691d6460d6aad8af911b7ae3a30f04a2715a2aef9b2a87f9728271ffb78934"
+      },
+      "securityAgentObserved": false,
+      "systemKeychainPromptEventObserved": false,
+      "unpatchedReplacementProcessObserved": false,
+      "aboutUIVersionVerified": false,
+      "signedInUIObserved": false,
+      "completedAt": "2026-10-09T22:09:01.374211+00:00",
+      "timeline": [
+        {
+          "time": "2026-10-09T22:03:23.424503+00:00",
+          "appPIDs": [
+            73689
+          ],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T22:04:10.967207+00:00",
+          "appPIDs": [
+            73689
+          ],
+          "installerRunning": true,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T22:04:16.198695+00:00",
+          "appPIDs": [
+            73689
+          ],
+          "installerRunning": true,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:05:34.630149+00:00",
+          "appPIDs": [],
+          "installerRunning": true,
+          "patchedReceiptPresent": false,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:05:35.514987+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": false,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:07:14.742447+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:07:15.930533+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T22:07:16.097575+00:00",
+          "appPIDs": [
+            76276
+          ],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        }
+      ],
+      "rawResultSHA256": "684109946f836d99761e026f815814887f74f6e2e07bc335c765b8f2520ad718"
+    },
+    {
+      "run": 3,
+      "passed": true,
+      "source": {
+        "version": "26.1002.52244",
+        "build": "13536",
+        "adapter": "chatgpt-macos-13536-v30",
+        "pid": 77605,
+        "bootTime": "2026-10-09T22:09:05.180Z",
+        "keychainInteractionAllowed": false,
+        "arguments": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+      },
+      "target": {
+        "version": "26.1007.21159",
+        "build": "20052",
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 81330,
+        "bootTime": "2026-10-09T22:14:23.017Z",
+        "keychainInteractionAllowed": false,
+        "arguments": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+      },
+      "method": "normal automatic download and install on quit",
+      "archiveVerification": {
+        "installerPID": 78401,
+        "verified": true,
+        "logTimeZone": "Europe/London",
+        "log": "2026-10-09 23:09:55.106 Df Autoupdate[78401:5b3578] [org.sparkle-project.Sparkle:Sparkle] OK: EdDSA signature is correct for update"
+      },
+      "normalQuitRequestedAt": "2026-10-09T22:12:40.210341+00:00",
+      "automaticRepatch": {
+        "adapter": "chatgpt-macos-20052-v30",
+        "fromPID": 77605,
+        "schema": 1,
+        "state": "patched",
+        "targetBuild": "20052",
+        "time": "2026-10-09T22:14:22Z"
+      },
+      "startupProbe": {
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 81209,
+        "electron": "155.0.8059.40",
+        "keychainInteractionAllowed": false,
+        "time": "2026-10-09T22:14:18.591Z"
+      },
+      "helper": {
+        "activeExtensions": 3,
+        "connected": true,
+        "extensionsPaused": false,
+        "installedExtensions": 3,
+        "pid": 68383,
+        "running": true,
+        "runtimeErrors": {},
+        "schema": 1,
+        "settingsSessions": 6,
+        "time": "2026-10-09T22:15:34Z"
+      },
+      "strictNestedSignatureVerified": true,
+      "normalLaunchUsesMockKeychain": false,
+      "keychainAccessMetadataUnchanged": true,
+      "keychainAccessMetadataHash": "35544c552e13588639b0286597a2d0d63b7fdbb617ad97fe9ef2547be2d96fd5",
+      "unchangedBookmarkAndSettingsHashes": {
+        "bookmarks.json": "ce0092a8dcf2678d9f6f189107a9bec957a6e70aedbd38ca79ba3bf9d1767fa4",
+        "settings.json": "ab691d6460d6aad8af911b7ae3a30f04a2715a2aef9b2a87f9728271ffb78934"
+      },
+      "securityAgentObserved": false,
+      "systemKeychainPromptEventObserved": false,
+      "unpatchedReplacementProcessObserved": false,
+      "aboutUIVersionVerified": false,
+      "signedInUIObserved": false,
+      "completedAt": "2026-10-09T22:15:35.504298+00:00",
+      "timeline": [
+        {
+          "time": "2026-10-09T22:09:05.281052+00:00",
+          "appPIDs": [
+            77605
+          ],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T22:09:49.545531+00:00",
+          "appPIDs": [
+            77605
+          ],
+          "installerRunning": true,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T22:09:55.581828+00:00",
+          "appPIDs": [
+            77605
+          ],
+          "installerRunning": true,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:12:42.351682+00:00",
+          "appPIDs": [],
+          "installerRunning": true,
+          "patchedReceiptPresent": false,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:12:43.346374+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": false,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:14:21.594573+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": true
+        },
+        {
+          "time": "2026-10-09T22:14:22.469737+00:00",
+          "appPIDs": [],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        },
+        {
+          "time": "2026-10-09T22:14:22.622103+00:00",
+          "appPIDs": [
+            81330
+          ],
+          "installerRunning": false,
+          "patchedReceiptPresent": true,
+          "pendingHandoff": false
+        }
+      ],
+      "rawResultSHA256": "45b3d92834c2968e79f877f8cd78daf3cfd15a617077a4686e58c1b44609d08a"
+    }
+  ]
+}

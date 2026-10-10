@@ -1,0 +1,51 @@
+{
+  "probeArguments": [
+    "--codexpp-probe",
+    "--use-mock-keychain",
+    "--user-data-dir=<fresh-disposable-profile>"
+  ],
+  "results": [
+    {
+      "version": "26.1002.52244",
+      "adapter": "chatgpt-macos-13536-v27",
+      "repetition": 1,
+      "passed": true,
+      "securityAgentObserved": false
+    },
+    {
+      "version": "26.1002.52244",
+      "adapter": "chatgpt-macos-13536-v27",
+      "repetition": 2,
+      "passed": true,
+      "securityAgentObserved": false
+    },
+    {
+      "version": "26.1002.52244",
+      "adapter": "chatgpt-macos-13536-v27",
+      "repetition": 3,
+      "passed": true,
+      "securityAgentObserved": false
+    },
+    {
+      "version": "26.1007.21159",
+      "adapter": "chatgpt-macos-20052-v27",
+      "repetition": 1,
+      "passed": true,
+      "securityAgentObserved": false
+    },
+    {
+      "version": "26.1007.21159",
+      "adapter": "chatgpt-macos-20052-v27",
+      "repetition": 2,
+      "passed": true,
+      "securityAgentObserved": false
+    },
+    {
+      "version": "26.1007.21159",
+      "adapter": "chatgpt-macos-20052-v27",
+      "repetition": 3,
+      "passed": true,
+      "securityAgentObserved": false
+    }
+  ]
+}

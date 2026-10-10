@@ -10,10 +10,36 @@ public struct PatchAdapter: Codable, Sendable {
     public let frameworkPath: String?
     public let frameworkHash: String?
     public let integrityOffset: Int?
-    public static let current = PatchAdapter(id: "chatgpt-macos-20052-v20", version: "26.1007.21159", build: "20052", main: ".vite/build/early-bootstrap.js", mainHash: "24286bb6b5fe449e6d4f1b8cfc061c35be57e54fe4ea0802b3e257f32c45fc33", headerHash: "c497f508930f223a999ec4c436a7526252914d380339db9e229cb023d200b41f", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.40/Codex Framework", frameworkHash: "156ac7655cf758be69a3a441aeb3ef488a4d8b77c30b2a3f3fed6c26f7e6bc8b", integrityOffset: 267257136)
-    public init(id: String, version: String, build: String, main: String, mainHash: String, headerHash: String, frameworkPath: String? = nil, frameworkHash: String? = nil, integrityOffset: Int? = nil) {
+    public let vendorAuthenticated: Bool?
+    public static let current = PatchAdapter(id: "chatgpt-macos-20052-v33", version: "26.1007.21159", build: "20052", main: ".vite/build/early-bootstrap.js", mainHash: "24286bb6b5fe449e6d4f1b8cfc061c35be57e54fe4ea0802b3e257f32c45fc33", headerHash: "c497f508930f223a999ec4c436a7526252914d380339db9e229cb023d200b41f", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.40/Codex Framework", frameworkHash: "156ac7655cf758be69a3a441aeb3ef488a4d8b77c30b2a3f3fed6c26f7e6bc8b", integrityOffset: 267257136)
+    public static let previous = PatchAdapter(id: "chatgpt-macos-13536-v33", version: "26.1002.52244", build: "13536", main: ".vite/build/early-bootstrap.js", mainHash: "47fe797c40b015b19546b10cd5bf993be67ba76fa5648c6d652c7bb9149fb226", headerHash: "b0d442ed63026a266e9f86df139bcafb9dcafe628b7065ea0473fe82760a82f0", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.27/Codex Framework", frameworkHash: "d987a157c88c5b8a7f1694261d40ced166cdd5544b28f5ff397d1783fc47ccbc", integrityOffset: 267156240)
+    public static let reviewed: [PatchAdapter] = [.current, .previous]
+    public var isReviewed: Bool { vendorAuthenticated == true || Self.reviewed.contains { $0.id == id } }
+    public static func forBundle(_ app: URL) throws -> PatchAdapter {
+        let data = try Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+        let info = try PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any]
+        if let adapter = reviewed.first(where: { $0.build == info?["CFBundleVersion"] as? String && $0.version == info?["CFBundleShortVersionString"] as? String }) { return adapter }
+        let receiptURL = app.appendingPathComponent("Contents/Resources/codexpp-patch.json")
+        let source: URL
+        if FileManager.default.fileExists(atPath: receiptURL.path) {
+            let receipt = try JSONDecoder().decode(PatchReceipt.self, from: Data(contentsOf: receiptURL))
+            source = URL(fileURLWithPath: receipt.backupPath).resolvingSymlinksInPath()
+        } else { source = app }
+        let sourceInfo = try PropertyListSerialization.propertyList(from: Data(contentsOf: source.appendingPathComponent("Contents/Info.plist")), format: nil) as? [String: Any] ?? [:]
+        guard sourceInfo["CFBundleVersion"] as? String == info?["CFBundleVersion"] as? String,
+              sourceInfo["CFBundleShortVersionString"] as? String == info?["CFBundleShortVersionString"] as? String else {
+            throw PatchError.invalid("The update backup version does not match the installed app.")
+        }
+        return try VendorUpdateAdapter.discover(source, info: sourceInfo)
+    }
+    public static func approveArchive(_ archive: AsarArchive) throws {
+        if reviewed.contains(where: { $0.headerHash == archive.headerHash }) { return }
+        let app = archive.url.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        try VendorUpdateAdapter.authenticate(app)
+    }
+    public init(id: String, version: String, build: String, main: String, mainHash: String, headerHash: String, frameworkPath: String? = nil, frameworkHash: String? = nil, integrityOffset: Int? = nil, vendorAuthenticated: Bool = false) {
         self.id = id; self.version = version; self.build = build; self.main = main; self.mainHash = mainHash; self.headerHash = headerHash
-        self.frameworkPath = frameworkPath; self.frameworkHash = frameworkHash; self.integrityOffset = integrityOffset
+        self.frameworkPath = frameworkPath; self.frameworkHash = frameworkHash; self.integrityOffset = integrityOffset; self.vendorAuthenticated = vendorAuthenticated ? true : nil
     }
     public func validate(version: String, build: String, archive: AsarArchive) throws -> Data {
         guard version == self.version, build == self.build, archive.headerHash == headerHash else { throw PatchError.invalid("Unsupported ChatGPT build \(version) (\(build)). A reviewed patch adapter is required; the app has been left untouched.") }
@@ -38,12 +64,18 @@ public struct PatchAdapter: Codable, Sendable {
             throw PatchError.invalid("The native capture bridge is missing.")
         }
         let captureRuntime = try String(contentsOf: captureURL, encoding: .utf8)
+        guard let bookmarksURL = Bundle.module.url(forResource: "native-bookmarks", withExtension: "js") else { throw PatchError.invalid("The native bookmarks bridge is missing.") }
+        let bookmarksRuntime = try String(contentsOf: bookmarksURL, encoding: .utf8)
+        guard let appToolsParentURL = Bundle.module.url(forResource: "app-tools-parent", withExtension: "mjs") else { throw PatchError.invalid("The app-tools parent launcher is missing.") }
         let code = """
         /* Codex++ bootstrap schema 2; adapter \(id). */
         {
           const ppElectron = require('electron');
           const ppProbe = process.argv.includes('--codexpp-probe');
           try {
+            const ppBrowserNative = require(require('path').join(\(try literal(helper.path)), 'Contents', 'Resources', 'browser-native.node'));
+            if (ppBrowserNative.protocol !== 1 || typeof ppBrowserNative.prepare !== 'function' || typeof ppBrowserNative.configureUpdates !== 'function') throw Error('Codex++ native addon contract changed.');
+            if (ppBrowserNative.keychainInteractionAllowed !== false) throw Error('Codex++ noninteractive Keychain policy is unavailable.');
             ppElectron.app.commandLine.removeSwitch('remote-debugging-port');
             ppElectron.app.commandLine.removeSwitch('remote-debugging-address');
             ppElectron.app.commandLine.appendSwitch('remote-debugging-port', '\(port)');
@@ -54,15 +86,35 @@ public struct PatchAdapter: Codable, Sendable {
               fs.mkdirSync(dir, {recursive:true, mode:0o700});
               const file = path.join(dir, ppProbe ? 'probe.json' : 'boot.json');
               const temp = file + '.' + process.pid;
-              fs.writeFileSync(temp, JSON.stringify({schema:1, adapter:\(try literal(id)), pid:process.pid, app:ppElectron.app.getAppPath(), port:\(port), electron:process.versions.electron, time:new Date().toISOString()}), {mode:0o600});
+              fs.writeFileSync(temp, JSON.stringify({schema:1, adapter:\(try literal(id)), pid:process.pid, app:ppElectron.app.getAppPath(), port:\(port), electron:process.versions.electron, keychainInteractionAllowed:ppBrowserNative.keychainInteractionAllowed, time:new Date().toISOString()}), {mode:0o600});
               fs.renameSync(temp, file);
               if (ppProbe) ppElectron.app.exit(0);
             }).catch(error => { console.error('[Codex++] boot:', error); if (ppProbe) ppElectron.app.exit(1); });
             if (!ppProbe) {
-              let ppBrowserNative;
-              try { ppBrowserNative = require(require('path').join(\(try literal(helper.path)), 'Contents', 'Resources', 'browser-native.node')); }
-              catch (error) { console.error('[Codex++] native browser module:', error); }
+              Object.defineProperty(globalThis, '__codexPPWrapAppToolsConfig', {value: config => {
+                if (process.platform !== 'darwin') return config;
+                const parent = \(try literal(appToolsParentURL.path));
+                if (typeof config?.command !== 'string' || !Array.isArray(config?.args) ||
+                    !config.command.endsWith('/scripts/launch_codex_app_tools_mcp') ||
+                    config.args.length < 1 || !config.args[0].endsWith('/server.mjs') && config.args[0] !== './server.mjs') {
+                  throw Error('Codex app-tools launch contract changed.');
+                }
+                return {...config, args:[parent, ...config.args]};
+              }, configurable:false, enumerable:false, writable:false});
+              // Sparkle loads its addon later. Configure its delegate before init
+              // can start a check, without changing download/signature validation.
+              const ppModule = require('module'), ppLoad = ppModule._load;
+              ppModule._load = function(request, parent, isMain) {
+                const loaded = ppLoad.apply(this, arguments);
+                if (typeof request === 'string' && request.endsWith('/native/sparkle.node')) {
+                  if (!ppBrowserNative?.configureUpdates(\(try literal(helper.path)), \(try literal(support.path)), \(try literal(String(decoding: JSONEncoder().encode(PatchAdapter.reviewed.map(\.build)), as: UTF8.self))))) {
+                    throw Error('Codex++ update handoff is unavailable.');
+                  }
+                }
+                return loaded;
+              };
               const ppNativeBrowser = \(browserRuntime)(ppElectron, \(try literal(support.path)), ppBrowserNative);
+              const ppNativeBookmarks = \(bookmarksRuntime)(ppElectron, \(try literal(support.path)));
               const ppNativeShell = \(shellRuntime)(ppElectron, \(try literal(support.path)));
               const ppCaptureRequestChannel = 'codex_desktop:message-from-view';
               const ppCaptureResponseChannel = 'codex_desktop:message-for-view';
@@ -71,6 +123,11 @@ public struct PatchAdapter: Codable, Sendable {
               const ppHandle = ppElectron.ipcMain.handle.bind(ppElectron.ipcMain);
               ppElectron.ipcMain.handle = (channel, listener) => ppHandle(channel, channel === ppCaptureRequestChannel
                 ? (event, request) => {
+                    if (ppNativeBookmarks.handles(request)) { ppNativeBookmarks.handle(event, request); return; }
+                    if (request?.type === 'codexpp-shell-shortcut') {
+                      try { ppNativeShell.shortcut(event, request); } catch {}
+                      return;
+                    }
                     if (request?.type === 'codexpp-shell-controls') {
                       let result;
                       try { result = ppNativeShell.controls(event, request); }

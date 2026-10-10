@@ -1,0 +1,76 @@
+{
+  "date": "2026-10-10",
+  "targetVersion": "26.1007.21159",
+  "patchAdapter": "chatgpt-macos-20052-v30",
+  "measurement": "Full --patch-app pipeline on separate copies of the same unmodified official release; includes signature/hash validation, staging, signing, real startup probe and atomic commit. Does not include network download time.",
+  "wallTimeSeconds": {
+    "baseline": 103.99,
+    "optimized": 96.38,
+    "indexed": 52.14,
+    "batched": 46.76
+  },
+  "speedup": 2.22,
+  "reductionPercent": 55.0,
+  "changes": [
+    "Index ASAR paths once per archive to avoid repeated whole-directory bridging",
+    "Use verified OpenAI-signed bundled Node for parser processes, with JavaScriptCore fallback when absent",
+    "Apply all ASAR replacements in one pass while retaining original payload offsets and verifying each replacement",
+    "Show progress phases and connection errors in the helper menu; update the status row while open",
+    "Use actual PID liveness for update handoff waits"
+  ],
+  "equivalence": {
+    "archiveEntriesCompared": 21089,
+    "identicalContentHashesSizesUnpackedAndLinkMetadata": true,
+    "strictNestedSignatureVerified": true,
+    "nativeKeychainInteractionAllowed": false
+  },
+  "progressPhases": [
+    "2026-10-10T08:52:13Z Verifying update\u2026",
+    "2026-10-10T08:52:14Z Preparing update\u2026",
+    "2026-10-10T08:52:15Z Adapting extensions\u2026",
+    "2026-10-10T08:52:39Z Signing update\u2026",
+    "2026-10-10T08:52:48Z Verifying patched update\u2026",
+    "2026-10-10T08:52:50Z Checking startup\u2026",
+    "2026-10-10T08:52:55Z Installing patched update\u2026"
+  ],
+  "keychainPromptEventObserved": false,
+  "normalAppRemainedRunning": {
+    "pid": 10326,
+    "adapter": "chatgpt-macos-20052-v30",
+    "normalKeychainInteractionAllowed": false
+  },
+  "newHelper": {
+    "activeExtensions": 3,
+    "connected": true,
+    "extensionsPaused": false,
+    "installedExtensions": 3,
+    "pid": 16096,
+    "running": true,
+    "runtimeErrors": {},
+    "schema": 1,
+    "settingsSessions": 6,
+    "time": "2026-10-10T08:57:16Z"
+  },
+  "checks": {
+    "swiftPassed": 85,
+    "swiftSkipped": 6,
+    "javascriptPassed": 47,
+    "javascriptSkipped": 11,
+    "nativeHarnessesPassed": 3,
+    "exitCode": 0
+  },
+  "uiVerification": {
+    "appWindowObserved": true,
+    "browserTabsRestored": true,
+    "helperMenuObservation": "Windowless helper UI could not be inspected through the app binding; its live diagnostics show the new helper connected with three active extensions."
+  },
+  "evidenceHashes": {
+    "baseline": "386b9e1ea4908c5a57af7ee4d93c938fbe1434f92e2be94d71682afe96737f74",
+    "optimized": "c8875b4d3d420e05c49b0c701341e539b871a3c128b0f266ff4b2a457b47d614",
+    "indexed": "3cdba737971d5f963d81fcf5e005f1813d1167ba34eb37e72cc73bfefe648478",
+    "batched": "38123860e9709eed2ff54d5dc508b06b2565fece51b6faab4fadfccbbe50673d",
+    "checks-batched": "bb430d259955adb923905464462289126c2b9eead916c8fe86b772dd3833e7e6"
+  },
+  "helperExecutableSHA256": "5d50b3f7f17a20c1e54231ff6735f93467b4392bfc6a2a378ff182e3142a8ec4",
+  "recordedAt": "2026-10-10T08:57:17.967261+00:00"
+}

@@ -21,7 +21,7 @@ final class BetterSidebarTests: XCTestCase {
             }
         }
     }
-    @MainActor private func fixture(existingDivider: Bool, projects: Bool = false) async throws -> WKWebView {
+    @MainActor private func fixture(existingDivider: Bool, projects: Bool = false, trackFrames: Bool = false) async throws -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 900, height: 600), configuration: config)
@@ -58,6 +58,7 @@ final class BetterSidebarTests: XCTestCase {
         row.addEventListener('click',()=>opens++);
         window.electronBridge = {showContextMenu:async(items,position)=>{menuCalls.push({items,position});return {id:selection}}};
         \(projects ? Self.projectFixture : "")
+        \(trackFrames ? "globalThis.rafCallbacks=[];globalThis.rafRequests=0;globalThis.requestAnimationFrame=callback=>{rafRequests++;rafCallbacks.push(callback);return rafRequests;};globalThis.cancelAnimationFrame=()=>{};" : "")
         \(runtime)
         globalThis.extensionPackage = \(package);
         void __codexPP.sync(extensionPackage);
@@ -195,6 +196,23 @@ final class BetterSidebarTests: XCTestCase {
         _ = try await evaluate("void __codexPP.sync([])", in:view)
     }
 
+    @MainActor func testHomeOutlineUsesNativeDOMFactoryWithoutReactExports() async throws {
+        let view = try await fixture(existingDivider:false, projects:true)
+        _ = try await evaluate("""
+        const home=document.querySelector('[data-sidebar-destination="builtin:home"]');
+        home.firstElementChild.innerHTML='<svg data-native-home></svg>';
+        const icon=()=>{};icon.createElement=doc=>{const svg=doc.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('data-native-outline','');return svg;};
+        home.__reactFiber$fixture={memoizedProps:{item:{id:'builtin:home',railIcons:{default:icon}}},return:null};
+        selection='codexpp-better-sidebar-pin-project';alpha.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+        """, in:view)
+        _ = try await evaluate("document.querySelector('[data-better-sidebar-project=alpha]').click()", in:view)
+        let outlined = try await evaluate("String(!!home.querySelector('[data-better-sidebar-home-outline] [data-native-outline]') && getComputedStyle(home.querySelector('[data-native-home]')).display==='none')", in:view)
+        XCTAssertEqual(outlined,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+        let cleaned = try await evaluate("String(!home.querySelector('[data-better-sidebar-home-outline]') && getComputedStyle(home.querySelector('[data-native-home]')).display!=='none')", in:view)
+        XCTAssertEqual(cleaned,"true")
+    }
+
     @MainActor func testProjectSelectionKeepsHomeInactiveDuringNativeButtonReplacement() async throws {
         let view = try await fixture(existingDivider:false, projects:true)
         _ = try await evaluate("""
@@ -209,9 +227,16 @@ final class BetterSidebarTests: XCTestCase {
         // The rail marker must keep its selected glyph and hue suppressed now.
         let replacement = try await evaluate("""
         const replacementHome=originalHome.cloneNode(true);replacementHome.removeAttribute('data-better-sidebar-inactive');originalHome.replaceWith(replacementHome);
-        String(getComputedStyle(replacementHome).color==='rgb(150, 150, 150)' && getComputedStyle(replacementHome.querySelector('[data-native-home]')).display==='none');
+        String(getComputedStyle(replacementHome).color==='rgb(150, 150, 150)' && getComputedStyle(replacementHome.querySelector('[data-native-home]')).display!=='none');
         """, in:view)
         XCTAssertEqual(replacement,"true")
+        let outline = try await evaluate("""
+        const outlineHost=document.createElement('span');outlineHost.dataset.betterSidebarHomeOutline='';replacementHome.firstElementChild.append(outlineHost);
+        const pendingVisible=getComputedStyle(replacementHome.querySelector('[data-native-home]')).display!=='none';
+        outlineHost.innerHTML='<svg data-outline-home></svg>';
+        String(pendingVisible && getComputedStyle(replacementHome.querySelector('[data-native-home]')).display==='none' && getComputedStyle(outlineHost).display==='contents');
+        """, in:view)
+        XCTAssertEqual(outline,"true")
         _ = try await evaluate("replacementHome.click()", in:view)
         let home = try await evaluate("String(!document.querySelector('[data-app-navigation-rail]').hasAttribute('data-better-sidebar-selection') && getComputedStyle(replacementHome).color==='rgb(255, 255, 255)' && getComputedStyle(replacementHome.querySelector('[data-native-home]')).display!=='none')", in:view)
         XCTAssertEqual(home,"true")
@@ -281,6 +306,39 @@ final class BetterSidebarTests: XCTestCase {
         """, in:view)
         let opened = try await evaluate("String(document.querySelector('[data-better-sidebar-project-title]').textContent==='Alpha' && document.querySelector('[data-better-sidebar-project=alpha]').getAttribute('aria-current')==='page' && sessionStorage.getItem('codexpp.better-sidebar.focused-project:account-one')==='alpha' && projectOpens===1)", in:view)
         XCTAssertEqual(opened,"true")
+    }
+
+    @MainActor func testSidebarObserverIgnoresResizeAndUnrelatedRenderingButTracksNativeChanges() async throws {
+        let view = try await fixture(existingDivider:false,projects:true,trackFrames:true)
+        _ = try await evaluate("selection='codexpp-better-sidebar-pin-project';alpha.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))", in:view)
+        _ = try await evaluate("document.querySelector('[data-better-sidebar-project=alpha]').click();rafCallbacks.splice(0).forEach(callback=>callback());", in:view)
+        _ = try await evaluate("""
+        rafCallbacks.splice(0).forEach(callback=>callback());globalThis.beforeResizeFrames=rafRequests;
+        globalThis.visibilityReads=0;
+        const nativeVisibility=Element.prototype.checkVisibility;
+        Element.prototype.checkVisibility=function(...args){visibilityReads++;return nativeVisibility.apply(this,args);};
+        window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.project-sections:account-one'}));
+        """, in:view)
+        let layoutReads = try await evaluate("String(visibilityReads<=1)", in:view)
+        XCTAssertEqual(layoutReads,"true")
+        _ = try await evaluate("""
+        const main=document.createElement('main');main.innerHTML='<p>Streaming message</p>';document.body.append(main);
+        for(let width=250;width<300;width++) {
+          sidebar.style.width=width+'px';
+          main.querySelector('p').textContent='Streaming message '+width;
+          main.setAttribute('aria-expanded',String(width%2===0));
+          sidebar.querySelector('[data-app-action-sidebar-thread-row]').firstChild.data='Streaming chat preview '+width;
+          document.querySelector('[data-better-sidebar-project=alpha] span').textContent='Updated extension icon';
+        }
+        """, in:view)
+        let ignored = try await evaluate("String(rafRequests===beforeResizeFrames && rafCallbacks.length===0)", in:view)
+        XCTAssertEqual(ignored,"true")
+        _ = try await evaluate("alpha.querySelector('[data-sidebar-project-drop-zone] span').textContent='New native icon';", in:view)
+        let nativeRefresh = try await evaluate("String(rafRequests===beforeResizeFrames+1 && rafCallbacks.length===1)", in:view)
+        XCTAssertEqual(nativeRefresh,"true")
+        _ = try await evaluate("rafCallbacks.splice(0).forEach(callback=>callback());", in:view)
+        let icon = try await evaluate("String(document.querySelector('[data-better-sidebar-project=alpha]').textContent==='New native icon' && rafCallbacks.length===0)", in:view)
+        XCTAssertEqual(icon,"true")
     }
 
     @MainActor func testProjectActivityFiltersNativeProjectIDsAndRestoresOnHome() async throws {

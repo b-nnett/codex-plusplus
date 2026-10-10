@@ -11,6 +11,7 @@ final class HelperModel: ObservableObject {
     @Published private(set) var runtimeErrors: [String: String] = [:]
     @Published private(set) var connected = false
     @Published private(set) var running = false
+    @Published private(set) var updateProgress: String?
     @Published private(set) var busy = false
     @Published private(set) var activeCount = 0
     @Published var message: String?
@@ -27,6 +28,7 @@ final class HelperModel: ObservableObject {
     private var polling = false
     private var validatedPatchStamp: String?
     private var connectionError: String?
+    private var failedUpdateTicket: Data?
     var hasPatchedApp: Bool { FileManager.default.fileExists(atPath: URL(fileURLWithPath: settings.appPath).appendingPathComponent("Contents/Resources/codexpp-patch.json").path) }
     var statusChanged: (() -> Void)?
     var github: URL { ExtensionManifest.repositoryURL(settings.githubRepo ?? "b-nnett/codex-plusplus")! }
@@ -62,8 +64,19 @@ final class HelperModel: ObservableObject {
         guard !runtimeErrors.isEmpty else { return nil }
         return runtimeErrors.count == 1 ? "1 extension error" : "\(runtimeErrors.count) extension errors"
     }
+    var statusError: String? { connectionError ?? extensionErrorStatus }
+    var repairActionTitle: String? {
+        guard configurationReadable else { return nil }
+        if !hasPatchedApp { return "Install Extensions Support and Restart" }
+        if statusError != nil || (running && !connected && !settings.extensionsPaused) {
+            return "Repair and Restart \(appName)"
+        }
+        return nil
+    }
     var status: String {
+        if let updateProgress { return updateProgress }
         if busy { return "Working…" }
+        if let connectionError { return connectionError }
         if settings.extensionsPaused { return running ? "Running without extensions" : "Extensions paused" }
         if connected { return extensionErrorStatus ?? "Connected to \(appName)" }
         return running ? "Restart to connect extensions" : "\(appName) is closed"
@@ -71,15 +84,64 @@ final class HelperModel: ObservableObject {
     var codexApp: NSRunningApplication? {
         guard !isPreview else { return nil }
         let selected = URL(fileURLWithPath: settings.appPath).resolvingSymlinksInPath()
-        return NSWorkspace.shared.runningApplications.first { $0.bundleURL?.resolvingSymlinksInPath() == selected }
+        return NSWorkspace.shared.runningApplications.first { $0.bundleURL?.resolvingSymlinksInPath() == selected && ProcessLiveness.isAlive($0.processIdentifier) }
     }
     func startMonitoring() {
         guard monitor == nil, !isPreview else { return }
         monitor = Task { [weak self] in
             while !Task.isCancelled {
+                await self?.resumeUpdateIfNeeded()
                 await self?.poll()
                 try? await Task.sleep(for: .seconds(3))
             }
+        }
+    }
+    private func resumeUpdateIfNeeded() async {
+        guard !busy, !polling, configurationReadable else { return }
+        let file = UpdateHandoff.file(in: store.root)
+        guard let bytes = try? Data(contentsOf: file), bytes != failedUpdateTicket else { return }
+        do {
+            let ticket = try JSONDecoder().decode(UpdateHandoff.self, from: bytes)
+            let app = URL(fileURLWithPath: settings.appPath).resolvingSymlinksInPath()
+            let helper = Bundle.main.bundleURL.resolvingSymlinksInPath()
+            try ticket.validate(app: app, helper: helper)
+            guard !ProcessLiveness.isAlive(ticket.oldPID),
+                  codexApp == nil else { return }
+            // Sparkle may use a non-atomic vendor-to-local replacement. Wait
+            // for its installer to exit before reading or changing the bundle.
+            let processes = try await runCommand("/bin/ps", ["-axo", "command="])
+            guard processes.status == 0,
+                  !processes.output.split(separator: "\n").contains(where: {
+                      $0.contains("/Autoupdate \(DesktopAppLocator.bundleIdentifier) ")
+                  }), let adapter = try ticket.replacementAdapter(at: app) else { return }
+            try await operate {
+                self.connectionError = nil
+                self.updateProgress = "Preparing update…"
+                defer { self.updateProgress = nil; self.statusChanged?() }
+                let patcher = AppPatcher(support: self.store.root, helper: helper, port: self.settings.port, adapter: adapter, onProgress: { [weak self] phase in
+                    Task { @MainActor in
+                        self?.updateProgress = phase
+                        self?.statusChanged?()
+                    }
+                })
+                _ = try await Task.detached { try patcher.install(app) }.value
+                // A durable success record precedes deleting the pending ticket.
+                let evidence: [String: Any] = ["schema":1,"state":"patched","fromPID":ticket.oldPID,
+                    "targetBuild":adapter.build,"adapter":adapter.id,"time":ISO8601DateFormatter().string(from: Date())]
+                try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys]).write(to: self.store.root.appendingPathComponent("Diagnostics/update.json"), options: .atomic)
+                try FileManager.default.removeItem(at: file)
+                self.updateProgress = "Restarting ChatGPT…"; self.statusChanged?()
+                let config = NSWorkspace.OpenConfiguration()
+                config.createsNewApplicationInstance = true
+                _ = try await NSWorkspace.shared.openApplication(at: app, configuration: config)
+                self.validatedPatchStamp = nil
+                self.failedUpdateTicket = nil
+            }
+        } catch {
+            failedUpdateTicket = bytes
+            connectionError = "Automatic repatch failed: \(error.localizedDescription)"
+            message = connectionError
+            writeDiagnostics(); statusChanged?()
         }
     }
     func reloadExtensions() throws {
@@ -139,13 +201,16 @@ final class HelperModel: ObservableObject {
         do {
             guard hasPatchedApp else { throw HelperError.message("Restart ChatGPT from the helper to install Extensions support.") }
             let appURL = URL(fileURLWithPath: settings.appPath).resolvingSymlinksInPath()
-            let paths = ["Contents/Resources/app.asar", "Contents/Info.plist", "Contents/Resources/codexpp-patch.json", PatchAdapter.current.frameworkPath!]
+            let framework = appURL.appendingPathComponent("Contents/Frameworks/Codex Framework.framework/Versions/Current/Codex Framework").resolvingSymlinksInPath()
+            guard framework.path.hasPrefix(appURL.path + "/") else { throw HelperError.message("The browser framework is outside the selected app.") }
+            let frameworkPath = String(framework.path.dropFirst(appURL.path.count + 1))
+            let paths = ["Contents/Resources/app.asar", "Contents/Info.plist", "Contents/Resources/codexpp-patch.json", frameworkPath]
             let stamp = try paths.map { path in
                 let attributes = try appURL.appendingPathComponent(path).resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
                 return "\(appURL.path)/\(path):\(attributes.contentModificationDate?.timeIntervalSince1970 ?? 0):\(attributes.fileSize ?? 0)"
             }.joined(separator: "|")
             if validatedPatchStamp != stamp {
-                let patcher = AppPatcher(support: store.root, helper: Bundle.main.bundleURL, port: settings.port)
+                let patcher = AppPatcher(support: store.root, helper: Bundle.main.bundleURL, port: settings.port, adapter: try PatchAdapter.forBundle(appURL))
                 let report = try await Task.detached { try patcher.status(appURL) }.value
                 guard report.state == "patched" else { throw HelperError.message("ChatGPT's Extensions support needs to be installed again.") }
                 validatedPatchStamp = stamp
@@ -264,11 +329,16 @@ final class HelperModel: ObservableObject {
     func restart(extensionsPaused: Bool) {
         perform { try await self.restartNow(extensionsPaused: extensionsPaused) }
     }
+    func repair() {
+        // Repair support and reconnect without toggling the user's pause setting
+        // or changing which extensions are enabled.
+        restart(extensionsPaused: settings.extensionsPaused)
+    }
     func restoreOriginal() {
         perform {
             guard !self.isPreview else { throw HelperError.message("Restoration is disabled in the preview.") }
             let url = URL(fileURLWithPath: self.settings.appPath).resolvingSymlinksInPath()
-            let patcher = AppPatcher(support: self.store.root, helper: Bundle.main.bundleURL, port: self.settings.port)
+            let patcher = AppPatcher(support: self.store.root, helper: Bundle.main.bundleURL, port: self.settings.port, adapter: try PatchAdapter.forBundle(URL(fileURLWithPath: self.settings.appPath)))
             _ = try await Task.detached { try patcher.status(url) }.value
             if let app = self.codexApp {
                 guard app.terminate() else { throw HelperError.message("ChatGPT could not quit.") }
@@ -285,7 +355,7 @@ final class HelperModel: ObservableObject {
         guard !isPreview else { throw HelperError.message("Desktop app actions are disabled in this preview. Open Codex++.app to connect to ChatGPT.") }
         _ = try validatedApp()
         let appURL = URL(fileURLWithPath: settings.appPath).resolvingSymlinksInPath()
-        let patcher = AppPatcher(support: store.root, helper: Bundle.main.bundleURL, port: settings.port)
+        let patcher = AppPatcher(support: store.root, helper: Bundle.main.bundleURL, port: settings.port, adapter: try PatchAdapter.forBundle(appURL))
         // Stage and probe before asking the running desktop app to quit.
         _ = try await Task.detached { try patcher.prepare(appURL) }.value
         var next = settings; next.extensionsPaused = extensionsPaused
@@ -294,10 +364,10 @@ final class HelperModel: ObservableObject {
         if let app = codexApp {
             guard app.terminate() else { throw HelperError.message("\(appName) could not quit. Close it manually and try again.") }
             for _ in 0..<40 {
-                if app.isTerminated { break }
+                if !ProcessLiveness.isAlive(app.processIdentifier) { break }
                 try await Task.sleep(for: .milliseconds(250))
             }
-            guard app.isTerminated else { throw HelperError.message("\(appName) is still open. Finish any quit dialog, then try again.") }
+            guard !ProcessLiveness.isAlive(app.processIdentifier) else { throw HelperError.message("\(appName) is still open. Finish any quit dialog, then try again.") }
         }
         do { _ = try await Task.detached { try patcher.install(appURL) }.value }
         catch {

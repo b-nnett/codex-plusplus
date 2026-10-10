@@ -20,6 +20,8 @@ transition has finished before returning.
 
 The transition uses ChatGPT's own motion duration and spring easing tokens. If
 macOS Reduce Motion is enabled, the panel changes immediately.
+These transitions apply only while entering, using, or exiting Focus Mode;
+normal sidebar resizing follows the app's native width updates directly.
 
 Install this folder through **Settings → Codex++ → Extensions**, then enable
 **Focus Mode**. Disabling the extension while Focus Mode is active restores the
@@ -55,3 +57,38 @@ window focus cancels a pending dwell. Cleanup cancels recovery/dwell timers so
 an old instance cannot affect the replacement after a hot update. The shortcut
 accepts the logical backslash/pipe key on British/ISO layouts as well as the
 original ANSI physical key, with the same strict modifier checks.
+
+Focus state is tracked independently of CSS. Removing its class or removing or
+altering/disabling its stylesheet safely restores the sidebar and native controls rather
+than leaving a half-active mode. Native sidebar transitions are serialized and
+rapid toggles are coalesced into the latest desired state. Restoring a temporarily
+unavailable shell is bounded and scoped to the original frame: a replacement
+route is never toggled by an old restoration.
+
+Native-controls heartbeats share an outstanding request instead of building up
+duplicate IPC calls. Old failures cannot exit a newer Focus Mode session.
+Disable/hot-update cleanup blocks re-entry and waits for acknowledgement and
+bounded sidebar restoration before the replacement extension starts. Resizing
+cancels dwell and refreshes the native rail-width token; IME composition is never
+intercepted by the shortcut.
+
+Cleanup also advances from observed native state changes, so throttled polling
+timers do not hold up a successful restoration. Incomplete shell capabilities
+are rejected at startup before registering shortcuts or changing the interface.
+
+Full-width browser/right panes follow the expanded canvas rather than the
+native motion model's reserved navigation-rail width. This uses the app's
+semantic full-width marker, preserves split-pane sizing and native inline styles,
+and follows edge dwell, resizing, and right-to-left layouts automatically.
+
+Patch v31 adds a per-window native shortcut relay using Electron's public input
+events. It works while an embedded website has keyboard focus, without injecting
+code into the site or registering a system-wide shortcut. Renewable leases and
+click-time extension checks prevent disabled/stopped instances consuming keys.
+The renderer keyboard fallback remains available on earlier patches.
+
+Visible full-width browser portals also follow the real pane width, including
+native zoom/scaling and cursor overlays; cached, staged, background and ambiguous
+surfaces are left alone. Overrides are removed on exit and disable. Exit CSS
+tracking uses a shorter 90 ms tween so it does not trail the native sidebar spring;
+entry motion, the 250 ms traffic-light delay, and Reduce Motion are unchanged.

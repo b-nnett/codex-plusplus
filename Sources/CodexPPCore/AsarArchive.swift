@@ -23,7 +23,7 @@ public struct AsarArchive {
     public let headerHash: String
     public let payloadOffset: UInt64
     public let fileSize: UInt64
-    private var header: [String: Any]
+    private let header: NSDictionary
 
     public init(_ url: URL) throws {
         self.url = url
@@ -38,7 +38,7 @@ public struct AsarArchive {
               pickleSize + 4 == headerSize, jsonSize <= pickleSize - 4,
               8 + headerSize <= fileSize else { throw PatchError.invalid("Invalid ASAR header.") }
         let json = try Self.read(file, count: Int(jsonSize))
-        guard let parsed = try JSONSerialization.jsonObject(with: json) as? [String: Any], parsed["files"] is [String: Any] else { throw PatchError.invalid("Invalid ASAR directory.") }
+        guard let parsed = try JSONSerialization.jsonObject(with: json) as? NSDictionary, parsed["files"] is NSDictionary else { throw PatchError.invalid("Invalid ASAR directory.") }
         header = parsed; headerHash = sha256(json); payloadOffset = 8 + headerSize
     }
 
@@ -50,13 +50,17 @@ public struct AsarArchive {
     private func entry(_ path: String) throws -> [String: Any] {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false)
         guard !parts.isEmpty, !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." }) else { throw PatchError.invalid("Unsafe ASAR path.") }
+        // NSDictionary lookups avoid bridging an entire directory map for
+        // every component or building a full index for two-entry status checks.
         var node = header
         for part in parts {
-            guard let files = node["files"] as? [String: Any], let next = files[String(part)] as? [String: Any] else { throw PatchError.invalid("Missing ASAR entry: \(path)") }
-            node = next
+            guard let files = node["files"] as? NSDictionary,
+                  let child = files[String(part)] as? NSDictionary else { throw PatchError.invalid("Missing ASAR entry: \(path)") }
+            node = child
         }
         guard node["link"] == nil, node["unpacked"] as? Bool != true else { throw PatchError.invalid("Bootstrap must be a packed, regular ASAR entry.") }
-        return node
+        guard let result = node as? [String: Any] else { throw PatchError.invalid("Invalid ASAR entry.") }
+        return result
     }
     public func data(at path: String) throws -> Data {
         let node = try entry(path)
@@ -81,22 +85,30 @@ public struct AsarArchive {
         }.sorted()
     }
     public func replacing(_ path: String, with replacement: Data, output: URL) throws -> String {
+        try replacing([(path, replacement)], output: output)
+    }
+    public func replacing(_ replacements: [(String, Data)], output: URL) throws -> String {
+        guard !replacements.isEmpty, Set(replacements.map { $0.0 }).count == replacements.count else { throw PatchError.invalid("ASAR replacements must contain unique paths.") }
         guard output.standardizedFileURL != url.standardizedFileURL else { throw PatchError.invalid("Patch output must be staged separately.") }
-        var next = header
-        var node = try entry(path)
-        let blockSize = 4 * 1024 * 1024
-        var blocks: [String] = []
-        for start in stride(from: 0, to: replacement.count, by: blockSize) { blocks.append(sha256(replacement.subdata(in: start..<min(start + blockSize, replacement.count)))) }
-        if blocks.isEmpty { blocks = [sha256(Data())] }
-        node["offset"] = String(fileSize - payloadOffset); node["size"] = replacement.count
-        node["integrity"] = ["algorithm": "SHA256", "hash": sha256(replacement), "blockSize": blockSize, "blocks": blocks]
-        func replace(_ tree: inout [String: Any], _ parts: ArraySlice<String>) throws {
-            guard let name = parts.first, var files = tree["files"] as? [String: Any] else { throw PatchError.invalid("Invalid ASAR tree.") }
-            if parts.count == 1 { files[name] = node }
-            else { guard var child = files[name] as? [String: Any] else { throw PatchError.invalid("Missing ASAR directory.") }; try replace(&child, parts.dropFirst()); files[name] = child }
-            tree["files"] = files
+        guard var next = header as? [String: Any] else { throw PatchError.invalid("Invalid ASAR directory.") }
+        var appended: UInt64 = 0
+        for (path, replacement) in replacements {
+            var node = try entry(path)
+            let blockSize = 4 * 1024 * 1024
+            var blocks: [String] = []
+            for start in stride(from: 0, to: replacement.count, by: blockSize) { blocks.append(sha256(replacement.subdata(in: start..<min(start + blockSize, replacement.count)))) }
+            if blocks.isEmpty { blocks = [sha256(Data())] }
+            node["offset"] = String(fileSize - payloadOffset + appended); node["size"] = replacement.count
+            node["integrity"] = ["algorithm": "SHA256", "hash": sha256(replacement), "blockSize": blockSize, "blocks": blocks]
+            func replace(_ tree: inout [String: Any], _ parts: ArraySlice<String>) throws {
+                guard let name = parts.first, var files = tree["files"] as? [String: Any] else { throw PatchError.invalid("Invalid ASAR tree.") }
+                if parts.count == 1 { files[name] = node }
+                else { guard var child = files[name] as? [String: Any] else { throw PatchError.invalid("Missing ASAR directory.") }; try replace(&child, parts.dropFirst()); files[name] = child }
+                tree["files"] = files
+            }
+            try replace(&next, path.split(separator: "/").map(String.init)[...])
+            appended += UInt64(replacement.count)
         }
-        try replace(&next, path.split(separator: "/").map(String.init)[...])
         let json = try JSONSerialization.data(withJSONObject: next, options: [.sortedKeys, .withoutEscapingSlashes])
         let padded = (json.count + 3) & ~3
         var prefix = Data()
@@ -110,9 +122,12 @@ public struct AsarArchive {
         defer { try? input.close(); try? out.close() }
         try out.write(contentsOf: prefix); try input.seek(toOffset: payloadOffset)
         while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty { try out.write(contentsOf: chunk) }
-        try out.write(contentsOf: replacement); try out.synchronize()
+        for (_, replacement) in replacements { try out.write(contentsOf: replacement) }
+        try out.synchronize()
         let verified = try AsarArchive(output)
-        guard try verified.data(at: path) == replacement else { throw PatchError.invalid("Staged bootstrap did not verify.") }
+        for (path, replacement) in replacements {
+            guard try verified.data(at: path) == replacement else { throw PatchError.invalid("Staged ASAR replacement did not verify.") }
+        }
         return verified.headerHash
     }
 }

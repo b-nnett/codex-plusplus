@@ -1,7 +1,7 @@
 {
   "id": "better-sidebar",
   "name": "better-sidebar",
-  "version": "0.5.4",
+  "version": "0.5.8",
   "description": "Move Explore to the bottom and pin your dot or projects to the sidebar.",
   "scope": "renderer",
   "main": "index.js"

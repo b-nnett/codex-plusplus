@@ -1,4 +1,5 @@
 return (async () => {
+  if (globalThis.location && !['/index.html', '/detached-window.html'].includes(globalThis.location.pathname)) return;
   const bridge = globalThis.electronBridge;
   if (typeof bridge?.sendMessageFromView !== 'function') {
     throw new Error('better-browser requires the native Codex++ browser bridge.');
@@ -24,4 +25,12 @@ return (async () => {
   if (result.supported !== true || result.nativeVersion !== 2) {
     throw new Error('Update Codex++ and restart ChatGPT to install the native macOS AutoFill adapter.');
   }
+  // Some windows expose the preload bridge before the browser modules finish loading.
+  for (let attempt = 0; !globalThis.__codexPPBookmarks && attempt < 200; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  const bookmarks = globalThis.__codexPPBookmarks;
+  if (bookmarks?.protocol !== 1) throw new Error('Update Codex++ and restart ChatGPT to install bookmarks.');
+  api.onCleanup(() => bookmarks.disable());
+  await bookmarks.enable();
 })();

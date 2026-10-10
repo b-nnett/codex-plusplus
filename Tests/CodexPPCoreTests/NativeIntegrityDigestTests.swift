@@ -2,6 +2,16 @@ import XCTest
 @testable import CodexPPCore
 
 final class NativeIntegrityDigestTests: XCTestCase {
+    func testDiscoveryRequiresExactlyOneCompleteIntegritySlot() throws {
+        let hash = Data(repeating: 0x42, count: 32)
+        var slot = Data("AGbevlPCksUGKNL8TSn7wGmJEuJsXb2A".utf8)
+        slot.append(contentsOf: [1,1]); slot.append(hash)
+        var bytes = Data(repeating: 0, count: 17); bytes.append(slot)
+        XCTAssertEqual(try NativeIntegrityDigest.discoverOffset(in: bytes, expected: hash), 17)
+        XCTAssertThrowsError(try NativeIntegrityDigest.discoverOffset(in: bytes, expected: Data(repeating: 0, count: 32)))
+        bytes.append(slot)
+        XCTAssertThrowsError(try NativeIntegrityDigest.discoverOffset(in: bytes, expected: hash))
+    }
     func testOnlyTheReviewedDigestBytesChangeAndChecksStayEnabled() throws {
         let before = try NativeIntegrityDigest.dictionaryHash(["Resources/app.asar": ["algorithm": "SHA256", "hash": String(repeating: "a", count: 64)]])
         let after = try NativeIntegrityDigest.dictionaryHash(["Resources/app.asar": ["algorithm": "SHA256", "hash": String(repeating: "b", count: 64)]])

@@ -45,6 +45,49 @@ final class AsarPatchTests: XCTestCase {
         try bytes.prefix(14).write(to: path)
         XCTAssertThrowsError(try AsarArchive(path))
     }
+    func testBatchReplacementPreservesPayloadAndMatchesSequentialEntries() throws {
+        let (path, _, _) = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let input = try AsarArchive(path), before = try Data(contentsOf: path)
+        let replacements = [("main.js", Data("updated main".utf8)), ("package.json", Data("{\"updated\":true}".utf8))]
+        let batch = path.appendingPathExtension("batch"), first = path.appendingPathExtension("first"), last = path.appendingPathExtension("last")
+        _ = try input.replacing(replacements, output: batch)
+        _ = try input.replacing(replacements[0].0, with: replacements[0].1, output: first)
+        _ = try AsarArchive(first).replacing(replacements[1].0, with: replacements[1].1, output: last)
+        let result = try AsarArchive(batch), sequential = try AsarArchive(last)
+        for (path, bytes) in replacements {
+            XCTAssertEqual(try result.data(at: path), bytes)
+            XCTAssertEqual(try result.data(at: path), try sequential.data(at: path))
+        }
+        let output = try Data(contentsOf: batch)
+        XCTAssertEqual(output.subdata(in: Int(result.payloadOffset)..<Int(result.payloadOffset + input.fileSize - input.payloadOffset)), before.subdata(in: Int(input.payloadOffset)..<before.count))
+        XCTAssertEqual(try Data(contentsOf: path), before)
+        XCTAssertThrowsError(try result.data(at: "native.node"))
+        XCTAssertThrowsError(try input.replacing([replacements[0], replacements[0]], output: batch))
+        XCTAssertThrowsError(try input.replacing([("missing.js", Data())], output: batch))
+    }
+    func testIndexedArchiveDoesNotAcceptSlashNamesAsDirectoryAliases() throws {
+        let (path, source, _) = try Self.fixture()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let original = try Data(contentsOf: path), archive = try AsarArchive(path)
+        let length = (0..<4).reduce(0) { $0 | Int(original[12 + $1]) << ($1 * 8) }
+        var tree = try JSONSerialization.jsonObject(with: original.subdata(in: 16..<16 + length)) as! [String: Any]
+        var files = tree["files"] as! [String: Any]
+        files["alias/main.js"] = files["main.js"]; tree["files"] = files
+        let json = try JSONSerialization.data(withJSONObject: tree)
+        let padded = (json.count + 3) & ~3
+        var bytes = Data()
+        for value in [4, padded + 8, padded + 4, json.count] {
+            var little = UInt32(value).littleEndian
+            withUnsafeBytes(of: &little) { bytes.append(contentsOf: $0) }
+        }
+        bytes.append(json); bytes.append(Data(repeating: 0, count: padded - json.count))
+        bytes.append(original.subdata(in: Int(archive.payloadOffset)..<original.count))
+        try bytes.write(to: path)
+        let indexed = try AsarArchive(path)
+        XCTAssertThrowsError(try indexed.data(at: "alias/main.js"))
+        XCTAssertEqual(try indexed.data(at: "main.js"), source)
+    }
     func testUnknownBuildAndModifiedBootstrapAreRejected() throws {
         let (path, source, adapter) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
         let archive = try AsarArchive(path)
@@ -73,6 +116,8 @@ final class AsarPatchTests: XCTestCase {
         XCTAssertTrue(text.contains("NODE_REPL_TRUSTED_SERVICES"))
         XCTAssertTrue(text.contains("sky.get_app_state"))
         XCTAssertTrue(text.contains("__CODEXPP_APPSHOT_V1__"))
+        XCTAssertTrue(text.contains("return {...config, args:[parent, ...config.args]};"))
+        XCTAssertFalse(text.contains("command:node, args:[parent"))
         XCTAssertTrue(text.contains("update: {type: 'completed'}"))
         XCTAssertFalse(text.contains("bare-modifier-monitor --key DoubleCommand"))
         XCTAssertFalse(text.contains("Runtime.addBinding"))

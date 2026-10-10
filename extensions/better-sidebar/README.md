@@ -30,6 +30,9 @@ continues to work. Pin/Unpin text currently uses English.
 
 CSS applies automatically when the sidebar rerenders. On short windows, the
 navigation list retains its normal scrolling behavior.
+Refreshes are limited to relevant native sidebar mutations. Resizing, unrelated
+message rendering, and changes inside extension-owned icons and tooltips do not
+trigger a full sidebar scan.
 
 Right-click a project and choose **Pin to sidebar**. This is separate from the
 app's existing **Pin** action. Its rail icon opens a view of that project's chats

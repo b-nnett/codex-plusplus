@@ -1,0 +1,176 @@
+{
+  "date": "2026-10-09",
+  "from": {
+    "version": "26.1002.52244",
+    "build": "13536",
+    "adapter": "chatgpt-macos-13536-v27"
+  },
+  "to": {
+    "version": "26.1007.21159",
+    "build": "20052",
+    "adapter": "chatgpt-macos-20052-v27"
+  },
+  "method": "Normal Check for Updates and Install Update UI; official Sparkle full download, extraction and installation",
+  "archiveSignatureVerified": true,
+  "installedSignatureVerified": true,
+  "signerFingerprint": "76DD37FBDE90E1EEF963D1D016C4D0E440238796",
+  "unchangedDesignatedRequirement": true,
+  "unchangedUserData": {
+    "bookmarks.json": true,
+    "settings.json": true
+  },
+  "automaticRepatch": {
+    "adapter": "chatgpt-macos-20052-v27",
+    "fromPID": 27404,
+    "schema": 1,
+    "state": "patched",
+    "targetBuild": "20052",
+    "time": "2026-10-09T20:40:17Z"
+  },
+  "boot": {
+    "schema": 1,
+    "adapter": "chatgpt-macos-20052-v27",
+    "pid": 29564,
+    "app": "/Applications/ChatGPT.app/Contents/Resources/app.asar",
+    "port": 9222,
+    "electron": "155.0.8059.40",
+    "time": "2026-10-09T20:40:18.323Z"
+  },
+  "helper": {
+    "activeExtensions": 3,
+    "connected": true,
+    "extensionsPaused": false,
+    "installedExtensions": 3,
+    "pid": 22321,
+    "running": true,
+    "runtimeErrors": {},
+    "schema": 1,
+    "settingsSessions": 1,
+    "time": "2026-10-09T20:41:10Z"
+  },
+  "sampleIntervalSeconds": 0.2,
+  "prematureVendorLaunchObserved": false,
+  "keychainPromptObserved": false,
+  "timeline": [
+    {
+      "time": "2026-10-09T20:36:43.147212+00:00",
+      "installedBuild": "13536",
+      "adapter": "chatgpt-macos-13536-v27",
+      "pendingHandoff": false,
+      "appPIDs": [
+        27404
+      ],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:38:32.496393+00:00",
+      "installedBuild": "13536",
+      "adapter": "chatgpt-macos-13536-v27",
+      "pendingHandoff": false,
+      "appPIDs": [
+        27404
+      ],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:38:37.457633+00:00",
+      "installedBuild": "13536",
+      "adapter": "chatgpt-macos-13536-v27",
+      "pendingHandoff": true,
+      "appPIDs": [
+        27404
+      ],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:38:38.635916+00:00",
+      "installedBuild": "13536",
+      "adapter": "chatgpt-macos-13536-v27",
+      "pendingHandoff": true,
+      "appPIDs": [],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:38:38.872978+00:00",
+      "installedBuild": "20052",
+      "adapter": null,
+      "pendingHandoff": true,
+      "appPIDs": [],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:38:39.106522+00:00",
+      "installedBuild": "20052",
+      "adapter": null,
+      "pendingHandoff": true,
+      "appPIDs": [],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:40:16.534597+00:00",
+      "installedBuild": "20052",
+      "adapter": "chatgpt-macos-20052-v27",
+      "pendingHandoff": true,
+      "appPIDs": [],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:40:18.006156+00:00",
+      "installedBuild": "20052",
+      "adapter": "chatgpt-macos-20052-v27",
+      "pendingHandoff": false,
+      "appPIDs": [
+        29564
+      ],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:40:18.483984+00:00",
+      "installedBuild": "20052",
+      "adapter": "chatgpt-macos-20052-v27",
+      "pendingHandoff": false,
+      "appPIDs": [
+        29564
+      ],
+      "securityAgentPIDs": []
+    },
+    {
+      "time": "2026-10-09T20:40:22.909040+00:00",
+      "installedBuild": "20052",
+      "adapter": "chatgpt-macos-20052-v27",
+      "pendingHandoff": false,
+      "appPIDs": [
+        29564
+      ],
+      "securityAgentPIDs": []
+    }
+  ],
+  "checks": {
+    "swiftPassed": 78,
+    "swiftSkipped": 6,
+    "javascriptPassed": 44,
+    "javascriptSkipped": 11,
+    "nativeHarnessesPassed": 2
+  },
+  "visibleVerification": {
+    "aboutVersion": "26.1007.21159",
+    "bookmarksAboveSuggested": true,
+    "faviconsFillRoundedRectangleFrames": true,
+    "keychainDialogVisible": false
+  },
+  "subsequentProbeRegression": {
+    "observedAt": "2026-10-09T22:01:31+01:00",
+    "item": "Codex Storage Key",
+    "cause": "A fresh disposable-profile staging probe still used the real Chromium Keychain provider",
+    "fix": "Use --use-mock-keychain only in disposable startup probes",
+    "evidence": "probe-validation-2026-10-09.json"
+  },
+  "zeroPromptGoalQualified": false,
+  "subsequentNormalStartupRegression": {
+    "observedAt": "2026-10-09T22:07:07+01:00",
+    "item": "Codex Storage Key",
+    "cause": "Self-signed executable was assigned a changing CDHash Keychain partition despite its stable designated requirement",
+    "fix": "Pinned existing Developer ID signer and disabled process Keychain interaction before Electron loads",
+    "revalidatedIn": "three-clean-updates-2026-10-09.json"
+  }
+}

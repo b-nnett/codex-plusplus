@@ -42,13 +42,14 @@ public struct AppPatcher: Sendable {
     public let helper: URL
     public let port: Int
     public let adapter: PatchAdapter
-    public init(support: URL, helper: URL, port: Int = 9222, adapter: PatchAdapter = .current) {
-        self.support = support; self.helper = helper; self.port = port; self.adapter = adapter
+    public let onProgress: @Sendable (String) -> Void
+    public init(support: URL, helper: URL, port: Int = 9222, adapter: PatchAdapter = .current, onProgress: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.support = support; self.helper = helper; self.port = port; self.adapter = adapter; self.onProgress = onProgress
     }
     private var fm: FileManager { FileManager.default }
     private func signingIdentity() throws -> String {
         // Synthetic test adapters use throwaway signatures; real patches require a stable certificate.
-        adapter.id == PatchAdapter.current.id ? try LocalSigningIdentity.resolve(support: support) : "-"
+        adapter.isReviewed ? try LocalSigningIdentity.resolve(support: support, helper: helper) : "-"
     }
     private func archive(_ app: URL) -> URL { app.appendingPathComponent("Contents/Resources/app.asar") }
     private func receiptURL(_ app: URL) -> URL { app.appendingPathComponent("Contents/Resources/codexpp-patch.json") }
@@ -67,7 +68,8 @@ public struct AppPatcher: Sendable {
     private func receipt(_ app: URL) throws -> PatchReceipt? {
         guard fm.fileExists(atPath: receiptURL(app).path) else { return nil }
         let result = try JSONDecoder().decode(PatchReceipt.self, from: Data(contentsOf: receiptURL(app)))
-        let known = result.adapter == adapter.id || (adapter.id == PatchAdapter.current.id && ["chatgpt-macos-20052-v1", "chatgpt-macos-20052-v2", "chatgpt-macos-20052-v3", "chatgpt-macos-20052-v4", "chatgpt-macos-20052-v5", "chatgpt-macos-20052-v6", "chatgpt-macos-20052-v7", "chatgpt-macos-20052-v8", "chatgpt-macos-20052-v9", "chatgpt-macos-20052-v10", "chatgpt-macos-20052-v11", "chatgpt-macos-20052-v12", "chatgpt-macos-20052-v13", "chatgpt-macos-20052-v14", "chatgpt-macos-20052-v15", "chatgpt-macos-20052-v16", "chatgpt-macos-20052-v17", "chatgpt-macos-20052-v18", "chatgpt-macos-20052-v19"].contains(result.adapter))
+        let compatibleDynamic = adapter.vendorAuthenticated == true && result.adapter.range(of: "^chatgpt-macos-" + adapter.build + "-v[0-9]+$", options: .regularExpression) != nil
+        let known = compatibleDynamic || result.adapter == adapter.id || (adapter.isReviewed && ["chatgpt-macos-20052-v1", "chatgpt-macos-20052-v2", "chatgpt-macos-20052-v3", "chatgpt-macos-20052-v4", "chatgpt-macos-20052-v5", "chatgpt-macos-20052-v6", "chatgpt-macos-20052-v7", "chatgpt-macos-20052-v8", "chatgpt-macos-20052-v9", "chatgpt-macos-20052-v10", "chatgpt-macos-20052-v11", "chatgpt-macos-20052-v12", "chatgpt-macos-20052-v13", "chatgpt-macos-20052-v14", "chatgpt-macos-20052-v15", "chatgpt-macos-20052-v16", "chatgpt-macos-20052-v17", "chatgpt-macos-20052-v18", "chatgpt-macos-20052-v19", "chatgpt-macos-20052-v20", "chatgpt-macos-20052-v21", "chatgpt-macos-20052-v22", "chatgpt-macos-20052-v23", "chatgpt-macos-20052-v24", "chatgpt-macos-13536-v24", "chatgpt-macos-13536-v25", "chatgpt-macos-20052-v25", "chatgpt-macos-20052-v26", "chatgpt-macos-13536-v26", "chatgpt-macos-13536-v27", "chatgpt-macos-20052-v27", "chatgpt-macos-13536-v28", "chatgpt-macos-20052-v28", "chatgpt-macos-13536-v29", "chatgpt-macos-20052-v29", "chatgpt-macos-13536-v30", "chatgpt-macos-20052-v30", "chatgpt-macos-13536-v31", "chatgpt-macos-20052-v31", "chatgpt-macos-13536-v32", "chatgpt-macos-20052-v32"].contains(result.adapter))
         guard result.schema == 1, known, result.main == adapter.main else { throw PatchError.invalid("Unknown patch receipt; refusing to overwrite it.") }
         return result
     }
@@ -91,6 +93,7 @@ public struct AppPatcher: Sendable {
             }
             return PatchReport(state: "patched", appPath: app.path, version: version, build: build, backupPath: receipt.backupPath)
         }
+        if adapter.vendorAuthenticated == true { try VendorUpdateAdapter.authenticate(app) }
         _ = try adapter.validate(version: version, build: build, archive: asar)
         if let relative = adapter.frameworkPath { guard try fileSHA256(app.appendingPathComponent(relative)) == adapter.frameworkHash else { throw PatchError.invalid("The Electron framework does not match the reviewed build.") } }
         return PatchReport(state: "unpatched", appPath: app.path, version: version, build: build, backupPath: nil)
@@ -126,9 +129,11 @@ public struct AppPatcher: Sendable {
     public func stage(_ app: URL) throws -> URL {
         try withLock {
             guard !fm.fileExists(atPath: journalURL.path) else { throw PatchError.invalid("A pending patch transaction exists. Commit or recover it first.") }
+            onProgress("Verifying update…")
             guard try status(app).state == "unpatched" else { throw PatchError.invalid("ChatGPT is already patched.") }
             guard Bundle(url: helper)?.bundleIdentifier == "dev.codexpp.helper" else { throw PatchError.invalid("Build Codex++.app before patching.") }
             try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", helper.path])
+            let identity = try signingIdentity()
             let info = try plist(app), original = try AsarArchive(archive(app))
             let source = try adapter.validate(version: info["CFBundleShortVersionString"] as! String, build: info["CFBundleVersion"] as! String, archive: original)
             let bootstrap = try adapter.bootstrap(original: source, port: port, helper: helper, support: support)
@@ -136,51 +141,75 @@ public struct AppPatcher: Sendable {
             let stage = parent.appendingPathComponent(".ChatGPT.codexpp-stage-\(id).app")
             let backup = parent.appendingPathComponent(".ChatGPT.codexpp-original-\(id).app")
             do {
+                onProgress("Preparing update…")
                 try command("/usr/bin/ditto", [app.path, stage.path], timeout: 120)
+                if adapter.isReviewed {
+                    let updater = helper.appendingPathComponent("Contents/Resources/Sparkle.framework")
+                    guard fm.fileExists(atPath: updater.path) else { throw PatchError.invalid("Build Codex++ with its authenticated updater framework before patching.") }
+                    try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", updater.path])
+                    let destination = stage.appendingPathComponent("Contents/Frameworks/Sparkle.framework")
+                    try fm.removeItem(at: destination)
+                    try command("/usr/bin/ditto", [updater.path, destination.path])
+                    let policy = helper.appendingPathComponent("Contents/Resources/CodexPPStartup.dylib")
+                    guard fm.fileExists(atPath: policy.path), let frameworkPath = adapter.frameworkPath,
+                          let executable = info["CFBundleExecutable"] as? String, !executable.contains("/") else { throw PatchError.invalid("The noninteractive startup policy is missing.") }
+                    try command("/usr/bin/codesign", ["--verify", "--strict", policy.path])
+                    try fm.copyItem(at: policy, to: stage.appendingPathComponent("Contents/Frameworks/CodexPPStartup.dylib"))
+                    let launcher = stage.appendingPathComponent("Contents/MacOS/" + executable)
+                    try StartupPolicyAdapter.patch(Data(contentsOf: launcher), frameworkPath: frameworkPath).write(to: launcher)
+                }
                 let stagedArchive = archive(stage), temporary = stagedArchive.appendingPathExtension("next")
-                var headerHash = try AsarArchive(stagedArchive).replacing(adapter.main, with: bootstrap, output: temporary)
-                try fm.removeItem(at: stagedArchive); try fm.moveItem(at: temporary, to: stagedArchive)
-                if adapter.id == PatchAdapter.current.id {
+                var replacements: [(String, Data)] = [(adapter.main, bootstrap)]
+                if adapter.isReviewed, let recipe = try ReviewedPatchRecipe.load(helper: helper, archive: original, adapter: adapter) {
+                    onProgress("Preparing extensions…")
+                    replacements += try recipe.patches(in: original)
+                    try JSONEncoder().encode(recipe.settingsReport).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-settings-discovery.json"), options: .atomic)
+                } else if adapter.isReviewed {
                     let resources = helper.appendingPathComponent("Contents/Resources")
                     let bundles = try fm.contentsOfDirectory(at: resources, includingPropertiesForKeys: nil).filter { $0.pathExtension == "bundle" }
                     guard let runtimeURL = bundles.compactMap({ Bundle(url: $0)?.url(forResource: "native-settings", withExtension: "js") }).first else { throw PatchError.invalid("The helper's native Settings runtime is missing.") }
                     let runtime = try String(contentsOf: runtimeURL, encoding: .utf8)
+                    onProgress("Adapting extensions…")
                     let discovery = try NativeSettingsAdapter.discover(archive: original, runtime: runtime)
                     try JSONEncoder().encode(discovery.report).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-settings-discovery.json"), options: .atomic)
                     let (shellPath, shellSource) = try ShellAdapter.discover(archive: original, replacements: discovery.patches)
-                    for (path, renderer) in discovery.patches.filter({ $0.0 != shellPath }) + [(shellPath, shellSource)] {
-                        headerHash = try AsarArchive(stagedArchive).replacing(path, with: renderer, output: temporary)
-                        try fm.removeItem(at: stagedArchive); try fm.moveItem(at: temporary, to: stagedArchive)
-                    }
+                    let baseRenderers = discovery.patches.filter({ $0.0 != shellPath }) + [(shellPath, shellSource)]
+                    let bookmarkRenderers = try BookmarksAdapter.discover(archive: original, replacements: baseRenderers)
+                    let bookmarkPaths = Set(bookmarkRenderers.map { $0.0 })
+                    replacements += baseRenderers.filter({ !bookmarkPaths.contains($0.0) }) + bookmarkRenderers
                     let (browserPath, browserSource) = try NativeBrowserAdapter.patch(archive: original)
-                    headerHash = try AsarArchive(stagedArchive).replacing(browserPath, with: browserSource, output: temporary)
-                    try fm.removeItem(at: stagedArchive); try fm.moveItem(at: temporary, to: stagedArchive)
+                    replacements.append((browserPath, browserSource))
                 }
+                let headerHash = try AsarArchive(stagedArchive).replacing(replacements, output: temporary)
+                try fm.removeItem(at: stagedArchive); try fm.moveItem(at: temporary, to: stagedArchive)
                 var stagedInfo = info
                 var integrity = info["ElectronAsarIntegrity"] as! [String: Any]
                 integrity["Resources/app.asar"] = ["algorithm": "SHA256", "hash": headerHash]
                 stagedInfo["ElectronAsarIntegrity"] = integrity
                 try PropertyListSerialization.data(fromPropertyList: stagedInfo, format: .xml, options: 0).write(to: stage.appendingPathComponent("Contents/Info.plist"), options: .atomic)
+                onProgress("Signing update…")
                 var frameworkHash: String?
                 if let relative = adapter.frameworkPath, let offset = adapter.integrityOffset {
                     let binary = stage.appendingPathComponent(relative)
                     let bytes = try Data(contentsOf: binary, options: .mappedIfSafe)
                     guard sha256(bytes) == adapter.frameworkHash else { throw PatchError.invalid("The staged framework is not the reviewed binary.") }
-                    let patched = try NativeIntegrityDigest.replacing(bytes, offset: offset, expected: NativeIntegrityDigest.dictionaryHash(info["ElectronAsarIntegrity"] as! [String: Any]), replacement: NativeIntegrityDigest.dictionaryHash(integrity))
+                    let replacement = try NativeIntegrityDigest.dictionaryHash(integrity)
+                    try NativeIntegrityDigest.validate(bytes, offset: offset, expected: NativeIntegrityDigest.dictionaryHash(info["ElectronAsarIntegrity"] as! [String: Any]), replacement: replacement)
                     let handle = try FileHandle(forWritingTo: binary)
-                    try handle.seek(toOffset: UInt64(offset + 34)); try handle.write(contentsOf: patched.subdata(in: offset + 34..<offset + 66)); try handle.synchronize(); try handle.close()
+                    try handle.seek(toOffset: UInt64(offset + 34)); try handle.write(contentsOf: replacement); try handle.synchronize(); try handle.close()
                     let framework = stage.appendingPathComponent("Contents/Frameworks/Codex Framework.framework")
                     let helpers = framework.appendingPathComponent("Versions/Current/Helpers")
                     for bundle in try fm.contentsOfDirectory(at: helpers, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "app" }) {
                         let originalBundle = app.appendingPathComponent("Contents/Frameworks/Codex Framework.framework/Versions/Current/Helpers/\(bundle.lastPathComponent)")
-                        try signLocal(bundle, original: originalBundle)
+                        try signLocal(bundle, original: originalBundle, identity: identity)
                     }
-                    try command("/usr/bin/codesign", ["--force", "--sign", try signingIdentity(), "--preserve-metadata=flags", framework.path], timeout: 120)
+                    try command("/usr/bin/codesign", ["--force", "--sign", identity, "--timestamp=none", "--preserve-metadata=flags", framework.path], timeout: 120)
                     frameworkHash = try fileSHA256(binary)
                 }
                 let receipt = PatchReceipt(schema: 1, adapter: adapter.id, version: adapter.version, build: adapter.build, originalArchiveHash: try fileSHA256(archive(app)), patchedArchiveHash: try fileSHA256(stagedArchive), patchedHeaderHash: headerHash, bootstrapHash: sha256(bootstrap), patchedFrameworkHash: frameworkHash, main: adapter.main, port: port, helperPath: helper.path, backupPath: backup.path, installedAt: Date())
                 try JSONEncoder().encode(receipt).write(to: receiptURL(stage), options: .atomic)
-                try signLocal(stage, original: app)
+                try signLocal(stage, original: app, identity: identity)
+                onProgress("Verifying patched update…")
                 _ = try status(stage)
                 // Detect vendor updater changes while staging, before committing.
                 guard try fileSHA256(archive(app)) == receipt.originalArchiveHash, try plist(app)["CFBundleVersion"] as? String == receipt.build else { throw PatchError.invalid("ChatGPT changed during staging. Retry against the updated app.") }
@@ -189,7 +218,7 @@ public struct AppPatcher: Sendable {
             } catch { try? fm.removeItem(at: stage); throw error }
         }
     }
-    private func signLocal(_ bundle: URL, original: URL) throws {
+    private func signLocal(_ bundle: URL, original: URL, identity: String) throws {
         let metadata = try command("/usr/bin/codesign", ["-d", "--entitlements", ":-", original.path])
         let text = String(decoding: metadata, as: UTF8.self)
         var originalEntitlements: [String: Any] = [:]
@@ -199,11 +228,15 @@ public struct AppPatcher: Sendable {
         let entitlements = support.appendingPathComponent("Patching/signing-\(UUID().uuidString).plist")
         defer { try? fm.removeItem(at: entitlements) }
         try PropertyListSerialization.data(fromPropertyList: PatchSigningPolicy.localEntitlements(originalEntitlements), format: .xml, options: 0).write(to: entitlements, options: .atomic)
-        try command("/usr/bin/codesign", ["--force", "--sign", try signingIdentity(), "--preserve-metadata=flags", "--entitlements", entitlements.path, bundle.path], timeout: 120)
+        // Local patches keep their Developer ID and hardened-runtime flags.
+        // Distribution timestamps are unnecessary; avoid a network round trip
+        // for every nested bundle during an update.
+        try command("/usr/bin/codesign", ["--force", "--sign", identity, "--timestamp=none", "--preserve-metadata=flags", "--entitlements", entitlements.path, bundle.path], timeout: 120)
     }
     /// Caller must close ChatGPT before committing/restoring/recovering.
     public func commit(_ app: URL) throws -> PatchReport {
-        try withLock {
+        onProgress("Installing patched update…")
+        return try withLock {
             var journal = try validatedJournal(app)
             guard journal.phase == "verified" else { throw PatchError.invalid("The staged app must pass its startup probe before installation.") }
             let stage = URL(fileURLWithPath: journal.stage), backup = URL(fileURLWithPath: journal.backup)
@@ -269,8 +302,20 @@ public struct AppPatcher: Sendable {
         try withLock {
             guard !fm.fileExists(atPath: journalURL.path), let receipt = try receipt(app) else { throw PatchError.invalid("Recover any pending transaction before restoring a patched app.") }
             _ = try status(app)
-            let backup = URL(fileURLWithPath: receipt.backupPath)
-            guard backup.deletingLastPathComponent() == app.deletingLastPathComponent(), backup.lastPathComponent.hasPrefix(".ChatGPT.codexpp-original-"),
+            let recordedBackup = URL(fileURLWithPath: receipt.backupPath)
+            guard recordedBackup.lastPathComponent.hasPrefix(".ChatGPT.codexpp-original-"),
+                  recordedBackup.standardizedFileURL == recordedBackup.resolvingSymlinksInPath(),
+                  try fileSHA256(archive(recordedBackup)) == receipt.originalArchiveHash, try status(recordedBackup).state == "unpatched" else { throw PatchError.invalid("The original app backup failed verification.") }
+            // A validated bundle can move during the real updater rehearsal.
+            // Copy its authenticated original onto the installation filesystem;
+            // the recovery journal still permits exchanges only in that parent.
+            let backup: URL
+            if recordedBackup.deletingLastPathComponent() == app.deletingLastPathComponent() { backup = recordedBackup }
+            else {
+                backup = app.deletingLastPathComponent().appendingPathComponent(".ChatGPT.codexpp-original-\(UUID().uuidString).app")
+                try command("/usr/bin/ditto", [recordedBackup.path, backup.path], timeout: 120)
+            }
+            guard backup.deletingLastPathComponent() == app.deletingLastPathComponent(),
                   try fileSHA256(archive(backup)) == receipt.originalArchiveHash, try status(backup).state == "unpatched" else { throw PatchError.invalid("The original app backup failed verification.") }
             // The same transaction recovery path handles interrupted restoration.
             let journal = PatchJournal(schema: 1, target: app.path, stage: backup.path.replacingOccurrences(of: ".codexpp-original-", with: ".codexpp-stage-"), backup: backup.path, receipt: receipt, phase: "restoring")
@@ -283,36 +328,54 @@ public struct AppPatcher: Sendable {
         }
     }
     public func probe(_ stage: URL) throws {
-        _ = try status(stage)
-        let info = try plist(stage)
-        guard let executable = info["CFBundleExecutable"] as? String, !executable.contains("/"), !executable.isEmpty else { throw PatchError.invalid("Invalid executable name.") }
-        let proof = support.appendingPathComponent("Diagnostics/probe.json")
-        try? fm.removeItem(at: proof)
-        let profile = support.appendingPathComponent("Patching/probe-profile-\(UUID().uuidString)")
-        defer { try? fm.removeItem(at: profile) }
-        try command(stage.appendingPathComponent("Contents/MacOS/\(executable)").path, ["--codexpp-probe", "--user-data-dir=\(profile.path)"], timeout: 30)
-        guard let data = try JSONSerialization.jsonObject(with: Data(contentsOf: proof)) as? [String: Any],
-              data["adapter"] as? String == adapter.id, data["port"] as? Int == port,
-              data["app"] as? String == archive(stage).path else { throw PatchError.invalid("The staged app failed its startup probe.") }
+        try checkStartup(stage)
         try withLock {
             var journal = try JSONDecoder().decode(PatchJournal.self, from: Data(contentsOf: journalURL))
             guard journal.stage == stage.path, journal.phase == "prepared" || journal.phase == "verified" else { throw PatchError.invalid("Probe does not match the pending patch.") }
             journal.phase = "verified"; try writeJournal(journal)
         }
     }
+    /// Validate a signed patched bundle without committing a transaction or
+    /// starting the vendor app. Also used for real-bundle probe regression checks.
+    public func checkStartup(_ stage: URL) throws {
+        onProgress("Checking startup…")
+        guard try status(stage).state == "patched" else {
+            throw PatchError.invalid("Startup checks require a verified patched bundle; the vendor app was not launched.")
+        }
+        let info = try plist(stage)
+        guard let executable = info["CFBundleExecutable"] as? String, !executable.contains("/"), !executable.isEmpty else { throw PatchError.invalid("Invalid executable name.") }
+        let proof = support.appendingPathComponent("Diagnostics/probe.json")
+        try? fm.removeItem(at: proof)
+        let profile = support.appendingPathComponent("Patching/probe-profile-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: profile) }
+        // A disposable profile still initializes Chromium's macOS OSCrypt
+        // provider. Keep this test process off the user's real Keychain.
+        try command(stage.appendingPathComponent("Contents/MacOS/\(executable)").path, ["--codexpp-probe", "--use-mock-keychain", "--user-data-dir=\(profile.path)"], timeout: 30)
+        guard let data = try JSONSerialization.jsonObject(with: Data(contentsOf: proof)) as? [String: Any],
+              data["adapter"] as? String == adapter.id, data["port"] as? Int == port,
+              data["app"] as? String == archive(stage).path,
+              (!adapter.isReviewed || data["keychainInteractionAllowed"] as? Bool == false) else { throw PatchError.invalid("The staged app failed its startup probe or noninteractive Keychain policy check.") }
+    }
     @discardableResult private func command(_ executable: String, _ arguments: [String], timeout: TimeInterval = 60) throws -> Data {
         let process = Process(); process.executableURL = URL(fileURLWithPath: executable); process.arguments = arguments
+        let completed = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in completed.signal() }
+        let started = Date()
+        defer {
+            if ProcessInfo.processInfo.environment["CODEXPP_PATCH_TRACE"] == "1" {
+                let line = String(format: "command %.3fs %@ %@\n", Date().timeIntervalSince(started), URL(fileURLWithPath: executable).lastPathComponent, arguments.joined(separator: " "))
+                FileHandle.standardError.write(Data(line.utf8))
+            }
+        }
         let log = fm.temporaryDirectory.appendingPathComponent("codexpp-command-\(UUID().uuidString).log")
         guard fm.createFile(atPath: log.path, contents: nil) else { throw PatchError.invalid("Cannot create command log.") }
         let out = try FileHandle(forWritingTo: log)
         defer { try? out.close(); try? fm.removeItem(at: log) }
         process.standardOutput = out; process.standardError = out
         try process.run()
-        let deadline = Date().addingTimeInterval(timeout)
-        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
-        if process.isRunning {
-            process.terminate(); Thread.sleep(forTimeInterval: 0.2)
-            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        if completed.wait(timeout: .now() + timeout) == .timedOut {
+            process.terminate()
+            if completed.wait(timeout: .now() + 0.2) == .timedOut { kill(process.processIdentifier, SIGKILL) }
             process.waitUntilExit(); throw PatchError.invalid("\(URL(fileURLWithPath: executable).lastPathComponent) timed out; installation was not committed.")
         }
         process.waitUntilExit()

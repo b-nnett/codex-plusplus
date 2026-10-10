@@ -2,8 +2,11 @@
 #import <objc/runtime.h>
 #include <chrono>
 #include <cstring>
+#include <string>
 #ifndef CODEXPP_BROWSER_NATIVE_TEST
+#include <Security/Security.h>
 #include <node_api.h>
+#include "update-hooks.h"
 #endif
 
 // The reviewed framework passes BridgedContentView to AppKit instead of its
@@ -96,8 +99,16 @@ static napi_value init(napi_env env, napi_value exports) {
   napi_set_named_property(env, exports, "prepare", fn);
   napi_create_function(env, "cancel", NAPI_AUTO_LENGTH, cancel, nullptr, &fn);
   napi_set_named_property(env, exports, "cancel", fn);
+  napi_create_function(env, "configureUpdates", NAPI_AUTO_LENGTH, configureUpdates, nullptr, &fn);
+  napi_set_named_property(env, exports, "configureUpdates", fn);
   napi_create_int32(env, 1, &protocol);
   napi_set_named_property(env, exports, "protocol", protocol);
+  Boolean interactionAllowed = true;
+  if (SecKeychainGetUserInteractionAllowed(&interactionAllowed) != errSecSuccess) {
+    napi_throw_error(env, nullptr, "Cannot verify Keychain interaction policy."); return nullptr;
+  }
+  napi_get_boolean(env, interactionAllowed, &protocol);
+  napi_set_named_property(env, exports, "keychainInteractionAllowed", protocol);
   return exports;
 }
 NAPI_MODULE(NODE_GYP_MODULE_NAME, init)

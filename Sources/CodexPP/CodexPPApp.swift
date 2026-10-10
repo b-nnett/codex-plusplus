@@ -20,6 +20,8 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let model = HelperModel()
     private var item: NSStatusItem!
     private let menu = NSMenu()
+    private var statusEntry: NSMenuItem?
+    private var repairEntry: NSMenuItem?
     private var menuOpen = false
     private var messageSubscription: AnyCancellable?
     private var skipCleanup = false
@@ -94,6 +96,12 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         image?.isTemplate = true
         return image
     }
+    private func menuBarWarningIcon() -> NSImage? {
+        let image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Codex++ needs attention")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [.systemRed]))
+        image?.isTemplate = false
+        return image
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if skipCleanup { return .terminateNow }
         guard !model.busy else { model.message = "Wait for the current operation to finish before quitting."; return .terminateCancel }
@@ -125,10 +133,23 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func rebuildMenu() {
         guard item != nil else { return }
         item.button?.toolTip = "Codex++ — \(model.isPreview ? "Preview" : model.status)"
-        item.button?.image = model.runtimeErrors.isEmpty ? menuBarIcon() : warningIcon()
-        item.button?.setAccessibilityLabel(model.extensionErrorStatus.map { "Codex++ menu — \($0)" } ?? "Codex++ menu")
+        let needsAttention = !model.busy && model.statusError != nil
+        item.length = needsAttention ? NSStatusItem.variableLength : NSStatusItem.squareLength
+        item.button?.title = needsAttention ? "Fix" : ""
+        item.button?.imagePosition = needsAttention ? .imageLeading : .imageOnly
+        item.button?.image = model.busy ? NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: model.status) : (needsAttention ? menuBarWarningIcon() : menuBarIcon())
+        statusEntry?.title = model.status
+        repairEntry?.isEnabled = !model.busy && !model.isPreview
+        item.button?.setAccessibilityLabel(model.statusError.map { "Codex++ menu — \($0)" } ?? "Codex++ menu")
         guard !menuOpen else { return }
         menu.removeAllItems()
+        repairEntry = nil
+        statusEntry = add(model.status, to: menu, enabled: false)
+        if let title = model.repairActionTitle {
+            repairEntry = add(title, to: menu, action: #selector(repair), enabled: !model.busy && !model.isPreview)
+            repairEntry?.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: "Repair Extensions support")
+        }
+        menu.addItem(.separator())
         if let errorStatus = model.extensionErrorStatus {
             add(errorStatus, to: menu, enabled: false).image = warningIcon()
             menu.addItem(.separator())
@@ -180,6 +201,7 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let extensionItem = extensionItem(sender) { model.openSettings(manageExtensions: true, extensionID: extensionItem.id) }
     }
     @objc private func restart() { model.restart(extensionsPaused: !model.settings.extensionsPaused) }
+    @objc private func repair() { model.repair() }
     @objc private func restoreOriginal() { model.restoreOriginal() }
     @objc private func revealPreferences() { menu.cancelTracking(); model.openSettings() }
     @objc private func openExtensionFolder() { model.showFiles() }

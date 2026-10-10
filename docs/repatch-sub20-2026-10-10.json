@@ -1,0 +1,181 @@
+{
+  "date": "2026-10-10",
+  "targetVersion": "26.1007.21159",
+  "targetBuild": "20052",
+  "adapter": "chatgpt-macos-20052-v30",
+  "measurement": "Complete --patch-app process on three separate copies of the unmodified official latest release. Includes initial validation, staging copy, source transformations, local signing, all signature/hash checks, real startup probe and atomic commit. Excludes network download, Sparkle installation and final normal-app launch. These are repatch measurements, not three additional updater cycles.",
+  "goalSeconds": 20,
+  "result": "passed",
+  "runs": [
+    {
+      "run": 4,
+      "wallTimeSeconds": 16.34,
+      "strictNestedSignatureVerified": true,
+      "probe": {
+        "schema": 1,
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 23844,
+        "app": "/tmp/codexpp-sub20-2026-10-10/run-4/.ChatGPT.codexpp-stage-E9516BA2-1CFD-4C38-9AB0-37F67EA61E00.app/Contents/Resources/app.asar",
+        "port": 9222,
+        "electron": "155.0.8059.40",
+        "keychainInteractionAllowed": false,
+        "time": "2026-10-10T09:24:34.833Z"
+      },
+      "equivalence": {
+        "entriesCompared": 21089,
+        "identicalHashesSizesAndFlags": true,
+        "allPackedPayloadHashesVerified": true
+      },
+      "patchedArchiveSHA256": "5773339565ebb607b4828c3b9b8b39a38a6124802baf985522953ecfa2798725",
+      "patchedFrameworkSHA256": "d2b84ca450e417af2917f4600fe5bbec2fe7cd45e81dfa204f5b8cfade4173bb",
+      "logSHA256": "f69708ea4eb3729702080d9c39824e3cdf14db6e0987d4ef0a4a71d89018863b",
+      "phases": [
+        "2026-10-10T09:24:22Z Verifying update\u2026",
+        "2026-10-10T09:24:23Z Preparing update\u2026",
+        "2026-10-10T09:24:23Z Preparing extensions\u2026",
+        "2026-10-10T09:24:24Z Signing update\u2026",
+        "2026-10-10T09:24:28Z Verifying patched update\u2026",
+        "2026-10-10T09:24:29Z Checking startup\u2026",
+        "2026-10-10T09:24:34Z Installing patched update\u2026"
+      ]
+    },
+    {
+      "run": 5,
+      "wallTimeSeconds": 16.38,
+      "strictNestedSignatureVerified": true,
+      "probe": {
+        "schema": 1,
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 24030,
+        "app": "/tmp/codexpp-sub20-2026-10-10/run-5/.ChatGPT.codexpp-stage-A36EECFD-CF39-4EDE-BF43-837940AE2BB8.app/Contents/Resources/app.asar",
+        "port": 9222,
+        "electron": "155.0.8059.40",
+        "keychainInteractionAllowed": false,
+        "time": "2026-10-10T09:25:12.606Z"
+      },
+      "equivalence": {
+        "entriesCompared": 21089,
+        "identicalHashesSizesAndFlags": true,
+        "allPackedPayloadHashesVerified": true
+      },
+      "patchedArchiveSHA256": "5773339565ebb607b4828c3b9b8b39a38a6124802baf985522953ecfa2798725",
+      "patchedFrameworkSHA256": "c5d9ff8e4dfbddad30b1b339c9b11c4f4f9938783ff8fe392e336e65c05e6dbb",
+      "logSHA256": "d40e6429d8b10427e7c6793f5e5c0942b7712adbd028e99249c74555fac1ea0d",
+      "phases": [
+        "2026-10-10T09:25:00Z Verifying update\u2026",
+        "2026-10-10T09:25:00Z Preparing update\u2026",
+        "2026-10-10T09:25:01Z Preparing extensions\u2026",
+        "2026-10-10T09:25:02Z Signing update\u2026",
+        "2026-10-10T09:25:06Z Verifying patched update\u2026",
+        "2026-10-10T09:25:07Z Checking startup\u2026",
+        "2026-10-10T09:25:12Z Installing patched update\u2026"
+      ]
+    },
+    {
+      "run": 6,
+      "wallTimeSeconds": 16.38,
+      "strictNestedSignatureVerified": true,
+      "probe": {
+        "schema": 1,
+        "adapter": "chatgpt-macos-20052-v30",
+        "pid": 24212,
+        "app": "/tmp/codexpp-sub20-2026-10-10/run-6/.ChatGPT.codexpp-stage-01CFBC15-D1D7-497E-ADF8-958F1C83C49A.app/Contents/Resources/app.asar",
+        "port": 9222,
+        "electron": "155.0.8059.40",
+        "keychainInteractionAllowed": false,
+        "time": "2026-10-10T09:25:49.632Z"
+      },
+      "equivalence": {
+        "entriesCompared": 21089,
+        "identicalHashesSizesAndFlags": true,
+        "allPackedPayloadHashesVerified": true
+      },
+      "patchedArchiveSHA256": "5773339565ebb607b4828c3b9b8b39a38a6124802baf985522953ecfa2798725",
+      "patchedFrameworkSHA256": "e833a15596869e5ef4a2d04c6be836be8a07fbc8574aa3a088609ba73c0c2d1a",
+      "logSHA256": "c088493aab59b09ab3d785865ad76a474e48051d86e929160834a8ba25c64caf",
+      "phases": [
+        "2026-10-10T09:25:37Z Verifying update\u2026",
+        "2026-10-10T09:25:37Z Preparing update\u2026",
+        "2026-10-10T09:25:38Z Preparing extensions\u2026",
+        "2026-10-10T09:25:38Z Signing update\u2026",
+        "2026-10-10T09:25:43Z Verifying patched update\u2026",
+        "2026-10-10T09:25:44Z Checking startup\u2026",
+        "2026-10-10T09:25:49Z Installing patched update\u2026"
+      ]
+    }
+  ],
+  "earlierWallTimeSeconds": {
+    "originalBaseline": 103.99,
+    "previousOptimization": 46.76,
+    "recipeWithTimestamps": 23.42,
+    "noTimestampsAndPartialNativeWrite": 20.74,
+    "directDirectoryLookup": 20.84
+  },
+  "changes": [
+    "Signed exact-source recipes reuse previously structurally discovered edits; each input/output hash is checked and bootstrap is generated fresh",
+    "Recipe packaging excludes entries when adapter/parser/runtime source fingerprint changes",
+    "Unknown archives retain complete AST discovery and fail closed on unsupported or ambiguous contracts",
+    "Resolve pinned Developer ID identity once per transaction",
+    "Local modified-bundle signatures use --timestamp=none; retain pinned Developer ID, designated requirement, hardened-runtime flags and filtered entitlements",
+    "Write only the validated 32-byte native integrity digest instead of copying the full framework",
+    "ASAR lookups walk NSDictionary directories directly, with path/bounds/integrity validation intact",
+    "Process termination notifications replace fixed-interval polling; timeout/kill/failure behavior remains"
+  ],
+  "scope": "Under-20 measurements cover the signed recipe for 26.1007.21159. An unseen release runs full structural discovery and is not guaranteed below 20 seconds. A secure signing timestamp is not requested for local patches; this is not a notarized distribution and does not provide historical timestamp validity after certificate expiry.",
+  "recipe": {
+    "path": "Assets/ReviewedPatches/c497f508930f223a999ec4c436a7526252914d380339db9e229cb023d200b41f.json",
+    "bytes": 60106,
+    "sha256": "dc35c03297bf22a4c270e4443d6c34ff397164c315361ad17e3c70019e3e78b9",
+    "headerHash": "c497f508930f223a999ec4c436a7526252914d380339db9e229cb023d200b41f",
+    "transformFingerprint": "bc3bc145b3e2e2cc765703422922c0e0f5215164098b9379a1254d2613bb4d33",
+    "replacementCount": 8,
+    "insideVerifiedHelperSignature": true
+  },
+  "signing": {
+    "fingerprint": "0925DE1ECA0C873F884246D0B6D27D0C3B3C997D",
+    "team": "X522N436T7",
+    "designatedRequirementUnchanged": true,
+    "runtimeFlagPreserved": true,
+    "originalSourceOpenAISignatureVerified": true
+  },
+  "keychain": {
+    "probeInteractionAllowed": false,
+    "securitydPromptEventsObserved": 0,
+    "monitor": "securityd displaying-keychain-prompt events in last 45 minutes; successful log show command; no UI screenshot monitoring in these benchmarks",
+    "promptLogSHA256": "9f56fca152030dba9e8ee76dee4fc8967ab667507b5878f0f9ab819d55b6b9a6",
+    "normalAppBoot": {
+      "schema": 1,
+      "adapter": "chatgpt-macos-20052-v30",
+      "pid": 10326,
+      "app": "/Applications/ChatGPT.app/Contents/Resources/app.asar",
+      "port": 9222,
+      "electron": "155.0.8059.40",
+      "keychainInteractionAllowed": false,
+      "time": "2026-10-10T08:37:40.964Z"
+    }
+  },
+  "installedHelper": {
+    "activeExtensions": 3,
+    "connected": true,
+    "extensionsPaused": false,
+    "installedExtensions": 3,
+    "pid": 24808,
+    "running": true,
+    "runtimeErrors": {},
+    "schema": 1,
+    "settingsSessions": 6,
+    "time": "2026-10-10T09:28:52Z"
+  },
+  "helperExecutableSHA256": "72321143fe6307c06fbb02be805f241f839bfb0f89d9a4a2e919a931a7c39e4a",
+  "checks": {
+    "swiftPassed": 88,
+    "swiftSkipped": 6,
+    "javascriptPassed": 47,
+    "javascriptSkipped": 11,
+    "nativeHarnessesPassed": 3,
+    "exitCode": 0,
+    "logSHA256": "4c8bf0299e83e5aa13734f5a9606ae80125d3fc2bb6dda1aa4ea1e54055c235f"
+  },
+  "transactionAndHandoffAbsent": true,
+  "recordedAt": "2026-10-10T09:28:58.421958+00:00"
+}

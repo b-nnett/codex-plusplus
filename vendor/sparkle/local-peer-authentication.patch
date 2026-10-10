@@ -1,0 +1,60 @@
+diff --git a/Autoupdate/SUCodeSigningVerifier.m b/Autoupdate/SUCodeSigningVerifier.m
+index 4ec5352..28cc5ce 100644
+--- a/Autoupdate/SUCodeSigningVerifier.m
++++ b/Autoupdate/SUCodeSigningVerifier.m
+@@ -7,6 +7,7 @@
+ //
+ 
+ #include <Security/CodeSigning.h>
++#include <CommonCrypto/CommonDigest.h>
+ #include <Security/SecCode.h>
+ #import "SUCodeSigningVerifier.h"
+ #import "SULog.h"
+@@ -444,15 +445,26 @@ + (BOOL)codeSignatureIsValidAtDownloadURL:(NSURL *)downloadURL andMatchesDevelop
+ 
+ + (SUValidateConnectionStatus)validateConnection:(NSXPCConnection *)connection error:(NSError * __autoreleasing *)error
+ {
+-    // Check if code signing requirement is required
+-    NSString *hostTeamIdentifier = [self teamIdentifierFromMainExecutable];
+-    if (hostTeamIdentifier == nil) {
+-        return SUValidateConnectionStatusSetNoRequirementSuccess;
++    // Codex++: retain authenticated XPC peers for the persistent local signer.
++    // Never accept an unsigned/no-Team-ID client merely because we have no Team ID.
++    SecCodeRef ownCode = NULL;
++    CFDictionaryRef signing = NULL;
++    OSStatus status = SecCodeCopySelf(kSecCSDefaultFlags, &ownCode);
++    if (status == errSecSuccess) status = SecCodeCopySigningInformation(ownCode, kSecCSSigningInformation, &signing);
++    if (ownCode != NULL) CFRelease(ownCode);
++    NSDictionary *information = CFBridgingRelease(signing);
++    NSArray *certificates = information[(NSString *)kSecCodeInfoCertificates];
++    if (status != errSecSuccess || certificates.count == 0) {
++        if (error != NULL) *error = [NSError errorWithDomain:SUSparkleErrorDomain code:SUInsufficientSigningError userInfo:@{NSLocalizedDescriptionKey:@"The updater signing certificate is unavailable; refusing unauthenticated XPC peers."}];
++        return SUValidateConnectionStatusAPIFailure;
+     }
+-    
+-    // Build the default team ID signing requirement
+-    NSString *codeSigningRequirement = [NSString stringWithFormat:@"(anchor apple generic and certificate leaf[subject.OU] = \"%@\")", hostTeamIdentifier];
+-    
++    NSData *certificate = CFBridgingRelease(SecCertificateCopyData((__bridge SecCertificateRef)certificates[0]));
++    unsigned char digest[CC_SHA1_DIGEST_LENGTH];
++    CC_SHA1(certificate.bytes, (CC_LONG)certificate.length, digest);
++    NSMutableString *fingerprint = [NSMutableString string];
++    for (NSUInteger index = 0; index < CC_SHA1_DIGEST_LENGTH; index++) [fingerprint appendFormat:@"%02x", digest[index]];
++    NSString *codeSigningRequirement = [NSString stringWithFormat:@"certificate leaf = H\"%@\" and (identifier \"com.openai.codex\" or identifier \"Autoupdate\" or identifier \"org.sparkle-project.Sparkle.Updater\" or identifier \"org.sparkle-project.InstallerLauncher\" or identifier \"org.sparkle-project.InstallerConnection\" or identifier \"org.sparkle-project.InstallerStatus\")", fingerprint];
++
+     if (@available(macOS 13.0, *)) {
+         [connection setCodeSigningRequirement:codeSigningRequirement];
+         
+diff --git a/Sparkle/SPUInstallerDriver.m b/Sparkle/SPUInstallerDriver.m
+index d780ee3..cb0d978 100644
+--- a/Sparkle/SPUInstallerDriver.m
++++ b/Sparkle/SPUInstallerDriver.m
+@@ -519,6 +519,8 @@ - (BOOL)mayUpdateAndRestart SPU_OBJC_DIRECT
+ 
+ - (void)installWithToolAndRelaunch:(BOOL)relaunch displayingUserInterface:(BOOL)showUI
+ {
++    // Codex++ owns restart after validating and patching the installed release.
++    relaunch = NO;
+     assert(_updateItem);
+     
+     id<SPUInstallerDriverDelegate> delegate = _delegate;

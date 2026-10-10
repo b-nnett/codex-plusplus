@@ -26,7 +26,7 @@ final class FocusModeTests: XCTestCase {
         }
     }
 
-    @MainActor private func fixture() async throws -> WKWebView {
+    @MainActor private func fixture(sidebarDelayMs: Int = 0) async throws -> WKWebView {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
         let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 900, height: 600), configuration: config)
@@ -37,8 +37,12 @@ final class FocusModeTests: XCTestCase {
             view.loadHTMLString("""
             <script>
               window.bridgeMessages = [];
+              window.shortcutMessages = [];
               window.electronBridge = {
                 sendMessageFromView(message) {
+                  if (message.type === 'codexpp-shell-shortcut') {
+                    shortcutMessages.push(message); return Promise.resolve();
+                  }
                   bridgeMessages.push(message);
                   // Match the real Electron preload, not window.postMessage.
                   window.dispatchEvent(new MessageEvent('message', {data:{
@@ -76,12 +80,27 @@ final class FocusModeTests: XCTestCase {
         let package = String(decoding: try JSONSerialization.data(withJSONObject: [["id": "focus-mode", "code": code]]), as: UTF8.self)
         _ = try await evaluate("""
         \(shell)
-        __codexPPShell.registerSidebarToggle(() => document.querySelector('button').click());
+        __codexPPShell.registerSidebarToggle(() => {
+          const toggle = () => document.querySelector('button').click();
+          if (\(sidebarDelayMs) > 0) setTimeout(toggle, \(sidebarDelayMs)); else toggle();
+        });
         \(runtime)
         globalThis.extensionPackage = \(package);
         void __codexPP.sync(extensionPackage);
         """, in: view)
         return view
+    }
+
+    @MainActor func testNormalSidebarResizingDoesNotInheritFocusModeTween() async throws {
+        let view = try await fixture()
+        let followsWidth = try await evaluate("""
+        const panel=document.querySelector('aside');
+        panel.style.width='410px';
+        String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+          getComputedStyle(panel).transitionDuration.split(',').every(value=>parseFloat(value)===0) &&
+          getComputedStyle(panel).width==='410px');
+        """, in:view)
+        XCTAssertEqual(followsWidth,"true")
     }
 
     @MainActor func testShortcutTogglesWholeLeftPanelAndConsumesEvent() async throws {
@@ -90,18 +109,18 @@ final class FocusModeTests: XCTestCase {
         const panel = document.querySelector('aside');
         const main = document.querySelector('main');
         const titlebar = document.querySelector('[data-app-shell-titlebar]');
-        const transition = getComputedStyle(panel).transitionProperty;
-        const frameTransition = getComputedStyle(document.querySelector('[data-app-shell-frame]')).transitionProperty;
-        const mainTransition = getComputedStyle(main).transitionProperty;
-        const titlebarTransition = getComputedStyle(titlebar).transitionProperty;
         globalThis.focusModeNoMotion = document.createElement('style');
         focusModeNoMotion.textContent = 'aside.app-shell-left-panel, [data-app-shell-frame], main[data-app-shell-main-surface], [data-app-shell-titlebar] { transition: none !important; }';
-        document.head.append(focusModeNoMotion);
         const event = new KeyboardEvent('keydown', {
           code: 'Backslash', key: '|', metaKey: true, shiftKey: true,
           bubbles: true, cancelable: true
         });
         document.dispatchEvent(event);
+        const transition = getComputedStyle(panel).transitionProperty;
+        const frameTransition = getComputedStyle(document.querySelector('[data-app-shell-frame]')).transitionProperty;
+        const mainTransition = getComputedStyle(main).transitionProperty;
+        const titlebarTransition = getComputedStyle(titlebar).transitionProperty;
+        document.head.append(focusModeNoMotion);
         String(transition.includes('width') && transition.includes('clip-path') &&
           frameTransition.includes('padding-inline-start') &&
           mainTransition.includes('clip-path') && mainTransition.includes('border-radius') && mainTransition.includes('margin-top') &&
@@ -136,6 +155,187 @@ final class FocusModeTests: XCTestCase {
         result;
         """, in: view)
         XCTAssertEqual(restored, "true")
+    }
+
+    @MainActor func testFullWidthRightPaneFollowsFocusCanvasDwellAndResize() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        const noMotion = document.createElement('style');
+        noMotion.textContent = '[data-codexpp-shell-role] {transition:none !important}';
+        document.head.append(noMotion);
+        const main = document.querySelector('main');
+        main.style.cssText += ';display:flex;flex-direction:column;min-width:0';
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;position:relative;flex:1;min-height:0';
+        row.innerHTML = '<div data-app-shell-right-panel-full-width="true" style="width:0"></div><aside data-app-shell-focus-area="right-panel" style="position:relative;flex-shrink:0;margin-inline-start:auto;width:calc(100% - 52px);height:100%"><div data-app-shell-pane-frame style="position:absolute;inset-block:0;inset-inline-end:0;min-width:100%;width:100%"><div data-test-browser style="width:100%;height:100%"></div></div></aside>';
+        main.replaceChildren(row);
+        window.focusPane = row.querySelector('aside');
+        window.focusPaneOriginalStyle = focusPane.getAttribute('style');
+        window.toggleFocus = () => document.dispatchEvent(new KeyboardEvent('keydown', {
+          key:'|', code:'Backslash', metaKey:true, shiftKey:true, bubbles:true, cancelable:true
+        }));
+        window.paneFillsCanvas = () => {
+          const canvas = main.getBoundingClientRect();
+          return [focusPane, focusPane.firstElementChild, row.querySelector('[data-test-browser]')].every(node => {
+            const bounds = node.getBoundingClientRect();
+            return Math.abs(bounds.left - canvas.left) < .1 && Math.abs(bounds.right - canvas.right) < .1;
+          });
+        };
+        void 0;
+        """, in: view)
+        // Percentage sizing follows the actual canvas, not window dimensions or
+        // a guessed rail width. Both inline directions preserve native styles.
+        for direction in ["ltr", "rtl"] {
+            let follows = try await evaluate("""
+            (() => {
+            document.documentElement.dir = '\(direction)';
+            toggleFocus();
+            const expanded = paneFillsCanvas();
+            document.documentElement.classList.add('codexpp-focus-mode-dwell');
+            const dwelled = paneFillsCanvas() && getComputedStyle(document.querySelector('[data-codexpp-shell-role="panel"]')).width === '52px';
+            document.querySelector('[data-app-shell-frame]').style.width = '1100px';
+            const resized = paneFillsCanvas();
+            return String(expanded && dwelled && resized && focusPane.getAttribute('style') === focusPaneOriginalStyle);
+            })();
+            """, in: view)
+            XCTAssertEqual(follows, "true", direction)
+            let restored = try await evaluate("""
+            (() => {
+            toggleFocus();
+            document.querySelector('[data-app-shell-frame]').style.width = '900px';
+            const nativeGap = document.querySelector('main').getBoundingClientRect().width - focusPane.getBoundingClientRect().width;
+            return Math.abs(nativeGap - 52) < .1 && focusPane.getAttribute('style') === focusPaneOriginalStyle ? 'true' :
+              JSON.stringify({nativeGap,classes:document.documentElement.className,panel:getComputedStyle(document.querySelector('[data-codexpp-shell-role="panel"]')).cssText,transition:getComputedStyle(document.querySelector('[data-codexpp-shell-role="panel"]')).transitionProperty});
+            })();
+            """, in: view)
+            XCTAssertEqual(restored, "true", direction)
+        }
+        _ = try await evaluate("toggleFocus(); void 0;", in: view)
+        _ = try await evaluate("void __codexPP.sync([]);", in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        let cleaned = try await evaluate("""
+        String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+          focusPane.getAttribute('style') === focusPaneOriginalStyle &&
+          Math.abs(document.querySelector('main').getBoundingClientRect().width - focusPane.getBoundingClientRect().width - 52) < .1);
+        """, in: view)
+        XCTAssertEqual(cleaned, "true")
+    }
+
+    @MainActor func testFullWidthRightPaneRuleDoesNotResizeSplitOrUnrelatedPanes() async throws {
+        let view = try await fixture()
+        let unaffected = try await evaluate("""
+        const main = document.querySelector('main');
+        main.innerHTML = '<div data-app-shell-right-panel-full-width="false"></div><aside data-app-shell-focus-area="right-panel" style="width:200px"><div data-app-shell-pane-frame style="width:200px"></div></aside><div data-app-shell-right-panel-full-width="true"></div><div data-app-shell-focus-area="right-panel" style="width:150px"></div>';
+        const foreign = document.createElement('div');
+        foreign.innerHTML = '<div data-app-shell-right-panel-full-width="true"></div><aside data-app-shell-focus-area="right-panel" style="width:125px"></aside>';
+        document.body.append(foreign);
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key:'|', code:'Backslash', metaKey:true, shiftKey:true, bubbles:true, cancelable:true
+        }));
+        const split = main.querySelector('aside');
+        const normal = getComputedStyle(split).width === '200px' && getComputedStyle(split.firstElementChild).width === '200px';
+        const unrelated = getComputedStyle(main.querySelector('div[data-app-shell-focus-area]')).width === '150px' && getComputedStyle(foreign.querySelector('aside')).width === '125px';
+        // Native layout changes activate/deactivate the rule without polling,
+        // changing inline styles, or grabbing another pane's inner frame.
+        split.previousElementSibling.setAttribute('data-app-shell-right-panel-full-width', 'true');
+        const full = getComputedStyle(split).width !== '200px';
+        split.previousElementSibling.setAttribute('data-app-shell-right-panel-full-width', 'false');
+        String(normal && unrelated && full && getComputedStyle(split).width === '200px');
+        """, in: view)
+        XCTAssertEqual(unaffected, "true")
+    }
+
+    @MainActor func testBrowserPortalAndScaledCursorOverlayFillActualCanvasAndCleanUp() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        (() => {
+          const style = document.createElement('style');
+          style.textContent = '[data-codexpp-shell-role] {transition:none !important}';
+          document.head.append(style);
+          const main = document.querySelector('main');
+          main.innerHTML = '<div data-app-shell-right-panel-full-width="true" style="width:0"></div><aside data-app-shell-focus-area="right-panel" style="width:500px;height:400px"></aside>';
+          const host = document.createElement('div'); host.setAttribute('data-browser-host-root','');
+          host.innerHTML = '<div data-browser-sidebar-webview="active" data-app-shell-focus-area="right-panel" style="position:fixed;left:4px;top:52px;width:500px;height:350px;visibility:visible;pointer-events:auto;opacity:1"><webview style="display:block;width:400px;height:280px;transform:scale(1.25);transform-origin:top left"></webview><div data-browser-sidebar-cursor-overlay-host style="position:absolute;width:400px;height:280px;transform:scale(1.25);transform-origin:top left"></div></div><div data-browser-sidebar-webview="cached" data-app-shell-focus-area="right-panel" style="width:500px;visibility:hidden;pointer-events:none"><webview></webview></div><div data-browser-sidebar-webview="bottom" data-app-shell-focus-area="bottom-panel" style="width:200px;visibility:visible;pointer-events:auto;opacity:1"><webview></webview></div>';
+          document.body.append(host);
+          window.browserPortal = host.firstElementChild;
+          window.browserPortalOriginal = browserPortal.style.cssText;
+          window.browserFits = () => {
+            const expected = main.querySelector('aside').getBoundingClientRect().width;
+            return [browserPortal,...browserPortal.children].every(node => Math.abs(node.getBoundingClientRect().width - expected) < .1);
+          };
+          document.dispatchEvent(new KeyboardEvent('keydown', {key:'|',metaKey:true,shiftKey:true,bubbles:true}));
+        })();
+        """, in: view)
+        let fills = try await evaluate("""
+        String(browserFits() && getComputedStyle(document.querySelector('[data-browser-sidebar-webview="cached"]')).width === '500px' &&
+          getComputedStyle(document.querySelector('[data-browser-sidebar-webview="bottom"]')).width === '200px');
+        """, in: view)
+        XCTAssertEqual(fills, "true")
+        _ = try await evaluate("""
+        browserPortal.style.width = '550px'; browserPortal.firstElementChild.style.width = '440px';
+        document.querySelector('[data-app-shell-frame]').style.width = '1100px';
+        void 0;
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        let resized = try await evaluate("String(browserFits())", in: view)
+        XCTAssertEqual(resized, "true")
+        _ = try await evaluate("void __codexPP.sync([]);", in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        let cleaned = try await evaluate("""
+        String(!browserPortal.hasAttribute('data-codexpp-focus-browser-viewport') &&
+          browserPortal.style.getPropertyValue('--codexpp-focus-browser-width') === '' &&
+          getComputedStyle(browserPortal).width === '550px' && getComputedStyle(browserPortal.firstElementChild).width === '440px');
+        """, in: view)
+        XCTAssertEqual(cleaned, "true")
+    }
+
+    @MainActor func testNativeShortcutRelayAuthenticatesSessionAndStopsAfterCleanup() async throws {
+        let view = try await fixture()
+        let relayed = try await evaluate("""
+        (() => {
+          const request = shortcutMessages.at(-1);
+          const send = (data, extra = {}) => window.dispatchEvent(new MessageEvent('message', {data,...extra}));
+          const message = {type:'codexpp-shell-toggle-focus',protocol:1,requestId:request.requestId};
+          send({...message,requestId:'wrong'});
+          send({...message,protocol:2});
+          send(message,{origin:'https://external.test'});
+          const rejected = !document.documentElement.classList.contains('codexpp-focus-mode');
+          send(message);
+          const entered = document.documentElement.classList.contains('codexpp-focus-mode');
+          send(message);
+          return String(rejected && entered && !document.documentElement.classList.contains('codexpp-focus-mode'));
+        })();
+        """, in: view)
+        XCTAssertEqual(relayed, "true")
+        _ = try await evaluate("void __codexPP.sync([]);", in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        let cleaned = try await evaluate("""
+        (() => {
+          const request = shortcutMessages.at(-1);
+          window.dispatchEvent(new MessageEvent('message',{data:{type:'codexpp-shell-toggle-focus',protocol:1,requestId:request.requestId}}));
+          return String(request.enabled === false && !document.documentElement.classList.contains('codexpp-focus-mode'));
+        })();
+        """, in: view)
+        XCTAssertEqual(cleaned, "true")
+    }
+
+    @MainActor func testShorterExitTweenDoesNotLeakIntoReentryOrCleanup() async throws {
+        let view = try await fixture()
+        let faster = try await evaluate("""
+        (() => {
+          const toggle = () => document.dispatchEvent(new KeyboardEvent('keydown',{key:'|',metaKey:true,shiftKey:true,bubbles:true}));
+          toggle(); toggle();
+          const exit = getComputedStyle(document.querySelector('aside')).transitionDuration === '0.09s';
+          toggle();
+          return String(exit && !document.documentElement.classList.contains('codexpp-focus-mode-exiting') &&
+            getComputedStyle(document.querySelector('aside')).transitionDuration !== '0.09s');
+        })();
+        """, in: view)
+        XCTAssertEqual(faster, "true")
+        _ = try await evaluate("void __codexPP.sync([]);", in: view)
+        try await Task.sleep(for: .milliseconds(100))
+        let cleaned = try await evaluate("String(!document.documentElement.classList.contains('codexpp-focus-mode-exiting'))", in: view)
+        XCTAssertEqual(cleaned, "true")
     }
 
     @MainActor func testShortcutSupportsBritishISOAndLogicalBackslashKeys() async throws {
@@ -468,6 +668,235 @@ final class FocusModeTests: XCTestCase {
         _ = try await evaluate("void __codexPP.sync([])", in: view)
         try await Task.sleep(for: .milliseconds(20))
         let restored = try await evaluate("String(bridgeMessages.at(-1).hidden === false)", in: view)
+        XCTAssertEqual(restored, "true")
+    }
+
+    @MainActor func testRapidToggleCoalescesAsyncSidebarCommandsAndRestoresOriginalState() async throws {
+        for presses in [2, 3, 6, 7] {
+            let view = try await fixture(sidebarDelayMs: 80)
+            _ = try await evaluate("""
+            document.querySelector('button').click();
+            for (let i=0;i<\(presses);i++) document.dispatchEvent(new KeyboardEvent('keydown', {
+              code:'Backslash', metaKey:true, shiftKey:true, bubbles:true
+            }));
+            """, in: view)
+            try await Task.sleep(for: .milliseconds(400))
+            let settled = try await evaluate("""
+            String(document.documentElement.classList.contains('codexpp-focus-mode') === \(presses % 2 == 1) &&
+              __codexPPShell.snapshot().sidebarOpen === \(presses % 2 == 0));
+            """, in: view)
+            XCTAssertEqual(settled, "true", "\(presses) rapid presses")
+            _ = try await evaluate("void __codexPP.sync([])", in: view)
+            try await Task.sleep(for: .milliseconds(150))
+            let restored = try await evaluate("String(__codexPPShell.snapshot().sidebarOpen && !document.documentElement.classList.contains('codexpp-focus-mode'))", in: view)
+            XCTAssertEqual(restored, "true")
+        }
+    }
+
+    @MainActor func testCleanupWaitsForAsyncRestorationAndCannotReenter() async throws {
+        let view = try await fixture(sidebarDelayMs: 100)
+        _ = try await evaluate("""
+        document.querySelector('button').click();
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        globalThis.cleanupDone = false;
+        void __codexPP.sync([]).then(() => { cleanupDone = true; });
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(30))
+        let blocked = try await evaluate("""
+        const attempt = new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true, cancelable:true});
+        document.dispatchEvent(attempt);
+        String(!cleanupDone && !attempt.defaultPrevented && !document.documentElement.classList.contains('codexpp-focus-mode'));
+        """, in: view)
+        XCTAssertEqual(blocked, "true")
+        try await Task.sleep(for: .milliseconds(300))
+        let restored = try await evaluate("""
+        String(cleanupDone && __codexPPShell.snapshot().sidebarOpen &&
+          !document.querySelector('style[data-codexpp="focus-mode"]') && bridgeMessages.at(-1).hidden === false);
+        """, in: view)
+        XCTAssertEqual(restored, "true")
+    }
+
+    @MainActor func testExternalClassOrStyleLossRestoresFocusInsteadOfLeavingItHalfActive() async throws {
+        for mutation in [
+            "document.documentElement.classList.remove('codexpp-focus-mode')",
+            "document.querySelector('style[data-codexpp=\"focus-mode\"]').remove()",
+            "document.querySelector('style[data-codexpp=\"focus-mode\"]').textContent = 'body {}'",
+            "document.querySelector('style[data-codexpp=\"focus-mode\"]').sheet.disabled = true"
+        ] {
+            let view = try await fixture()
+            _ = try await evaluate("""
+            document.querySelector('button').click();
+            document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+            \(mutation);
+            """, in: view)
+            try await Task.sleep(for: .milliseconds(1100))
+            let restored = try await evaluate("""
+            String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+              !document.documentElement.hasAttribute('data-codexpp-focus-mode') &&
+              __codexPPShell.snapshot().sidebarOpen && bridgeMessages.at(-1).hidden === false);
+            """, in: view)
+            XCTAssertEqual(restored, "true", mutation)
+            _ = try await evaluate("void __codexPP.sync([])", in: view)
+        }
+    }
+
+    @MainActor func testRestorationWaitsForSameShellButNeverTouchesReplacementFrame() async throws {
+        for replaceFrame in [false, true] {
+            let view = try await fixture()
+            _ = try await evaluate("""
+            document.querySelector('button').click();
+            document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+            globalThis.savedMain = document.querySelector('main');
+            globalThis.savedParent = savedMain.parentNode;
+            savedMain.remove();
+            document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+            """, in: view)
+            try await Task.sleep(for: .milliseconds(50))
+            _ = try await evaluate("""
+            savedParent.append(savedMain);
+            if (\(replaceFrame)) {
+              const old = document.querySelector('[data-app-shell-frame]');
+              old.replaceWith(old.cloneNode(true));
+            }
+            """, in: view)
+            try await Task.sleep(for: .milliseconds(250))
+            let restored = try await evaluate("""
+            String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+              __codexPPShell.snapshot().sidebarOpen === \(!replaceFrame));
+            """, in: view)
+            XCTAssertEqual(restored, "true", "replacement frame: \(replaceFrame)")
+            _ = try await evaluate("void __codexPP.sync([])", in: view)
+        }
+    }
+
+    @MainActor func testNativeControlsRequestsAreCoalescedAndLateFailureCannotExitNewFocus() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        globalThis.originalInterval = window.setInterval;
+        window.setInterval = (fn, ms) => {globalThis.heartbeatTick = fn; return originalInterval(fn, ms)};
+        electronBridge.sendMessageFromView = message => {
+          bridgeMessages.push(message);
+          setTimeout(() => window.dispatchEvent(new MessageEvent('message', {data:{
+            type:'codexpp-shell-controls-result', requestId:message.requestId,
+            supported:bridgeMessages.indexOf(message) !== 0, hidden:message.hidden
+          }})), 200);
+          return Promise.resolve();
+        };
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        for (let i=0;i<20;i++) heartbeatTick();
+        globalThis.coalesced = bridgeMessages.length === 1;
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        window.setInterval = originalInterval;
+        void 0;
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(300))
+        let preserved = try await evaluate("""
+        String(coalesced && bridgeMessages.length === 2 && document.documentElement.classList.contains('codexpp-focus-mode'));
+        """, in: view)
+        XCTAssertEqual(preserved, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testComposingShortcutIsIgnoredAndResizeCancelsDwell() async throws {
+        let view = try await fixture()
+        let ignored = try await evaluate("""
+        const event = new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true,
+          isComposing:true, bubbles:true, cancelable:true});
+        document.dispatchEvent(event);
+        String(!event.defaultPrevented && !document.documentElement.classList.contains('codexpp-focus-mode'));
+        """, in: view)
+        XCTAssertEqual(ignored, "true")
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        document.dispatchEvent(new PointerEvent('pointermove', {clientX:1, clientY:200, bubbles:true}));
+        document.querySelector('[data-app-shell-frame]').style.setProperty('--app-shell-navigation-rail-width', '72px');
+        window.dispatchEvent(new Event('resize'));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(300))
+        let resized = try await evaluate("""
+        String(document.documentElement.classList.contains('codexpp-focus-mode') &&
+          !document.documentElement.classList.contains('codexpp-focus-mode-dwell') &&
+          document.documentElement.style.getPropertyValue('--codexpp-focus-rail-width') === '72px');
+        """, in: view)
+        XCTAssertEqual(resized, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testNeverSettlingSidebarFailsSafelyAndCleanupRemainsBounded() async throws {
+        let view = try await fixture(sidebarDelayMs: 0)
+        _ = try await evaluate("""
+        document.querySelector('button').click();
+        document.querySelector('button').onclick = () => {};
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(1150))
+        let safe = try await evaluate("""
+        String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+          __codexPPShell.snapshot().sidebarOpen && bridgeMessages.at(-1).hidden === false);
+        """, in: view)
+        XCTAssertEqual(safe, "true")
+        _ = try await evaluate("globalThis.cleanupDone = false; void __codexPP.sync([]).then(() => {cleanupDone = true})", in: view)
+        try await Task.sleep(for: .milliseconds(30))
+        let finished = try await evaluate("String(cleanupDone)", in: view)
+        XCTAssertEqual(finished, "true")
+    }
+
+    @MainActor func testExitNeverRestoresSidebarInAlreadyReplacedFrame() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.querySelector('button').click();
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(80))
+        _ = try await evaluate("""
+        const frame = document.querySelector('[data-app-shell-frame]');
+        frame.replaceWith(frame.cloneNode(true));
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(300))
+        let preserved = try await evaluate("""
+        String(!document.documentElement.classList.contains('codexpp-focus-mode') &&
+          __codexPPShell.snapshot().sidebarOpen === false && bridgeMessages.at(-1).hidden === false);
+        """, in: view)
+        XCTAssertEqual(preserved, "true")
+    }
+
+    @MainActor func testMissingOrDisabledStyleLeavesEntryShortcutUntouched() async throws {
+        for mutation in [
+            "document.querySelector('style[data-codexpp=\"focus-mode\"]').remove()",
+            "document.querySelector('style[data-codexpp=\"focus-mode\"]').sheet.disabled = true"
+        ] {
+            let view = try await fixture()
+            let ignored = try await evaluate("""
+            \(mutation);
+            const event = new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true,
+              bubbles:true, cancelable:true});
+            document.dispatchEvent(event);
+            String(!event.defaultPrevented && !document.documentElement.classList.contains('codexpp-focus-mode') && bridgeMessages.length === 0);
+            """, in: view)
+            XCTAssertEqual(ignored, "true")
+            _ = try await evaluate("void __codexPP.sync([])", in: view)
+        }
+    }
+
+    @MainActor func testCleanupUsesObservedNativeStateWhenPollingTimersAreThrottled() async throws {
+        let view = try await fixture(sidebarDelayMs: 100)
+        _ = try await evaluate("""
+        globalThis.originalTimeout = window.setTimeout;
+        window.setTimeout = (fn, ms, ...args) => ms === 50
+          ? originalTimeout(() => {}, 10000) : originalTimeout(fn, ms, ...args);
+        document.querySelector('button').click();
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        globalThis.cleanupDone = false;
+        void __codexPP.sync([]).then(() => {cleanupDone = true});
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(300))
+        let restored = try await evaluate("""
+        window.setTimeout = originalTimeout;
+        String(cleanupDone && __codexPPShell.snapshot().sidebarOpen &&
+          !document.querySelector('style[data-codexpp="focus-mode"]') && bridgeMessages.at(-1).hidden === false);
+        """, in: view)
         XCTAssertEqual(restored, "true")
     }
 

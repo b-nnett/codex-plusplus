@@ -143,7 +143,7 @@ test('Native view preparation runs only for an enabled editable browser menu', (
 
 test('Extension waits for a native acknowledgement and releases support on cleanup', async () => {
   const listeners = new Set(), cleanups = [], messages = [];
-  const ctx = vm.createContext({crypto:{randomUUID:() => 'fixture-request'},setTimeout,clearTimeout,
+  const ctx = vm.createContext({__codexPPBookmarks:{protocol:1,enable:async()=>{},disable:()=>{}},crypto:{randomUUID:() => 'fixture-request'},setTimeout,clearTimeout,
     window:{addEventListener:(_name,fn) => listeners.add(fn),removeEventListener:(_name,fn) => listeners.delete(fn)},
     electronBridge:{async sendMessageFromView(message) {
       messages.push(message);
@@ -195,4 +195,16 @@ test('An old native acknowledgement cannot report the extension as healthy', asy
   assert.equal(states[0].state, 'error');
   assert.match(states[0].error, /native macOS AutoFill adapter/);
   assert.deepEqual(messages.map(message => message.enabled), [true,false]);
+});
+
+test('Extension waits for browser modules when the preload arrives first', async () => {
+  const listeners=new Set(),cleanups=[];let starts=0,stops=0,ctx;
+  const bookmarks={protocol:1,enable:async()=>{starts++;},disable:()=>{stops++;}};
+  ctx=vm.createContext({crypto:{randomUUID:()=> 'late-modules'},clearTimeout,
+    setTimeout(fn,delay){if(delay===50){ctx.__codexPPBookmarks=bookmarks;return setTimeout(fn,0);}return setTimeout(fn,delay);},
+    window:{addEventListener:(_n,fn)=>listeners.add(fn),removeEventListener:(_n,fn)=>listeners.delete(fn)},
+    electronBridge:{sendMessageFromView(m){if(m.enabled)for(const fn of listeners)fn({data:{type:'codexpp-browser-autofill-result',requestId:m.requestId,supported:true,nativeVersion:2}});}},
+    api:{onCleanup:fn=>cleanups.push(fn)}});
+  await vm.runInContext(`(new Function('api', ${JSON.stringify(extension)}))(api)`,ctx);
+  assert.equal(starts,1);for(const cleanup of cleanups)await cleanup();assert.equal(stops,1);
 });

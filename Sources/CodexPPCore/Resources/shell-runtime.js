@@ -59,6 +59,31 @@
       if (!current || typeof open !== 'boolean') throw Error('Shell sidebar unavailable.');
       if (current.sidebarOpen !== open) toggleSidebar();
     },
+    onShortcut(callback) {
+      if (typeof callback !== 'function') throw Error('Invalid shell shortcut callback.');
+      const requestId = crypto.randomUUID();
+      let stopped = false;
+      const publish = enabled => {
+        try {
+          Promise.resolve(globalThis.electronBridge?.sendMessageFromView({
+            type:'codexpp-shell-shortcut', protocol:1, enabled, requestId
+          })).catch(() => {});
+        } catch { /* Renderer keyboard fallback remains available. */ }
+      };
+      const receive = event => {
+        const local = event.source === window || (event.source === null && event.origin === '');
+        if (!stopped && local && event.data?.type === 'codexpp-shell-toggle-focus' &&
+            event.data.protocol === 1 && event.data.requestId === requestId) callback();
+      };
+      window.addEventListener('message', receive);
+      publish(!!snapshot());
+      const timer = setInterval(() => publish(!!snapshot()), 1000);
+      return () => {
+        if (stopped) return;
+        stopped = true; clearInterval(timer);
+        window.removeEventListener('message', receive); publish(false);
+      };
+    },
     windowControls
   })});
 })();

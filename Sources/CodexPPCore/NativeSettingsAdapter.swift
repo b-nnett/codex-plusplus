@@ -17,7 +17,7 @@ public enum NativeSettingsAdapter {
 
     /// Discovery handles renamed bundles and symbols. Approval still pins the complete app archive.
     public static func discover(archive: AsarArchive, runtime: String) throws -> (patches: [(String, Data)], report: Discovery) {
-        guard archive.headerHash == PatchAdapter.current.headerHash else { throw PatchError.invalid("The app archive is not an approved Settings build. Discovery cannot override compatibility approval.") }
+        try PatchAdapter.approveArchive(archive)
         let paths = try archive.packedFiles(in: "webview/assets").filter {
             $0.hasSuffix(".js") && ["settings-page-", "use-visible-settings-sections-", "general-settings-", "app-initial-", "app-shared-"].contains(where: URL(fileURLWithPath: $0).lastPathComponent.hasPrefix)
         }
@@ -29,7 +29,10 @@ public enum NativeSettingsAdapter {
             guard let source = String(data: data, encoding: .utf8) else { throw PatchError.invalid("Settings modules must be UTF-8 JavaScript.") }
             modules[path] = source
         }
-        let result = try execute(modules: modules, runtime: runtime)
+        let result: Output
+        if let data = try JavaScriptDiscovery.run(archive: archive, adapter: "settings", input: ["modules": modules, "runtime": runtime]) {
+            result = try JSONDecoder().decode(Output.self, from: data)
+        } else { result = try execute(modules: modules, runtime: runtime) }
         return (result.patches.map { ($0.path, Data($0.source.utf8)) }, result.report)
     }
     public static func patches(archive: AsarArchive, runtime: String) throws -> [(String, Data)] {

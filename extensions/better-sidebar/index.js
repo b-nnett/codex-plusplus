@@ -33,7 +33,7 @@ api.addStyle(`
   [data-app-action-sidebar-thread-row]:is(:hover,:focus-within) [data-better-sidebar-chat-pin="false"] > button { visibility: visible; }
   [data-better-sidebar-explore] { order: 1; margin-top: auto; flex-shrink: 0; }
   [data-better-sidebar-explore] > button { margin-top: 0 !important; }
-  ${inactiveHomeSelector} > span > svg { display: none; }
+  ${inactiveHomeSelector}:has([data-better-sidebar-home-outline] svg) > span > svg { display: none; }
   ${inactiveHomeSelector} [data-better-sidebar-home-outline] { display: contents; }
   [data-better-sidebar-project-brand] > :not([data-better-sidebar-project-title]) { display: none; }
 `);
@@ -192,8 +192,11 @@ function readJSON(key, fallback) {
   catch { return fallback; }
 }
 function projectRow(id) {
-  return [...document.querySelectorAll(projectRowSelector)].find(row => row.getAttribute('data-app-action-sidebar-project-id') === id && row.checkVisibility?.({visibilityProperty:true}) !== false) ||
-    [...document.querySelectorAll(projectRowSelector)].find(row => row.getAttribute('data-app-action-sidebar-project-id') === id);
+  const rows=[...document.querySelectorAll(projectRowSelector)].filter(row=>row.getAttribute('data-app-action-sidebar-project-id')===id);
+  // A single native row needs no layout read. Only distinguish visibility when
+  // the app mounts duplicate rows for the open sidebar and its preview.
+  if(rows.length<2)return rows[0];
+  return rows.find(row=>row.checkVisibility?.({visibilityProperty:true})!==false)||rows[0];
 }
 function syncProjects(bindings) {
   if (projectAccount !== bindings.accountId) {
@@ -351,9 +354,19 @@ async function syncHomeOutline(home) {
   if(homeOutline?.home===home && homeOutline.host.isConnected)return;
   const icon=appBindings(home).navItem?.railIcons?.default;if(!icon)return;
   try {
+    // Native icons expose a DOM factory; use it without depending on the
+    // section-store module or its version-specific React exports.
+    if(typeof icon.createElement==='function') {
+      const glyph=icon.createElement(document);
+      if(disposed || !home.isConnected || !glyph)return;
+      homeOutline?.root?.unmount();homeOutline?.host.remove();
+      const host=document.createElement('span');host.dataset.betterSidebarHomeOutline='';
+      host.append(glyph);home.firstElementChild.append(host);homeOutline={home,host};
+      return;
+    }
     const native=await loadProjectAPI();
     if(disposed || !home.isConnected || !native.PCn || !native.Dgn)return;
-    homeOutline?.root.unmount();homeOutline?.host.remove();
+    homeOutline?.root?.unmount();homeOutline?.host.remove();
     const React=native.PCn(),host=document.createElement('span');host.dataset.betterSidebarHomeOutline='';home.firstElementChild.append(host);
     const root=native.Dgn().createRoot(host);homeOutline={home,host,root};root.render(React.isValidElement(icon)?icon:React.createElement(icon));
   }catch(error){api.log('Native Home icon unavailable:',error.message);}
@@ -445,7 +458,8 @@ function cleanupTooltips() {
   for(const [button,entry] of nativeTooltips)if(disposed || !button.isConnected){entry.root?.unmount();entry.host?.remove();nativeTooltips.delete(button);}
 }
 function hideProjectNode(node) {if(!node.hasAttribute('data-better-sidebar-hidden'))node.setAttribute('data-better-sidebar-hidden','');filteredNodes.add(node);}
-function showProjectNode(node) {node.removeAttribute('data-better-sidebar-hidden');filteredNodes.delete(node);}
+function showProjectNode(node) {if(node.hasAttribute('data-better-sidebar-hidden'))node.removeAttribute('data-better-sidebar-hidden');filteredNodes.delete(node);}
+function setAttributeIfChanged(node,name,value) {if(node.getAttribute(name)!==value)node.setAttribute(name,value);}
 function filterProjectActivityGroups(list) {
   const groups=[...list.children].filter(node=>node.getAttribute('aria-hidden')!=='true');
   for(const [index,group] of groups.entries()) {
@@ -485,23 +499,25 @@ function focusProjectView(rail, home) {
   const activityList=nav.querySelector('[class~="@container/priority-list"]');
   const row=projectRow(pin.id), title=row?.getAttribute('data-app-action-sidebar-project-label')||pin.title;
   const sections=nativeProjectModule?projectBinding(pin.id).scope?.get(nativeProjectModule.SR):undefined;
+  const sectionIDs=new Map();
   // Restore only on scope changes; compare each mutation to avoid observer loops.
   for(const node of [...filteredNodes])if(!node.isConnected){filteredNodes.delete(node);}
   for(const group of nav.querySelectorAll('[data-sidebar-project-container-id^="project:"][role="listitem"]')) {
     if(group.getAttribute('data-sidebar-project-container-id')!==`project:${pin.id}`)hideProjectNode(group);
-    else {group.removeAttribute('data-better-sidebar-hidden');filteredNodes.delete(group);group.setAttribute('data-better-sidebar-flat-project','');}
+    else {showProjectNode(group);setAttributeIfChanged(group,'data-better-sidebar-flat-project','');}
   }
   for(const nativeSection of nav.querySelectorAll('section[data-app-action-sidebar-section]')) {
     if(activityList?.contains(nativeSection))continue;
-    const id=appBindings(nativeSection).sectionId;
+    const bindings=appBindings(nativeSection),id=bindings.sectionId;
+    sectionIDs.set(nativeSection,id);
     const full=nativeSection.getAttribute('data-app-action-sidebar-section-heading')||'';
     const belongs=projectSections[id]?.projectId===pin.id || full.startsWith(`${title} » `);
     const projectPinned=belongs && (projectSections[id]?.kind==='pinned' || full===`${title} » Pinned`);
     const wrapper=nativeSection.closest('[data-sidebar-project-container-id^="custom:"]')||nativeSection;
-    const sectionItems=nativeProjectModule?appBindings(nativeSection).scope?.get(nativeProjectModule.SR):undefined;
+    const sectionItems=projectPinned && nativeProjectModule?bindings.scope?.get(nativeProjectModule.SR):undefined;
     if(projectPinned && (sectionItems||sections)?.find(section=>section.id===id || section.name===full)?.itemKeys.length===0){hideProjectNode(wrapper);continue;}
     if(belongs && filteredNodes.has(wrapper)){wrapper.removeAttribute('data-better-sidebar-hidden');filteredNodes.delete(wrapper);}
-    if(projectPinned)(nativeSection.closest('[data-sidebar-project-container-id^="custom:"]')||nativeSection).setAttribute('data-better-sidebar-project-pinned-section','');
+    if(projectPinned)setAttributeIfChanged(wrapper,'data-better-sidebar-project-pinned-section','');
     let pinnedKeys=[];
     try {pinnedKeys=JSON.parse(nativeSection.closest('[data-pinned-content-tab-drop-keys]')?.getAttribute('data-pinned-content-tab-drop-keys')||'[]');}catch{}
     const targetGroup=pinnedKeys.includes(`codex:project:${pin.id}`) || pinnedKeys.includes(`chatgpt:project:${pin.id}`) || [...nativeSection.querySelectorAll('[data-sidebar-project-container-id]')].some(group=>group.getAttribute('data-sidebar-project-container-id')===`project:${pin.id}`);
@@ -529,7 +545,7 @@ function focusProjectView(rail, home) {
   for(const thread of nav.querySelectorAll('[data-app-action-sidebar-thread-row]')) {
     const group=thread.closest('[data-sidebar-project-container-id^="project:"]');
     const nativeSection=thread.closest('section[data-app-action-sidebar-section]');
-    const id=nativeSection && appBindings(nativeSection).sectionId;
+    const id=nativeSection && sectionIDs.get(nativeSection);
     const activityMatch=activityList?.contains(thread) && appBindings(thread).threadProjectId===pin.id;
     if(!activityMatch && group?.getAttribute('data-sidebar-project-container-id')!==`project:${pin.id}` && projectSections[id]?.projectId!==pin.id && !nativeSection?.getAttribute('data-app-action-sidebar-section-heading')?.startsWith(`${title} » `)){
       hideProjectNode(thread);
@@ -553,7 +569,7 @@ function focusProjectView(rail, home) {
   const brand=button?.querySelector('span[class*="font-openai-sans"]');
   if(brand) {
     if(!brandedHeaders.has(button))brandedHeaders.set(button,{label:button.getAttribute('aria-label'),replacement:`Switch mode, current project: ${title}`});
-    brand.setAttribute('data-better-sidebar-project-brand','');
+    setAttributeIfChanged(brand,'data-better-sidebar-project-brand','');
     let label=brand.querySelector('[data-better-sidebar-project-title]');
     if(!label){label=document.createElement('span');label.dataset.betterSidebarProjectTitle='';brand.append(label);}
     if(label.textContent!==title)label.textContent=title;
@@ -631,11 +647,13 @@ async function syncProjectPinControls() {
     if(!bindings.scope)return;
     const section=pinnedProjectSection(pin,bindings.scope.get(native.SR));
     const candidates=[];
+    const removeLabel=bindings.intl?.formatMessage({id:'sidebarElectron.removeFromSection',defaultMessage:'Remove from section'});
     for(const row of document.querySelectorAll('[data-app-action-sidebar-thread-row]')) {
-      if(!row.checkVisibility?.() || !projectThreadKey(row))continue;
+      // The project filter already marks excluded rows and their ancestors.
+      // Pin actions do not need geometry; avoid forcing layout for every chat.
+      if(row.closest('[data-better-sidebar-hidden],[hidden],[aria-hidden="true"]') || !projectThreadKey(row))continue;
       const key=typeof native.cR==='function'?native.cR(bindings.scope,projectThreadKey(row)):projectThreadKey(row);
       const pinned=section?.itemKeys.includes(key)===true;
-      const removeLabel=bindings.intl?.formatMessage({id:'sidebarElectron.removeFromSection',defaultMessage:'Remove from section'});
       for(const button of row.querySelectorAll('button')) {
         if(button.closest('[data-better-sidebar-chat-pin]'))continue;
         if(isNativePinControl(button) || (pinned && button.getAttribute('aria-label')===removeLabel))candidates.push({row,button,pinned});
@@ -929,7 +947,27 @@ api.on(document,'submit',event=>{
   if(pendingSectionCreation && event.target.closest('[role="dialog"]'))pendingSectionCreation.submitted=true;
 },true);
 api.on(window, 'storage', event => { if (event.key === storageKey || event.key === projectKey('pin-projects') || event.key === projectKey('project-sections') || event.key === projectKey('hidden-destinations') || event.key === sidebarStyleKey(projectAccount)) refresh(); });
-const observer = new MutationObserver(() => {
+const sidebarSurfaceSelector=`${railSelector},nav[role="navigation"],${orbitSelector},[data-app-action-sidebar-scroll]`;
+const managedSurfaceSelector='[data-better-sidebar-pins],[data-better-sidebar-divider],[data-better-sidebar-project-divider],[data-better-sidebar-tooltip],[data-better-sidebar-home-outline],[data-better-sidebar-chat-pin],[data-better-sidebar-explore],[data-better-sidebar-project-title]';
+function sidebarMutationNeedsRefresh(record) {
+  const element=record.target.nodeType===Node.ELEMENT_NODE?record.target:record.target.parentElement;
+  if(!element || element.closest(managedSurfaceSelector))return false;
+  if(record.type==='attributes' && ['data-slate-sidebar-peeking','data-app-shell-sidebar-open'].includes(record.attributeName))return true;
+  if(record.type==='attributes' && record.attributeName==='aria-expanded' && element.matches('[aria-controls="app-shell-sidebar"]'))return true;
+  if(pendingSectionCreation && element.closest('[role="dialog"]'))return true;
+  if(element.closest(sidebarSurfaceSelector)) {
+    if(element.closest('[data-app-action-sidebar-thread-row]') && (record.type==='characterData' || record.type==='childList' && [...record.addedNodes,...record.removedNodes].every(node=>node.nodeType===Node.TEXT_NODE)))return false;
+    const shortened=shortenedLabels.get(element);
+    if(shortened && element.textContent===shortened.short)return false;
+    if(record.type==='childList' && [...record.addedNodes,...record.removedNodes].every(node=>node.nodeType===Node.ELEMENT_NODE && node.matches(managedSurfaceSelector)))return false;
+    return true;
+  }
+  // Keep observing the root to notice native sidebar replacement, without
+  // refreshing for streamed messages, browser content or unrelated controls.
+  return record.type==='childList' && [...record.addedNodes,...record.removedNodes].some(node=>node.nodeType===Node.ELEMENT_NODE && (node.matches(sidebarSurfaceSelector) || node.querySelector(sidebarSurfaceSelector) || pendingSectionCreation && (node.matches('[role="dialog"]') || node.querySelector('[role="dialog"]'))));
+}
+const observer = new MutationObserver(records => {
+  if(!records.some(sidebarMutationNeedsRefresh))return;
   if (!frame) frame = requestAnimationFrame(() => { frame = 0; refresh(); });
 });
 observer.observe(document.documentElement, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['src', 'aria-current','data-slate-sidebar-peeking','data-app-shell-sidebar-open','aria-expanded']});
@@ -937,6 +975,6 @@ api.onCleanup(() => {
   disposed = true; ++menuGeneration;clearProjectPreview();
   if(sidebarStyleAdapter){const {scope,native,original}=sidebarStyleAdapter;scope.set(native.UIt,sidebarLayoutGate,original);sidebarStyleAdapter=undefined;}
   observer.disconnect(); cancelAnimationFrame(frame);
-  setRailSelection(undefined);dotSelectionPending=false;removeSection();restoreExplore();restoreProjectView();pendingSectionCreation=undefined;projectButtons.clear();homeOutline?.root.unmount();homeOutline?.host.remove();
+  setRailSelection(undefined);dotSelectionPending=false;removeSection();restoreExplore();restoreProjectView();pendingSectionCreation=undefined;projectButtons.clear();homeOutline?.root?.unmount();homeOutline?.host.remove();
 });
 refresh();

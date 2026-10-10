@@ -39,6 +39,16 @@ test('Focus Mode still reports a missing shell in the supported main renderer', 
   assert.equal(timers, 99);
 });
 
+test('Incomplete shell capabilities fail before touching styles or registering listeners', async () => {
+  for (const missing of ['snapshot', 'setSidebarOpen', 'windowControls']) {
+    const shell = {protocol:1, snapshot() {}, setSidebarOpen() {}, windowControls() {}};
+    delete shell[missing];
+    const ctx = vm.createContext({location:{pathname:'/index.html'}});
+    const start = vm.runInContext(`new Function('api', ${JSON.stringify(extension)})`, ctx);
+    await assert.rejects(start({waitForShell:() => Promise.resolve(shell)}), /Incomplete Codex\+\+ shell v1 contract/);
+  }
+});
+
 test('Hot-update clears the old detached-window failure without a reload or another wait', async () => {
   let timers = 0;
   const ctx = vm.createContext({location:{pathname:'/detached-window.html'},
@@ -87,6 +97,10 @@ function native() {
   win.isDestroyed = () => false;
   win.setWindowButtonVisibility = visible => calls.push(visible);
   const owner = new EventEmitter();
+  const app = new EventEmitter(), sent = [], contents = [owner];
+  owner.isDestroyed = () => false;
+  owner.send = (channel, data) => sent.push({channel,data});
+  win.webContents = owner;
   owner.mainFrame = {url:'app://-/index.html'};
   const event = {sender:owner,senderFrame:owner.mainFrame};
   const ctx = vm.createContext({URL,process:{platform:'darwin'},Date:{now:() => now},
@@ -96,9 +110,10 @@ function native() {
       if (!installed) throw Error('removed');
       return JSON.stringify({id:'focus-mode',scope:'renderer'});
     }}});
-  const bridge = vm.runInContext(resource('native-shell'), ctx)({BrowserWindow:{fromWebContents:sender => sender === owner ? win : null}}, '/support');
+  const bridge = vm.runInContext(resource('native-shell'), ctx)({app,webContents:{getAllWebContents:() => contents},BrowserWindow:{fromWebContents:sender => sender === owner ? win : null}}, '/support');
   const controls = hidden => bridge.controls(event, {protocol:1,hidden});
-  return {bridge,controls,event,owner,win,calls,timers,
+  return {bridge,controls,event,owner,win,calls,timers,app,sent,
+    shortcut(enabled = true, requestId = 'shortcut-owner') { bridge.shortcut(event, {protocol:1,enabled,requestId}); },
     tick(ms) {now += ms; for (const fn of timers.values()) fn();},
     settings(value) {settings=value;}, remove() {installed=false;}};
 }
@@ -203,6 +218,60 @@ test('Websites, child frames, unknown protocols and malformed IPC cannot hide co
   f.owner.mainFrame.url = 'app://-/settings';
   assert.throws(() => f.controls(true), /Invalid/);
   assert.equal(f.calls.length, 0);
+});
+
+test('Native Focus Mode shortcut routes from its own main renderer and attached guests exactly once', () => {
+  const f = native(); f.shortcut();
+  const guests = [new EventEmitter(),new EventEmitter()];
+  guests[0].hostWebContents = f.owner;
+  f.app.emit('web-contents-created', {}, guests[0]);
+  f.owner.emit('did-attach-webview', {}, guests[1]);
+  const input = {type:'keyDown',code:'Backslash',key:'|',meta:true,shift:true};
+  for (const contents of [f.owner,...guests]) {
+    let prevented = 0;
+    contents.emit('before-input-event', {preventDefault() {prevented++;}}, input);
+    assert.equal(prevented, 1);
+    assert.equal(f.sent.at(-1).data.requestId, 'shortcut-owner');
+    const before = f.sent.length;
+    contents.emit('before-input-event', {preventDefault() {prevented++;}}, {...input,isAutoRepeat:true});
+    assert.equal(prevented, 2);
+    assert.equal(f.sent.length, before);
+    for (const change of [{type:'keyUp'},{meta:false},{shift:false},{control:true},{alt:true},
+      {isComposing:true},{code:'KeyA',key:'a'}]) {
+      contents.emit('before-input-event', {preventDefault() {throw Error('unrelated shortcut intercepted');}}, {...input,...change});
+    }
+    contents.emit('before-input-event', {preventDefault() {}}, {...input,code:'IntlBackslash',key:'\\'});
+  }
+  assert.equal(f.sent.length, 6);
+  assert.ok(f.sent.every(message => message.channel === 'codex_desktop:message-for-view' && message.data.type === 'codexpp-shell-toggle-focus'));
+  // A separate window/DevTools must not toggle whichever app window is focused.
+  const unrelated = new EventEmitter(); f.app.emit('web-contents-created', {}, unrelated);
+  unrelated.emit('before-input-event', {preventDefault() {throw Error('wrong window');}}, input);
+  assert.equal(f.sent.length, 6);
+});
+
+test('Native shortcut leases enforce disable, expiry, ownership, navigation and stale cleanup', () => {
+  const input = {type:'keyDown',key:'|',meta:true,shift:true};
+  for (const change of [f => f.shortcut(false),f => f.tick(4000),f => f.remove(),
+    f => f.settings({enabled:{'focus-mode':false}}),f => f.settings({extensionsPaused:true}),
+    f => f.settings({withoutTweaks:true}),f => f.owner.emit('render-process-gone'),
+    f => f.owner.emit('did-start-navigation', {}, 'app://-/index.html', false, true)]) {
+    const f = native(); f.shortcut(); change(f);
+    f.owner.emit('before-input-event', {preventDefault() {throw Error('expired shortcut consumed');}}, input);
+    assert.equal(f.sent.length, 0);
+  }
+  const f = native();
+  f.shortcut(true,'old'); f.shortcut(true,'new'); f.shortcut(false,'old');
+  f.owner.emit('before-input-event',{preventDefault() {}},input);
+  assert.equal(f.sent[0].data.requestId,'new');
+  f.tick(3000); f.shortcut(true,'new'); f.tick(2000);
+  f.owner.emit('before-input-event',{preventDefault() {}},input);
+  assert.equal(f.sent.length,2);
+  f.shortcut(false,'new'); assert.equal(f.timers.size,0);
+  for (const request of [{protocol:2,enabled:true,requestId:'id'}, {protocol:1,enabled:'yes',requestId:'id'},
+    {protocol:1,enabled:true,requestId:''}]) assert.throws(() => f.bridge.shortcut(f.event,request),/Invalid/);
+  assert.throws(() => f.bridge.shortcut({...f.event,senderFrame:{url:'app://-/index.html'}},
+    {protocol:1,enabled:true,requestId:'id'}),/Invalid/);
 });
 
 test('Reviewed archive shell contract is discoverable', {skip:!process.env.CODEXPP_SHELL_ARCHIVE}, () => {

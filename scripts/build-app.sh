@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-swift build -c release
+swift build -c release -debug-info-format none
 bin_dir="$(swift build -c release --show-bin-path)"
 app="$PWD/dist/Codex++.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
@@ -19,6 +19,7 @@ cp "$bin_dir/CodexPP" "$app/Contents/MacOS/CodexPP"
 for resource in "$bin_dir"/*.bundle; do
   [ -e "$resource" ] && ditto "$resource" "$app/Contents/Resources/$(basename "$resource")"
 done
+python3 scripts/reviewed-patches.py --package "$app"
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,12 +39,14 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 PLIST
 signing_identity="${CODEXPP_SIGNING_IDENTITY:-}"
 if [ -z "$signing_identity" ]; then
-  signing_identity="$(security find-identity -v -p codesigning | awk '/"Codex\+\+ Local Signing"/ {print $2}')"
+  signing_identity="$(security find-identity -v -p codesigning | awk '/"Developer ID Application:/ {print $2}')"
 fi
 if [ -z "$signing_identity" ] || [[ "$signing_identity" == *$'\n'* ]] || [ "$signing_identity" = "-" ]; then
-  echo 'A persistent code-signing identity is required. Set CODEXPP_SIGNING_IDENTITY or create Codex++ Local Signing in Keychain Access.' >&2
+  echo 'A Developer ID Application certificate is required. Set CODEXPP_SIGNING_IDENTITY when multiple identities are installed.' >&2
   exit 1
 fi
+CODEXPP_SIGNING_IDENTITY="$signing_identity" bash scripts/build-sparkle.sh
+ditto "$PWD/.build/sparkle-framework/Sparkle.framework" "$app/Contents/Resources/Sparkle.framework"
 node_include="${CODEXPP_NODE_INCLUDE:-}"
 if [ -z "$node_include" ]; then
   for candidate in "$(node -p 'require("path").resolve(process.execPath, "../../include/node")')" /opt/homebrew/include/node /usr/local/include/node; do
@@ -55,8 +58,11 @@ if [ ! -f "$node_include/node_api.h" ]; then
   exit 1
 fi
 clang++ -shared -fPIC -fobjc-arc -std=c++17 -mmacosx-version-min=14.0 \
-  -I "$node_include" -framework AppKit -undefined dynamic_lookup \
+  -I "$node_include" -framework AppKit -framework Security -undefined dynamic_lookup \
   Sources/CodexPPNativeBrowser/browser-native.mm -o "$app/Contents/Resources/browser-native.node"
 codesign --force --sign "$signing_identity" "$app/Contents/Resources/browser-native.node"
+clang -dynamiclib -arch arm64 -mmacosx-version-min=14.0 -framework Security \
+  Sources/CodexPPNativeBrowser/startup-policy.c -o "$app/Contents/Resources/CodexPPStartup.dylib"
+codesign --force --options runtime --sign "$signing_identity" "$app/Contents/Resources/CodexPPStartup.dylib"
 codesign --force --options runtime --entitlements Assets/Helper.entitlements --sign "$signing_identity" "$app"
 printf 'Built %s\n' "$app"
