@@ -13,6 +13,15 @@
   let starting = null;
   let captureQueue = Promise.resolve();
 
+  function trustedEvent(event) {
+    try {
+      const frame = event?.senderFrame;
+      const url = new URL(frame.url);
+      return event.sender && frame === event.sender.mainFrame && url.protocol === 'app:' && url.host === '-' &&
+        (['/index.html', '/detached-window.html', '/settings'].includes(url.pathname) || url.pathname.startsWith('/settings/'));
+    } catch { return false; }
+  }
+
   function vendorExecutable(file) {
     const verification = childProcess.spawnSync('/usr/bin/codesign', ['--verify', '--strict', file], {encoding: 'utf8'});
     const identity = childProcess.spawnSync('/usr/bin/codesign', ['-d', '-vv', file], {encoding: 'utf8'});
@@ -199,7 +208,9 @@
     });
   }
 
-  async function relay(sender, request) {
+  async function relay(event, request) {
+    if (!trustedEvent(event)) throw new Error('Invalid Appshot sender.');
+    const sender = event.sender;
     let started = false;
     let captureId = null;
     try {

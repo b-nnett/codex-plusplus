@@ -165,8 +165,8 @@ test('Extension initialization failures release native support through the real 
       messages.push(message);
       if (message.enabled) throw Error('Native bridge rejected request');
     }}});
-  vm.runInContext(readFileSync(new URL('../Sources/CodexPP/Resources/runtime.js',import.meta.url),'utf8'),ctx);
-  const desired = [{id:'better-browser',code:extension}];
+  vm.runInContext(readFileSync(new URL('../Sources/CodexPPCore/Resources/renderer-runtime.js',import.meta.url),'utf8'),ctx);
+  const desired = [{id:'better-browser',fingerprint:extension,start:vm.runInContext(`(async function(api){${extension}})`,ctx)}];
   const states = await ctx.__codexPP.sync(desired);
   assert.equal(states[0].state, 'error');
   assert.match(states[0].error, /Native bridge rejected request/);
@@ -190,8 +190,8 @@ test('An old native acknowledgement cannot report the extension as healthy', asy
       messages.push(message);
       if (message.enabled) for (const fn of listeners) fn({data:{type:'codexpp-browser-autofill-result',requestId:message.requestId,supported:true}});
     }}});
-  vm.runInContext(readFileSync(new URL('../Sources/CodexPP/Resources/runtime.js',import.meta.url),'utf8'),ctx);
-  const states = await ctx.__codexPP.sync([{id:'better-browser',code:extension}]);
+  vm.runInContext(readFileSync(new URL('../Sources/CodexPPCore/Resources/renderer-runtime.js',import.meta.url),'utf8'),ctx);
+  const states = await ctx.__codexPP.sync([{id:'better-browser',fingerprint:extension,start:vm.runInContext(`(async function(api){${extension}})`,ctx)}]);
   assert.equal(states[0].state, 'error');
   assert.match(states[0].error, /native macOS AutoFill adapter/);
   assert.deepEqual(messages.map(message => message.enabled), [true,false]);

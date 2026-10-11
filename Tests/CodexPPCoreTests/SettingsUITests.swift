@@ -33,17 +33,17 @@ final class SettingsUITests: XCTestCase {
         withExtendedLifetime(waiter) {}
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let resources = root.appendingPathComponent("Sources/CodexPP/Resources")
-        let bridge = try String(contentsOf: resources.appendingPathComponent("bridge.js"), encoding: .utf8).replacingOccurrences(of: "__CODEXPP_SESSION_TOKEN__", with: "'test-session'")
+        let bridge = try String(contentsOf: root.appendingPathComponent("Sources/CodexPPCore/Resources/renderer-bridge.js"), encoding: .utf8)
         let settings = try String(contentsOf: resources.appendingPathComponent("settings.js"), encoding: .utf8)
         _ = try await evaluate("""
         globalThis.calls = [];
-        globalThis.__codexPPInvoke = text => {
-            const request = JSON.parse(text); calls.push(request);
+        globalThis.electronBridge = {sendMessageFromView(request) {
+            calls.push(request);
             if (request.action === 'set-enabled') state.extensions[0].enabled = request.enabled;
             else if (request.action === 'remove') state.extensions = [];
             else if (request.action === 'pause' || request.action === 'resume') state.extensionsPaused = request.action === 'pause';
-            queueMicrotask(() => __codexPPBridge.resolve(request.requestId, {ok:true,data:state}));
-        };
+            queueMicrotask(() => window.dispatchEvent(new MessageEvent('message', {data:{type:'codexpp-settings-result',requestId:request.requestId,ok:true,data:state}})));
+        }};
         globalThis.state = {extensions:[{id:'one',name:'<img src=x onerror=bad()>',description:'Example',version:'1.0',enabled:true}],extensionsPaused:false,intent:1};
         \(bridge)
         \(settings)
@@ -68,7 +68,7 @@ final class SettingsUITests: XCTestCase {
     @MainActor func testToggleAndRemovalUseOneAuthenticatedHelperBridge() async throws {
         let view = try await fixture()
         _ = try await evaluate("const checkbox=document.querySelector('[data-codexpp-settings-content] input'); checkbox.checked=false; checkbox.dispatchEvent(new Event('change'));", in: view)
-        let updated = try await evaluate("String(!state.extensions[0].enabled && calls[0].action === 'set-enabled' && calls[0].token === 'test-session' && calls[0].extensionId === 'one')", in: view)
+        let updated = try await evaluate("String(!state.extensions[0].enabled && calls[0].type === 'codexpp-settings' && calls[0].action === 'set-enabled' && calls[0].extensionId === 'one')", in: view)
         XCTAssertEqual(updated, "true")
         _ = try await evaluate("document.querySelector('[data-codexpp-settings-content] button[aria-label]').click()", in: view)
         let removed = try await evaluate("String(state.extensions.length === 0 && !document.querySelector('[data-codexpp-settings-content] input'))", in: view)

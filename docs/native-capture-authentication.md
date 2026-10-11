@@ -1,6 +1,6 @@
 # Native capture and computer-use authentication
 
-Observed and implemented on 9 October 2026 with ChatGPT **26.1007.21159, build 20052**, and Codex++ adapter **chatgpt-macos-20052-v16**. These routes and service details are build-specific vendor internals.
+Observed and initially implemented on 9 October 2026 with ChatGPT **26.1007.21159, build 20052**. The first validated bridge was adapter **chatgpt-macos-20052-v16**. Revision 36 was revalidated on 11 October 2026 against the signed runtime in **ChatGPT 26.1007.30912, build 20156**. These routes and service details are build-specific vendor internals.
 
 ## Why local signing breaks the original Appshot worker
 
@@ -23,7 +23,7 @@ The service binary also checks parent signing metadata and has protected app-gro
 The app ships OpenAI-signed `node`, `node_repl`, `@oai/cua-repl`, and `@oai/sky` components. Their nested signatures survive the local signing step because Codex++ does not modify or recursively re-sign those executables. Adapter v16 uses their intended headless path:
 
 ```text
-locally signed ChatGPT renderer
+trusted ChatGPT `app://-` main frame
     -> intercepted computer-use-start-capture request
     -> Codex++ main-process bridge
     -> bundled OpenAI-signed node + node_repl
@@ -66,7 +66,7 @@ The focused ASAR/bootstrap suite also verifies that the generated entry point co
 
 ## Signing and integrity
 
-The patched root app and affected Electron framework use the pinned `Codex++ Local Signing` identity. ASAR entry and header hashes, `ElectronAsarIntegrity`, and the reviewed native integrity digest are recalculated as before. The service and bundled `cua_node` executables are not modified.
+The patched root app and affected Electron framework use the helper's pinned Apple-issued Developer ID Application identity. ASAR entry and header hashes, `ElectronAsarIntegrity`, and the reviewed native integrity digest are recalculated as before. The service and bundled `cua_node` executables are not modified.
 
 Screen Recording and Accessibility permissions remain separate macOS authorization layers. This bridge fixes the sender-identity path; it does not grant missing user permissions.
 
@@ -80,11 +80,11 @@ codesign -d -vv /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node
 codesign -d -vv /Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl
 ```
 
-The receipt should report `chatgpt-macos-20052-v16`, and both executables should report TeamIdentifier `2DC432GLL2`.
+The receipt should report revision 36 for the installed build (`chatgpt-macos-20156-v36` for the latest live validation), and both executables should report TeamIdentifier `2DC432GLL2`.
 
 ## Contract checks for app updates
 
-`Tests/native-capture.test.mjs` runs the production bridge against a fake signed runtime. It fixes the expected MCP protocol version and server identity, launcher environment, `computer-use/get_app_state` approval scope, payload limits, and renderer event order. It also verifies that a changed connector, tool, app, response marker, payload shape, or server identity fails closed.
+`Tests/native-capture.test.mjs` runs the production bridge against a fake signed runtime. It fixes the expected MCP protocol version and server identity, launcher environment, `computer-use/get_app_state` approval scope, payload limits, sender-frame trust, and renderer event order. It also verifies that a changed connector, tool, app, response marker, payload shape, or server identity fails closed.
 
 The same test file contains an opt-in compatibility check that launches the candidate app's real signed runtime and performs one snapshot without logging its contents:
 

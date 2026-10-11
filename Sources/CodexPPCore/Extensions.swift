@@ -6,10 +6,12 @@ public struct HelperSettings: Codable, Equatable, Sendable {
     public var extensionsPaused = false
     public var enabled: [String: Bool] = [:]
     public var githubRepo: String? = nil
+    public var settingsIntent = 0
+    public var selectedExtensionId: String? = nil
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case appPath, port, extensionsPaused, enabled, githubRepo
+        case appPath, port, extensionsPaused, enabled, githubRepo, settingsIntent, selectedExtensionId
         case legacyWithoutTweaks = "withoutTweaks"
     }
     public init(from decoder: Decoder) throws {
@@ -20,6 +22,8 @@ public struct HelperSettings: Codable, Equatable, Sendable {
             ?? values.decodeIfPresent(Bool.self, forKey: .legacyWithoutTweaks) ?? false
         enabled = try values.decodeIfPresent([String: Bool].self, forKey: .enabled) ?? [:]
         githubRepo = try values.decodeIfPresent(String.self, forKey: .githubRepo)
+        settingsIntent = try values.decodeIfPresent(Int.self, forKey: .settingsIntent) ?? 0
+        selectedExtensionId = try values.decodeIfPresent(String.self, forKey: .selectedExtensionId)
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
@@ -28,12 +32,19 @@ public struct HelperSettings: Codable, Equatable, Sendable {
         try values.encode(extensionsPaused, forKey: .extensionsPaused)
         try values.encode(enabled, forKey: .enabled)
         try values.encodeIfPresent(githubRepo, forKey: .githubRepo)
+        try values.encode(settingsIntent, forKey: .settingsIntent)
+        try values.encodeIfPresent(selectedExtensionId, forKey: .selectedExtensionId)
     }
 
     public func validate() throws {
         if let githubRepo, ExtensionManifest.repositoryURL(githubRepo) == nil { throw HelperError.message("Use a GitHub owner/repository pair.") }
-        guard (1024...65535).contains(port) else { throw HelperError.message("Choose a CDP port between 1024 and 65535.") }
+        guard (1024...65535).contains(port) else { throw HelperError.message("The legacy compatibility port must be between 1024 and 65535.") }
         guard appPath.hasPrefix("/"), appPath.hasSuffix(".app") else { throw HelperError.message("Choose the installed Codex app bundle.") }
+        guard settingsIntent >= 0, settingsIntent < Int.max else { throw HelperError.message("Invalid Settings navigation state.") }
+        if let selectedExtensionId,
+           selectedExtensionId.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$", options: .regularExpression) == nil {
+            throw HelperError.message("Invalid selected extension.")
+        }
     }
 }
 

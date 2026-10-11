@@ -108,7 +108,9 @@ final class AsarPatchTests: XCTestCase {
         let bootstrap = try adapter.bootstrap(original: source, port: 9222, helper: URL(fileURLWithPath: "/tmp/Example 'quoted' ++.app"), support: URL(fileURLWithPath: "/tmp/Support"))
         let text = String(decoding: bootstrap, as: UTF8.self)
         XCTAssertTrue(text.hasSuffix(String(decoding: source, as: UTF8.self)))
-        XCTAssertTrue(text.contains("127.0.0.1"))
+        XCTAssertFalse(text.contains("appendSwitch('remote-debugging"))
+        XCTAssertTrue(text.contains("removeSwitch('remote-debugging-port')"))
+        XCTAssertTrue(text.contains("ppNativeRuntime"))
         XCTAssertTrue(text.contains("--codexpp-probe"))
         XCTAssertTrue(text.contains("computer-use-start-capture"))
         XCTAssertTrue(text.contains("TeamIdentifier=2DC432GLL2"))
@@ -135,5 +137,12 @@ final class AsarPatchTests: XCTestCase {
         try process.run(); process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0, String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self))
         XCTAssertThrowsError(try adapter.bootstrap(original: source, port: 80, helper: URL(fileURLWithPath: "/tmp/Helper.app"), support: URL(fileURLWithPath: "/tmp/Support")))
+    }
+    func testOversizedReplacementHasClearError() throws {
+        let (path, _, _) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        let big = Data(count: AsarArchive.maxEntrySize + 1)
+        XCTAssertThrowsError(try AsarArchive(path).replacing("main.js", with: big, output: path.appendingPathExtension("next"))) {
+            XCTAssertTrue($0.localizedDescription.contains("exceeds"), $0.localizedDescription)
+        }
     }
 }

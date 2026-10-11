@@ -3,6 +3,15 @@ import Combine
 import ServiceManagement
 import CodexPPCore
 
+private struct RuntimeDiagnostic: Decodable {
+    let schema: Int
+    let pid: Int32
+    let time: String
+    let windows: Int
+    let activeExtensions: [String]
+    let runtimeErrors: [String: String]
+}
+
 @MainActor
 final class HelperModel: ObservableObject {
     @Published private(set) var settings = HelperSettings()
@@ -17,18 +26,17 @@ final class HelperModel: ObservableObject {
     @Published var message: String?
     @Published private(set) var loginEnabled = SMAppService.mainApp.status == .enabled
     let store: ExtensionStore
-    private let bootstrap: String
-    private let bridgeSource: String
-    private let settingsSource: String
-    private var settingsSessions: [String: SettingsSession] = [:]
-    private var settingsIntent = 0
-    private var selectedExtensionID: String?
     private var monitor: Task<Void, Never>?
     private var configurationReadable = true
     private var polling = false
     private var validatedPatchStamp: String?
     private var connectionError: String?
     private var failedUpdateTicket: Data?
+    private static func runtimeDate(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: value) ?? ISO8601DateFormatter().date(from: value)
+    }
     var hasPatchedApp: Bool { FileManager.default.fileExists(atPath: URL(fileURLWithPath: settings.appPath).appendingPathComponent("Contents/Resources/codexpp-patch.json").path) }
     var statusChanged: (() -> Void)?
     var github: URL { ExtensionManifest.repositoryURL(settings.githubRepo ?? "b-nnett/codex-plusplus")! }
@@ -38,9 +46,6 @@ final class HelperModel: ObservableObject {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let preview = Bundle.main.object(forInfoDictionaryKey: "CodexPPPreview") as? Bool == true
         store = ExtensionStore(root: root ?? (preview ? FileManager.default.temporaryDirectory.appendingPathComponent("CodexPP-Preview") : support.appendingPathComponent("CodexPP")))
-        bootstrap = (try? String(contentsOf: Bundle.module.url(forResource: "runtime", withExtension: "js")!, encoding: .utf8)) ?? ""
-        bridgeSource = (try? String(contentsOf: Bundle.module.url(forResource: "bridge", withExtension: "js")!, encoding: .utf8)) ?? ""
-        settingsSource = (try? String(contentsOf: Bundle.module.url(forResource: "settings", withExtension: "js")!, encoding: .utf8)) ?? ""
         do {
             settings = try store.readSettings()
             let candidates = [
@@ -182,23 +187,17 @@ final class HelperModel: ObservableObject {
         }
         return bundle
     }
-    private func ownsEndpoint() async throws -> Bool {
-        guard let app = codexApp else { return false }
-        let result = try await runCommand("/usr/sbin/lsof", ["-nP", "-a", "-p", String(app.processIdentifier), "-iTCP:\(settings.port)", "-sTCP:LISTEN", "-Fpn"])
-        // Refuse a listener exposed to the network or owned by another app.
-        let names = result.output.split(separator: "\n").filter { $0.hasPrefix("n") }
-        return result.status == 0 && !names.isEmpty && names.allSatisfy { $0 == "n127.0.0.1:\(settings.port)" || $0 == "n[::1]:\(settings.port)" }
-    }
     func poll(force: Bool = false) async {
         guard !isPreview, (!busy || force), configurationReadable, !polling else { return }
         polling = true
         defer { polling = false; writeDiagnostics() }
         running = codexApp != nil
         guard running else {
-            for session in settingsSessions.values { session.close() }; settingsSessions.removeAll()
             connected = false; activeCount = 0; statusChanged?(); return
         }
         do {
+            settings = try store.readSettings()
+            try reloadExtensions()
             guard hasPatchedApp else { throw HelperError.message("Restart ChatGPT from the helper to install Extensions support.") }
             let appURL = URL(fileURLWithPath: settings.appPath).resolvingSymlinksInPath()
             let framework = appURL.appendingPathComponent("Contents/Frameworks/Codex Framework.framework/Versions/Current/Codex Framework").resolvingSymlinksInPath()
@@ -215,21 +214,16 @@ final class HelperModel: ObservableObject {
                 guard report.state == "patched" else { throw HelperError.message("ChatGPT's Extensions support needs to be installed again.") }
                 validatedPatchStamp = stamp
             }
-            guard try await ownsEndpoint() else { connected = false; activeCount = 0; statusChanged?(); return }
-            let client = CDPClient(port: settings.port)
-            let targets = try await client.targets()
-            var errors: [String: String] = [:], active = Set<String>()
-            let liveIDs = Set(targets.map(\.id))
-            for id in Array(settingsSessions.keys) where !liveIDs.contains(id) { settingsSessions.removeValue(forKey: id)?.close() }
-            for target in targets {
-                try await updateSettings(target)
-                let states = try await client.synchronize(target, bootstrap: bootstrap, extensions: settings.extensionsPaused ? [] : extensions.filter(isEnabled))
-                for state in states {
-                    if let error = state.error { errors[state.id] = error }
-                    else if state.state == "active" { active.insert(state.id) }
-                }
+            let diagnosticURL = store.root.appendingPathComponent("Diagnostics/runtime.json")
+            let diagnostic = try JSONDecoder().decode(RuntimeDiagnostic.self, from: Data(contentsOf: diagnosticURL))
+            let age = Self.runtimeDate(diagnostic.time).map { Date().timeIntervalSince($0) }
+            guard diagnostic.schema == 1, diagnostic.pid == codexApp?.processIdentifier,
+                  let age, age >= -2, age < 10 else {
+                connected = false; activeCount = 0; statusChanged?(); return
             }
-            connected = !targets.isEmpty; runtimeErrors = errors; activeCount = active.subtracting(errors.keys).count
+            connected = diagnostic.windows > 0
+            runtimeErrors = diagnostic.runtimeErrors
+            activeCount = diagnostic.activeExtensions.filter { runtimeErrors[$0] == nil }.count
             connectionError = nil
         } catch {
             connected = false; activeCount = 0
@@ -242,7 +236,7 @@ final class HelperModel: ObservableObject {
         let directory = store.root.appendingPathComponent("Diagnostics")
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            var snapshot: [String: Any] = ["schema": 1, "pid": ProcessInfo.processInfo.processIdentifier, "running": running, "connected": connected, "installedExtensions": extensions.count, "activeExtensions": activeCount, "settingsSessions": settingsSessions.count, "extensionsPaused": settings.extensionsPaused, "time": ISO8601DateFormatter().string(from: Date())]
+            var snapshot: [String: Any] = ["schema": 1, "pid": ProcessInfo.processInfo.processIdentifier, "running": running, "connected": connected, "installedExtensions": extensions.count, "activeExtensions": activeCount, "extensionsPaused": settings.extensionsPaused, "time": ISO8601DateFormatter().string(from: Date())]
             snapshot["runtimeErrors"] = runtimeErrors
             if let connectionError { snapshot["error"] = connectionError }
             let file = directory.appendingPathComponent("helper.json")
@@ -250,81 +244,8 @@ final class HelperModel: ObservableObject {
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         } catch { /* Diagnostics must never prevent extensions from running. */ }
     }
-    private func settingsSnapshot() -> [String: Any] {
-        let rows: [[String: Any]] = extensions.map { item in
-            var row: [String: Any] = ["id": item.id, "name": item.manifest.name, "description": item.manifest.description ?? "", "version": item.manifest.version, "enabled": isEnabled(item)]
-            if let error = runtimeErrors[item.id] { row["error"] = error }
-            return row
-        }
-        return ["extensions": rows, "extensionsPaused": settings.extensionsPaused, "intent": settingsIntent, "selectedExtensionId": selectedExtensionID ?? ""]
-    }
-    private func json(_ value: Any) throws -> String {
-        String(decoding: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed]), as: UTF8.self)
-    }
-    private func updateSettings(_ target: CDPTarget) async throws {
-        let session: SettingsSession
-        if let current = settingsSessions[target.id], !current.closed { session = current }
-        else {
-            session = try SettingsSession(target: target, port: settings.port)
-            settingsSessions[target.id] = session
-            session.onRequest = { [weak self] request, contextID, session in
-                await self?.handleSettings(request, contextID: contextID, session: session)
-            }
-            do { try await session.prepare() }
-            catch { session.close(); settingsSessions.removeValue(forKey: target.id); throw error }
-        }
-        let bridge = bridgeSource.replacingOccurrences(of: "__CODEXPP_SESSION_TOKEN__", with: try json(session.token))
-        try await session.evaluate("\(bridge)\n\(settingsSource)\nglobalThis.__codexPPSettings.update(\(try json(settingsSnapshot())))")
-    }
-    private func handleSettings(_ request: SettingsRequest, contextID: Int, session: SettingsSession) async {
-        var response: [String: Any]
-        do {
-            switch request.action {
-            case "state": break
-            case "folder": showFiles()
-            case "set-enabled", "remove":
-                guard let item = extensions.first(where: { $0.id == request.extensionId }) else { throw HelperError.message("This extension is no longer installed.") }
-                try await operate {
-                    var next = self.settings
-                    if request.action == "remove" { next.enabled[item.id] = false }
-                    else {
-                        guard let enabled = request.enabled else { throw HelperError.message("Missing extension selection.") }
-                        next.enabled[item.id] = enabled
-                    }
-                    try self.save(next)
-                    await self.poll(force: true)
-                    if request.action == "remove" {
-                        try FileManager.default.trashItem(at: item.directory, resultingItemURL: nil)
-                        try self.reloadExtensions()
-                    }
-                }
-            case "install":
-                try await operate { try await self.importExtension() }
-            case "resume", "pause":
-                try await operate {
-                    var next = self.settings; next.extensionsPaused = request.action == "pause"
-                    try self.save(next); await self.poll(force: true)
-                }
-            default: throw HelperError.message("Unknown extension action.")
-            }
-            response = ["ok": true, "data": settingsSnapshot()]
-        } catch { response = ["ok": false, "error": error.localizedDescription] }
-        if let expression = try? "globalThis.__codexPPBridge?.resolve(\(json(request.requestId)), \(json(response)))" {
-            try? await session.evaluate(expression, contextID: contextID)
-        }
-    }
     private func unload() async throws {
-        guard try await ownsEndpoint() else {
-            for session in settingsSessions.values { session.close() }; settingsSessions.removeAll()
-            return
-        }
-        let client = CDPClient(port: settings.port)
-        for target in try await client.targets() {
-            let states = try await client.synchronize(target, bootstrap: bootstrap, extensions: [])
-            if let error = states.first(where: { $0.error != nil })?.error { throw HelperError.message(error) }
-        }
-        activeCount = 0
-        for session in settingsSessions.values { await session.shutdown() }; settingsSessions.removeAll()
+        activeCount = 0; connected = false
     }
     func restart(extensionsPaused: Bool) {
         perform { try await self.restartNow(extensionsPaused: extensionsPaused) }
@@ -378,7 +299,6 @@ final class HelperModel: ObservableObject {
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         config.createsNewApplicationInstance = true
-        config.arguments = ["--remote-debugging-port=\(settings.port)", "--remote-debugging-address=127.0.0.1"]
         _ = try await NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: settings.appPath), configuration: config)
         running = true; connected = false; activeCount = 0
         do {
@@ -462,10 +382,12 @@ final class HelperModel: ObservableObject {
             _ = try self.validatedApp()
             let configuration = NSWorkspace.OpenConfiguration()
             configuration.activates = true
-            if self.codexApp == nil {
-                configuration.arguments = ["--remote-debugging-port=\(self.settings.port)", "--remote-debugging-address=127.0.0.1"]
+            if manageExtensions {
+                var next = self.settings
+                next.settingsIntent += 1
+                next.selectedExtensionId = extensionID
+                try self.save(next)
             }
-            if manageExtensions { self.settingsIntent += 1; self.selectedExtensionID = extensionID }
             // ChatGPT.app retains the codex scheme. Target the selected bundle,
             // rather than relying on whichever app is the default URL handler.
             _ = try await NSWorkspace.shared.open(

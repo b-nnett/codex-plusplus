@@ -3,6 +3,10 @@ import Darwin
 @testable import CodexPPCore
 
 final class AppPatcherTests: XCTestCase {
+    func testStagingCapacityIncludesBundleArchiveAndSafetyMargin() {
+        XCTAssertEqual(AppPatcher.requiredStagingCapacity(bundleAllocatedSize: 2_000, archiveSize: 500), 1_073_744_324)
+        XCTAssertEqual(AppPatcher.requiredStagingCapacity(bundleAllocatedSize: -1, archiveSize: -1), 1_073_741_824)
+    }
     private func sign(_ path: URL) throws {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         process.arguments = ["--force", "--sign", "-", path.path]
@@ -78,5 +82,65 @@ final class AppPatcherTests: XCTestCase {
         try Data("broken".utf8).write(to: backup.appendingPathComponent("Contents/Resources/app.asar"))
         XCTAssertThrowsError(try patcher.restore(app))
         XCTAssertEqual(try patcher.status(app).state, "patched")
+    }
+    private func hiddenBundles(_ root: URL) throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix(".ChatGPT.codexpp-") }
+    }
+    func testRestoreRemovesDisplacedPatchedCopy() throws {
+        let (root, app, patcher) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        _ = try patcher.stage(app); try setPhase("verified", root)
+        _ = try patcher.commit(app)
+        XCTAssertEqual(try hiddenBundles(root).count, 1)
+        XCTAssertEqual(try patcher.restore(app).state, "unpatched")
+        XCTAssertEqual(try hiddenBundles(root), [])
+    }
+    func testInterruptedRestoreRecoversWithoutLeakingPatchedCopy() throws {
+        let (root, app, patcher) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        _ = try patcher.stage(app); try setPhase("verified", root)
+        let backup = URL(fileURLWithPath: try XCTUnwrap(try patcher.commit(app).backupPath))
+        let receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: app.appendingPathComponent("Contents/Resources/codexpp-patch.json")))
+        let journal: [String: Any] = ["schema": 1, "target": app.path, "stage": backup.path.replacingOccurrences(of: ".codexpp-original-", with: ".codexpp-stage-"), "backup": backup.path, "receipt": receipt, "phase": "restoring"]
+        try JSONSerialization.data(withJSONObject: journal).write(to: root.appendingPathComponent("Support/Patching/transaction.json"))
+        XCTAssertEqual(renameatx_np(AT_FDCWD, app.path, AT_FDCWD, backup.path, UInt32(RENAME_SWAP)), 0)
+        try patcher.recover(app)
+        XCTAssertEqual(try patcher.status(app).state, "unpatched")
+        XCTAssertEqual(try hiddenBundles(root), [])
+    }
+    func testPendingStageRecoversAfterVendorUpdate() throws {
+        for phase in ["prepared", "verified", "exchanging"] {
+            let (root, app, patcher) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+            let stage = try patcher.stage(app); try setPhase(phase, root)
+            let archive = app.appendingPathComponent("Contents/Resources/app.asar")
+            let updated = try Data(contentsOf: archive) + Data("update".utf8)
+            try updated.write(to: archive)
+            XCTAssertNoThrow(try patcher.recover(app), phase)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: stage.path), phase)
+            XCTAssertEqual(try Data(contentsOf: archive), updated, phase)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Support/Patching/transaction.json").path), phase)
+        }
+    }
+    func testSwappedTransactionStillRefusesChangedApp() throws {
+        let (root, app, patcher) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let stage = try patcher.stage(app); try setPhase("exchanging", root)
+        XCTAssertEqual(renameatx_np(AT_FDCWD, app.path, AT_FDCWD, stage.path, UInt32(RENAME_SWAP)), 0)
+        let archive = app.appendingPathComponent("Contents/Resources/app.asar")
+        try (Data(contentsOf: archive) + Data("update".utf8)).write(to: archive)
+        XCTAssertThrowsError(try patcher.recover(app))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: stage.path))
+    }
+    func testReceiptRevisionsAreScopedToBuild() {
+        let current = PatchAdapter.current
+        XCTAssertEqual(current.id, "chatgpt-macos-20052-v\(PatchAdapter.revision)")
+        XCTAssertTrue(current.accepts(receiptAdapter: "chatgpt-macos-20052-v1"))
+        XCTAssertTrue(current.accepts(receiptAdapter: current.id))
+        XCTAssertFalse(current.accepts(receiptAdapter: "chatgpt-macos-20052-v\(PatchAdapter.revision + 1)"))
+        XCTAssertFalse(current.accepts(receiptAdapter: "chatgpt-macos-13536-v30"))
+        XCTAssertFalse(current.accepts(receiptAdapter: "chatgpt-macos-20052-v0"))
+        XCTAssertFalse(current.accepts(receiptAdapter: "xchatgpt-macos-20052-v3"))
+        let dynamic = PatchAdapter(id: PatchAdapter.id(build: "777"), version: "9", build: "777", main: "m", mainHash: "", headerHash: "", vendorAuthenticated: true)
+        XCTAssertTrue(dynamic.accepts(receiptAdapter: "chatgpt-macos-777-v31"))
+        let fixture = PatchAdapter(id: "fixture", version: "1", build: "1", main: "m", mainHash: "", headerHash: "")
+        XCTAssertTrue(fixture.accepts(receiptAdapter: "fixture"))
+        XCTAssertFalse(fixture.accepts(receiptAdapter: "chatgpt-macos-1-v1"))
     }
 }

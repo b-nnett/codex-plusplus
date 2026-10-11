@@ -1,4 +1,5 @@
-// Evaluated only in Codex app:// renderer pages by the external helper.
+// WebKit fixture harness only. Package.swift excludes this legacy string-code
+// adapter from Codex++.app; production uses CodexPPCore/renderer-runtime.js.
 (() => {
   if (globalThis.__codexPP?.protocol === 1) return;
   const records = new Map();
@@ -32,7 +33,6 @@
         id: extension.id,
         get shell() { return globalThis.__codexPPShell?.protocol === 1 ? globalThis.__codexPPShell : null; },
         waitForShell() {
-          // CDP can attach before the app's initial module has evaluated.
           // Poll only our owned API, never infer capabilities from private DOM.
           return new Promise((resolve, reject) => {
             let attempts = 0;
@@ -85,9 +85,8 @@
     value: Object.freeze({
       protocol: 1,
       sync(desired) {
-        // Compile while still inside the authenticated CDP evaluate call. A
-        // native acknowledgement/cleanup await loses its CSP eval permission.
-        // Parsing does not execute extension code; lifecycle order stays queued.
+        // Tests supply extension source as fixture data. The production runtime
+        // receives already prepared function literals from the main process.
         const compiled = new Map();
         for (const extension of desired) {
           try {

@@ -11,8 +11,18 @@ public struct PatchAdapter: Codable, Sendable {
     public let frameworkHash: String?
     public let integrityOffset: Int?
     public let vendorAuthenticated: Bool?
-    public static let current = PatchAdapter(id: "chatgpt-macos-20052-v35", version: "26.1007.21159", build: "20052", main: ".vite/build/early-bootstrap.js", mainHash: "24286bb6b5fe449e6d4f1b8cfc061c35be57e54fe4ea0802b3e257f32c45fc33", headerHash: "c497f508930f223a999ec4c436a7526252914d380339db9e229cb023d200b41f", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.40/Codex Framework", frameworkHash: "156ac7655cf758be69a3a441aeb3ef488a4d8b77c30b2a3f3fed6c26f7e6bc8b", integrityOffset: 267257136)
-    public static let previous = PatchAdapter(id: "chatgpt-macos-13536-v35", version: "26.1002.52244", build: "13536", main: ".vite/build/early-bootstrap.js", mainHash: "47fe797c40b015b19546b10cd5bf993be67ba76fa5648c6d652c7bb9149fb226", headerHash: "b0d442ed63026a266e9f86df139bcafb9dcafe628b7065ea0473fe82760a82f0", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.27/Codex Framework", frameworkHash: "d987a157c88c5b8a7f1694261d40ced166cdd5544b28f5ff397d1783fc47ccbc", integrityOffset: 267156240)
+    /// Bump whenever the bootstrap, runtimes or renderer patches change, so
+    /// installed receipts from an older revision are restored and repatched.
+    public static let revision = 36
+    public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
+    /// Receipts this adapter may replace: any revision of the same build.
+    func accepts(receiptAdapter id: String) -> Bool {
+        guard isReviewed, let match = id.wholeMatch(of: /chatgpt-macos-([0-9]+)-v([0-9]+)/),
+              String(match.1) == build, let revision = Int(match.2) else { return id == self.id }
+        return (1...Self.revision).contains(revision)
+    }
+    public static let current = PatchAdapter(id: id(build: "20052"), version: "26.1007.21159", build: "20052", main: ".vite/build/early-bootstrap.js", mainHash: "24286bb6b5fe449e6d4f1b8cfc061c35be57e54fe4ea0802b3e257f32c45fc33", headerHash: "c497f508930f223a999ec4c436a7526252914d380339db9e229cb023d200b41f", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.40/Codex Framework", frameworkHash: "156ac7655cf758be69a3a441aeb3ef488a4d8b77c30b2a3f3fed6c26f7e6bc8b", integrityOffset: 267257136)
+    public static let previous = PatchAdapter(id: id(build: "13536"), version: "26.1002.52244", build: "13536", main: ".vite/build/early-bootstrap.js", mainHash: "47fe797c40b015b19546b10cd5bf993be67ba76fa5648c6d652c7bb9149fb226", headerHash: "b0d442ed63026a266e9f86df139bcafb9dcafe628b7065ea0473fe82760a82f0", frameworkPath: "Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.27/Codex Framework", frameworkHash: "d987a157c88c5b8a7f1694261d40ced166cdd5544b28f5ff397d1783fc47ccbc", integrityOffset: 267156240)
     public static let reviewed: [PatchAdapter] = [.current, .previous]
     public var isReviewed: Bool { vendorAuthenticated == true || Self.reviewed.contains { $0.id == id } }
     public static func forBundle(_ app: URL) throws -> PatchAdapter {
@@ -64,6 +74,14 @@ public struct PatchAdapter: Codable, Sendable {
             throw PatchError.invalid("The native capture bridge is missing.")
         }
         let captureRuntime = try String(contentsOf: captureURL, encoding: .utf8)
+        guard let hostURL = Bundle.module.url(forResource: "native-runtime", withExtension: "js"),
+              let rendererURL = Bundle.module.url(forResource: "renderer-runtime", withExtension: "js"),
+              let bridgeURL = Bundle.module.url(forResource: "renderer-bridge", withExtension: "js") else {
+            throw PatchError.invalid("The native extension runtime is missing.")
+        }
+        let hostRuntime = try String(contentsOf: hostURL, encoding: .utf8)
+        let rendererRuntime = try String(contentsOf: rendererURL, encoding: .utf8)
+        let rendererBridge = try String(contentsOf: bridgeURL, encoding: .utf8)
         guard let bookmarksURL = Bundle.module.url(forResource: "native-bookmarks", withExtension: "js") else { throw PatchError.invalid("The native bookmarks bridge is missing.") }
         let bookmarksRuntime = try String(contentsOf: bookmarksURL, encoding: .utf8)
         guard let appToolsParentURL = Bundle.module.url(forResource: "app-tools-parent", withExtension: "mjs") else { throw PatchError.invalid("The app-tools parent launcher is missing.") }
@@ -78,8 +96,6 @@ public struct PatchAdapter: Codable, Sendable {
             if (ppBrowserNative.keychainInteractionAllowed !== false) throw Error('Codex++ noninteractive Keychain policy is unavailable.');
             ppElectron.app.commandLine.removeSwitch('remote-debugging-port');
             ppElectron.app.commandLine.removeSwitch('remote-debugging-address');
-            ppElectron.app.commandLine.appendSwitch('remote-debugging-port', '\(port)');
-            ppElectron.app.commandLine.appendSwitch('remote-debugging-address', '127.0.0.1');
             ppElectron.app.whenReady().then(() => {
               const fs = require('fs'), path = require('path');
               const dir = path.join(\(try literal(support.path)), 'Diagnostics');
@@ -119,11 +135,13 @@ public struct PatchAdapter: Codable, Sendable {
               const ppCaptureRequestChannel = 'codex_desktop:message-from-view';
               const ppCaptureResponseChannel = 'codex_desktop:message-for-view';
               const ppNativeCapture = \(captureRuntime)(ppElectron);
+              const ppNativeRuntime = \(hostRuntime)(ppElectron, \(try literal(support.path)), \(try literal(rendererRuntime)), \(try literal(rendererBridge)));
 
               const ppHandle = ppElectron.ipcMain.handle.bind(ppElectron.ipcMain);
               ppElectron.ipcMain.handle = (channel, listener) => ppHandle(channel, channel === ppCaptureRequestChannel
                 ? (event, request) => {
                     if (ppNativeBookmarks.handles(request)) { ppNativeBookmarks.handle(event, request); return; }
+                    if (ppNativeRuntime.handles(request)) { ppNativeRuntime.handle(event, request); return; }
                     if (request?.type === 'codexpp-shell-shortcut') {
                       try { ppNativeShell.shortcut(event, request); } catch {}
                       return;
@@ -145,14 +163,14 @@ public struct PatchAdapter: Codable, Sendable {
                       return;
                     }
                     if (ppNativeCapture.handles(request)) {
-                      void ppNativeCapture.relay(event.sender, request);
+                      void ppNativeCapture.relay(event, request).catch(error => console.error('[Codex++] rejected Appshot request:', error));
                       return;
                     }
                     return listener(event, request);
                   }
                 : listener);
               void ppElectron.app.whenReady().then(() => ppNativeCapture.warmup()).catch(error => console.error('[Codex++] headless Appshot warmup:', error));
-              ppElectron.app.on('before-quit', () => ppNativeCapture.dispose());
+              ppElectron.app.on('before-quit', () => { ppNativeCapture.dispose(); ppNativeRuntime.dispose(); });
 
               const child = require('child_process').spawn('/usr/bin/open', ['-g', \(try literal(helper.path))], {detached:true, stdio:'ignore'});
               child.on('error', error => console.error('[Codex++] helper:', error)); child.unref();

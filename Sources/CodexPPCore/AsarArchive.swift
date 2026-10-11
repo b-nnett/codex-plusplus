@@ -19,6 +19,8 @@ public func fileSHA256(_ url: URL) throws -> String {
 /// Keeps every existing payload offset and unpacked flag intact; replacements
 /// are appended. No native modules are extracted or repacked.
 public struct AsarArchive {
+    /// Entries are read whole into memory; larger files are refused.
+    public static let maxEntrySize = 16 * 1024 * 1024
     public let url: URL
     public let headerHash: String
     public let payloadOffset: UInt64
@@ -64,8 +66,8 @@ public struct AsarArchive {
     }
     public func data(at path: String) throws -> Data {
         let node = try entry(path)
-        guard let offsetString = node["offset"] as? String, let offset = UInt64(offsetString),
-              let size = node["size"] as? Int, size >= 0, size <= 16 * 1024 * 1024,
+        guard let size = node["size"] as? Int, size <= Self.maxEntrySize else { throw PatchError.invalid("ASAR entry \(path) exceeds the \(Self.maxEntrySize >> 20) MB limit.") }
+        guard let offsetString = node["offset"] as? String, let offset = UInt64(offsetString), size >= 0,
               offset <= fileSize - payloadOffset, UInt64(size) <= fileSize - payloadOffset - offset else { throw PatchError.invalid("Invalid ASAR entry bounds.") }
         let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
         try file.seek(toOffset: payloadOffset + offset)
@@ -89,6 +91,7 @@ public struct AsarArchive {
     }
     public func replacing(_ replacements: [(String, Data)], output: URL) throws -> String {
         guard !replacements.isEmpty, Set(replacements.map { $0.0 }).count == replacements.count else { throw PatchError.invalid("ASAR replacements must contain unique paths.") }
+        if let (path, _) = replacements.first(where: { $0.1.count > Self.maxEntrySize }) { throw PatchError.invalid("Patched ASAR entry \(path) exceeds the \(Self.maxEntrySize >> 20) MB limit.") }
         guard output.standardizedFileURL != url.standardizedFileURL else { throw PatchError.invalid("Patch output must be staged separately.") }
         guard var next = header as? [String: Any] else { throw PatchError.invalid("Invalid ASAR directory.") }
         var appended: UInt64 = 0

@@ -7,7 +7,8 @@ import {EventEmitter} from 'node:events';
 
 const resource = name => fs.readFileSync(new URL(`../Sources/CodexPPCore/Resources/${name}.js`, import.meta.url), 'utf8');
 const extension = fs.readFileSync(new URL('../extensions/focus-mode/index.js', import.meta.url), 'utf8');
-const rendererRuntime = fs.readFileSync(new URL('../Sources/CodexPP/Resources/runtime.js', import.meta.url), 'utf8');
+const rendererRuntime = fs.readFileSync(new URL('../Sources/CodexPPCore/Resources/renderer-runtime.js', import.meta.url), 'utf8');
+const prepared = (ctx, code) => ({id:'focus-mode',fingerprint:code,start:vm.runInContext(`(async function(api){${code}})`,ctx)});
 const parser = vm.createContext({});
 for (const name of ['acorn', 'shell-adapter']) vm.runInContext(resource(name), parser);
 const fixture = (name = 'toggle', open = 'state') => `
@@ -33,7 +34,7 @@ test('Focus Mode still reports a missing shell in the supported main renderer', 
   const ctx = vm.createContext({location:{pathname:'/index.html'},
     setTimeout(fn) {timers++; queueMicrotask(fn);}});
   vm.runInContext(rendererRuntime, ctx);
-  const states = await ctx.__codexPP.sync([{id:'focus-mode',code:extension}]);
+  const states = await ctx.__codexPP.sync([prepared(ctx, extension)]);
   assert.equal(states[0].state, 'error');
   assert.match(states[0].error, /shell v1 is unavailable/);
   assert.equal(timers, 99);
@@ -54,14 +55,14 @@ test('Hot-update clears the old detached-window failure without a reload or anot
   const ctx = vm.createContext({location:{pathname:'/detached-window.html'},
     setTimeout(fn) {timers++; queueMicrotask(fn);}});
   vm.runInContext(rendererRuntime, ctx);
-  const old = await ctx.__codexPP.sync([{id:'focus-mode',code:'return api.waitForShell();'}]);
+  const old = await ctx.__codexPP.sync([prepared(ctx, 'return api.waitForShell();')]);
   assert.equal(old[0].state, 'error');
   timers = 0;
-  const fixed = await ctx.__codexPP.sync([{id:'focus-mode',code:extension}]);
+  const fixed = await ctx.__codexPP.sync([prepared(ctx, extension)]);
   assert.equal(fixed[0].state, 'active');
   assert.equal(fixed[0].error, null);
   assert.equal(timers, 0);
-  const repeated = await ctx.__codexPP.sync([{id:'focus-mode',code:extension}]);
+  const repeated = await ctx.__codexPP.sync([prepared(ctx, extension)]);
   assert.equal(repeated[0].error, null);
   assert.equal(timers, 0);
 });

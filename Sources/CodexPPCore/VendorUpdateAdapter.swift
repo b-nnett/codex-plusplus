@@ -42,7 +42,7 @@ enum VendorUpdateAdapter {
             throw PatchError.invalid("The update is not a supported arm64 Electron framework.")
         }
         let offset = try NativeIntegrityDigest.discoverOffset(in: bytes, expected: NativeIntegrityDigest.dictionaryHash(integrity))
-        return PatchAdapter(id: "chatgpt-macos-\(build)-v31", version: version, build: build,
+        return PatchAdapter(id: PatchAdapter.id(build: build), version: version, build: build,
             main: ".vite/build/early-bootstrap.js", mainHash: sha256(try archive.data(at: ".vite/build/early-bootstrap.js")),
             headerHash: archive.headerHash, frameworkPath: String(framework.path.dropFirst(app.path.count + 1)),
             frameworkHash: sha256(bytes), integrityOffset: offset, vendorAuthenticated: true)

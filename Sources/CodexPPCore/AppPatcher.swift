@@ -68,9 +68,7 @@ public struct AppPatcher: Sendable {
     private func receipt(_ app: URL) throws -> PatchReceipt? {
         guard fm.fileExists(atPath: receiptURL(app).path) else { return nil }
         let result = try JSONDecoder().decode(PatchReceipt.self, from: Data(contentsOf: receiptURL(app)))
-        let compatibleDynamic = adapter.vendorAuthenticated == true && result.adapter.range(of: "^chatgpt-macos-" + adapter.build + "-v[0-9]+$", options: .regularExpression) != nil
-        let known = compatibleDynamic || result.adapter == adapter.id || (adapter.isReviewed && ["chatgpt-macos-20052-v1", "chatgpt-macos-20052-v2", "chatgpt-macos-20052-v3", "chatgpt-macos-20052-v4", "chatgpt-macos-20052-v5", "chatgpt-macos-20052-v6", "chatgpt-macos-20052-v7", "chatgpt-macos-20052-v8", "chatgpt-macos-20052-v9", "chatgpt-macos-20052-v10", "chatgpt-macos-20052-v11", "chatgpt-macos-20052-v12", "chatgpt-macos-20052-v13", "chatgpt-macos-20052-v14", "chatgpt-macos-20052-v15", "chatgpt-macos-20052-v16", "chatgpt-macos-20052-v17", "chatgpt-macos-20052-v18", "chatgpt-macos-20052-v19", "chatgpt-macos-20052-v20", "chatgpt-macos-20052-v21", "chatgpt-macos-20052-v22", "chatgpt-macos-20052-v23", "chatgpt-macos-20052-v24", "chatgpt-macos-13536-v24", "chatgpt-macos-13536-v25", "chatgpt-macos-20052-v25", "chatgpt-macos-20052-v26", "chatgpt-macos-13536-v26", "chatgpt-macos-13536-v27", "chatgpt-macos-20052-v27", "chatgpt-macos-13536-v28", "chatgpt-macos-20052-v28", "chatgpt-macos-13536-v29", "chatgpt-macos-20052-v29", "chatgpt-macos-13536-v30", "chatgpt-macos-20052-v30", "chatgpt-macos-13536-v31", "chatgpt-macos-20052-v31", "chatgpt-macos-13536-v32", "chatgpt-macos-20052-v32", "chatgpt-macos-13536-v33", "chatgpt-macos-20052-v33", "chatgpt-macos-13536-v34", "chatgpt-macos-20052-v34"].contains(result.adapter))
-        guard result.schema == 1, known, result.main == adapter.main else { throw PatchError.invalid("Unknown patch receipt; refusing to overwrite it.") }
+        guard result.schema == 1, adapter.accepts(receiptAdapter: result.adapter), result.main == adapter.main else { throw PatchError.invalid("Unknown patch receipt; refusing to overwrite it.") }
         return result
     }
     private func verifyHeader(_ app: URL, _ info: [String: Any], _ asar: AsarArchive) throws {
@@ -93,7 +91,7 @@ public struct AppPatcher: Sendable {
             }
             return PatchReport(state: "patched", appPath: app.path, version: version, build: build, backupPath: receipt.backupPath)
         }
-        if adapter.vendorAuthenticated == true { try VendorUpdateAdapter.authenticate(app) }
+        if adapter.isReviewed { try VendorUpdateAdapter.authenticate(app) }
         _ = try adapter.validate(version: version, build: build, archive: asar)
         if let relative = adapter.frameworkPath { guard try fileSHA256(app.appendingPathComponent(relative)) == adapter.frameworkHash else { throw PatchError.invalid("The Electron framework does not match the reviewed build.") } }
         return PatchReport(state: "unpatched", appPath: app.path, version: version, build: build, backupPath: nil)
@@ -115,15 +113,47 @@ public struct AppPatcher: Sendable {
     private func exchange(_ first: URL, _ second: URL) throws {
         guard renameatx_np(AT_FDCWD, first.path, AT_FDCWD, second.path, UInt32(RENAME_SWAP)) == 0 else { throw PatchError.invalid("Atomic app exchange failed: \(String(cString: strerror(errno)))") }
     }
-    private func validatedJournal(_ app: URL) throws -> PatchJournal {
+    private func validatedJournal(_ app: URL? = nil) throws -> PatchJournal {
         let journal = try JSONDecoder().decode(PatchJournal.self, from: Data(contentsOf: journalURL))
-        let parent = app.deletingLastPathComponent()
-        guard journal.schema == 1, journal.target == app.path,
+        let target = app ?? URL(fileURLWithPath: journal.target)
+        let parent = target.deletingLastPathComponent()
+        guard journal.schema == 1, journal.target == target.path,
               URL(fileURLWithPath: journal.stage).deletingLastPathComponent() == parent,
               URL(fileURLWithPath: journal.backup).deletingLastPathComponent() == parent,
               URL(fileURLWithPath: journal.stage).lastPathComponent.hasPrefix(".ChatGPT.codexpp-stage-"),
               URL(fileURLWithPath: journal.backup).lastPathComponent.hasPrefix(".ChatGPT.codexpp-original-") else { throw PatchError.invalid("Invalid patch recovery journal.") }
         return journal
+    }
+    private func archiveHash(_ bundle: URL) -> String? {
+        fm.fileExists(atPath: archive(bundle).path) ? try? fileSHA256(archive(bundle)) : nil
+    }
+    private func allocatedSize(of root: URL) throws -> Int64 {
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileAllocatedSizeKey, .totalFileAllocatedSizeKey]
+        guard let items = fm.enumerator(at: root, includingPropertiesForKeys: Array(keys)) else {
+            throw PatchError.invalid("Cannot measure the ChatGPT bundle before staging.")
+        }
+        var total: Int64 = 0
+        for case let item as URL in items {
+            let values = try item.resourceValues(forKeys: keys)
+            guard values.isRegularFile == true else { continue }
+            total += Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? 0)
+        }
+        return total
+    }
+    static func requiredStagingCapacity(bundleAllocatedSize: Int64, archiveSize: Int64) -> Int64 {
+        max(0, bundleAllocatedSize) + max(0, archiveSize) + 1_073_741_824
+    }
+    private func ensureStagingCapacity(_ app: URL) throws {
+        let parent = app.deletingLastPathComponent()
+        let values = try parent.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        let fallback = values.volumeAvailableCapacity.map(Int64.init)
+        guard let available = values.volumeAvailableCapacityForImportantUsage ?? fallback else { return }
+        let archiveSize = Int64((try archive(app).resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
+        let required = Self.requiredStagingCapacity(bundleAllocatedSize: try allocatedSize(of: app), archiveSize: archiveSize)
+        guard available >= required else {
+            let formatter = ByteCountFormatter(); formatter.countStyle = .file
+            throw PatchError.invalid("Not enough free disk space to stage ChatGPT safely. Free at least \(formatter.string(fromByteCount: required - available)) more and retry.")
+        }
     }
     /// Builds and signs a separate copy. The target remains untouched.
     public func stage(_ app: URL) throws -> URL {
@@ -137,6 +167,7 @@ public struct AppPatcher: Sendable {
             let info = try plist(app), original = try AsarArchive(archive(app))
             let source = try adapter.validate(version: info["CFBundleShortVersionString"] as! String, build: info["CFBundleVersion"] as! String, archive: original)
             let bootstrap = try adapter.bootstrap(original: source, port: port, helper: helper, support: support)
+            try ensureStagingCapacity(app)
             let id = UUID().uuidString, parent = app.deletingLastPathComponent()
             let stage = parent.appendingPathComponent(".ChatGPT.codexpp-stage-\(id).app")
             let backup = parent.appendingPathComponent(".ChatGPT.codexpp-original-\(id).app")
@@ -244,18 +275,22 @@ public struct AppPatcher: Sendable {
             guard try status(app).state == "unpatched", try fileSHA256(archive(app)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The original app changed. Recover the staged transaction before retrying.") }
             journal.phase = "exchanging"; try writeJournal(journal)
             try exchange(app, stage)
+            let result: PatchReport
             do {
-                let result = try status(app)
+                result = try status(app)
                 try fm.moveItem(at: stage, to: backup)
-                journal.phase = "committed"; try writeJournal(journal)
-                try fm.removeItem(at: journalURL)
-                return result
             } catch {
                 let original = fm.fileExists(atPath: stage.path) ? stage : backup
-                try exchange(app, original)
+                do { try exchange(app, original) }
+                catch { throw PatchError.invalid("Installation failed and could not be rolled back (\(error.localizedDescription)). Run patch recovery before reopening ChatGPT.") }
                 try? fm.removeItem(at: original); try? fm.removeItem(at: journalURL)
                 throw error
             }
+            // The verified patch is installed. A journal that cannot advance
+            // still recovers consistently: "exchanging" rolls back, "committed" keeps it.
+            journal.phase = "committed"; try? writeJournal(journal)
+            try fm.removeItem(at: journalURL)
+            return result
         }
     }
     public func install(_ app: URL) throws -> PatchReport {
@@ -264,13 +299,18 @@ public struct AppPatcher: Sendable {
         return try commit(app)
     }
     public func prepare(_ app: URL) throws -> URL? {
-        if fm.fileExists(atPath: journalURL.path) {
+        let pending: (URL, Bool)? = try withLock {
+            guard fm.fileExists(atPath: journalURL.path) else { return nil }
             let journal = try validatedJournal(app)
             guard journal.phase == "prepared" || journal.phase == "verified",
                   try fileSHA256(archive(app)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("Interrupted installation requires recovery before continuing.") }
             let stage = URL(fileURLWithPath: journal.stage)
             _ = try status(stage)
-            if journal.phase == "prepared" { try probe(stage) }
+            return (stage, journal.phase == "prepared")
+        }
+        if let (stage, needsProbe) = pending {
+            // probe revalidates the journal under the lock before advancing it.
+            if needsProbe { try probe(stage) }
             return stage
         }
         if try status(app).state == "patched" { return nil }
@@ -283,17 +323,29 @@ public struct AppPatcher: Sendable {
             guard fm.fileExists(atPath: journalURL.path) else { return }
             let journal = try validatedJournal(app)
             let stage = URL(fileURLWithPath: journal.stage), backup = URL(fileURLWithPath: journal.backup)
+            let appHash = try fileSHA256(archive(app))
             if journal.phase == "committed" {
                 _ = try status(app)
                 guard try fileSHA256(archive(backup)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The recovery backup failed verification.") }
-            } else if try fileSHA256(archive(app)) == journal.receipt.patchedArchiveHash {
+            } else if appHash == journal.receipt.patchedArchiveHash {
                 let original = fm.fileExists(atPath: stage.path) ? stage : backup
                 guard try fileSHA256(archive(original)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The original recovery bundle failed verification.") }
                 try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", original.path])
                 try exchange(app, original); try fm.removeItem(at: original)
             } else {
-                guard try fileSHA256(archive(app)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("App changed during recovery; refusing to replace it.") }
+                // Before the exchange the target was never touched, so a vendor
+                // update since then must not leave the transaction unrecoverable.
+                let swapped: Bool
+                switch journal.phase {
+                case "prepared", "verified": swapped = false
+                case "exchanging": swapped = archiveHash(stage) != journal.receipt.patchedArchiveHash
+                case "restoring": swapped = archiveHash(backup) != journal.receipt.originalArchiveHash
+                default: swapped = true
+                }
+                guard !swapped || appHash == journal.receipt.originalArchiveHash else { throw PatchError.invalid("App changed during recovery; refusing to replace it.") }
                 if fm.fileExists(atPath: stage.path) { try fm.removeItem(at: stage) }
+                // An interrupted restore leaves the patched copy at the backup path.
+                if journal.phase == "restoring", archiveHash(backup) == journal.receipt.patchedArchiveHash { try fm.removeItem(at: backup) }
             }
             try fm.removeItem(at: journalURL)
         }
@@ -321,16 +373,20 @@ public struct AppPatcher: Sendable {
             let journal = PatchJournal(schema: 1, target: app.path, stage: backup.path.replacingOccurrences(of: ".codexpp-original-", with: ".codexpp-stage-"), backup: backup.path, receipt: receipt, phase: "restoring")
             try writeJournal(journal)
             try exchange(app, backup)
-            _ = try status(app)
-            // Keep the patched copy as well until the original has verified.
+            let result = try status(app)
+            // The exchange moved the patched copy to the backup path. Delete it
+            // only after the original has verified in place.
+            guard archiveHash(backup) == receipt.patchedArchiveHash else { throw PatchError.invalid("The displaced patched app failed verification; run patch recovery.") }
+            try fm.removeItem(at: backup)
             try fm.removeItem(at: journalURL)
-            return try status(app)
+            if recordedBackup != backup, archiveHash(recordedBackup) == receipt.originalArchiveHash { try? fm.removeItem(at: recordedBackup) }
+            return result
         }
     }
     public func probe(_ stage: URL) throws {
         try checkStartup(stage)
         try withLock {
-            var journal = try JSONDecoder().decode(PatchJournal.self, from: Data(contentsOf: journalURL))
+            var journal = try validatedJournal()
             guard journal.stage == stage.path, journal.phase == "prepared" || journal.phase == "verified" else { throw PatchError.invalid("Probe does not match the pending patch.") }
             journal.phase = "verified"; try writeJournal(journal)
         }

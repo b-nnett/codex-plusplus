@@ -4,7 +4,7 @@ import argparse,base64,hashlib,json,pathlib,struct,subprocess,shutil
 ROOT=pathlib.Path(__file__).resolve().parent.parent
 TRANSFORMS=(
  ['Sources/CodexPPCore/'+n+'.swift' for n in ['PatchAdapter','NativeSettingsAdapter','NativeBrowserAdapter','AppToolsAdapter','ShellAdapter','BookmarksAdapter']]
- +['Sources/CodexPPCore/Resources/'+n for n in ['acorn.js','settings-adapter.js','browser-adapter.js','bookmarks-adapter.js','shell-adapter.js','bookmarks-runtime.js','shell-runtime.js','parser-runner.js','app-tools-parent.mjs','native-browser.js','native-bookmarks.js','native-shell.js','native-capture.js']]
+ +['Sources/CodexPPCore/Resources/'+n for n in ['acorn.js','settings-adapter.js','browser-adapter.js','bookmarks-adapter.js','shell-adapter.js','bookmarks-runtime.js','shell-runtime.js','parser-runner.js','app-tools-parent.mjs','native-browser.js','native-bookmarks.js','native-shell.js','native-capture.js','native-runtime.js','renderer-runtime.js','renderer-bridge.js']]
  +['Sources/CodexPP/Resources/native-settings.js']
 )
 def fingerprint():

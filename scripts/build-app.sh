@@ -1,9 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+version="${CODEXPP_VERSION:-$(cat VERSION)}"
+build_number="${CODEXPP_BUILD_NUMBER:-1}"
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid CODEXPP_VERSION.' >&2; exit 1; }
+[[ "$build_number" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid CODEXPP_BUILD_NUMBER.' >&2; exit 1; }
 swift build -c release -debug-info-format none
 bin_dir="$(swift build -c release --show-bin-path)"
 app="$PWD/dist/Codex++.app"
+rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 icon_work="$(mktemp -d "${TMPDIR:-/tmp}/codexpp-icon.XXXXXX")"
 trap 'rm -rf "$icon_work"' EXIT
@@ -30,13 +35,17 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 <key>CFBundleExecutable</key><string>CodexPP</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>__CODEXPP_VERSION__</string>
+<key>CFBundleVersion</key><string>__CODEXPP_BUILD__</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+sed -i '' -e "s/__CODEXPP_VERSION__/$version/" -e "s/__CODEXPP_BUILD__/$build_number/" "$app/Contents/Info.plist"
+cp LICENSE "$app/Contents/Resources/LICENSE"
+cp THIRD-PARTY-NOTICES.md "$app/Contents/Resources/THIRD-PARTY-NOTICES.md"
+cp vendor/sparkle/LICENSE "$app/Contents/Resources/SPARKLE-LICENSE"
 signing_identity="${CODEXPP_SIGNING_IDENTITY:-}"
 if [ -z "$signing_identity" ]; then
   signing_identity="$(security find-identity -v -p codesigning | awk '/"Developer ID Application:/ {print $2}')"
@@ -60,9 +69,17 @@ fi
 clang++ -shared -fPIC -fobjc-arc -std=c++17 -mmacosx-version-min=14.0 \
   -I "$node_include" -framework AppKit -framework Security -undefined dynamic_lookup \
   Sources/CodexPPNativeBrowser/browser-native.mm -o "$app/Contents/Resources/browser-native.node"
-codesign --force --sign "$signing_identity" "$app/Contents/Resources/browser-native.node"
+codesign --force --timestamp --sign "$signing_identity" "$app/Contents/Resources/browser-native.node"
 clang -dynamiclib -arch arm64 -mmacosx-version-min=14.0 -framework Security \
   Sources/CodexPPNativeBrowser/startup-policy.c -o "$app/Contents/Resources/CodexPPStartup.dylib"
-codesign --force --options runtime --sign "$signing_identity" "$app/Contents/Resources/CodexPPStartup.dylib"
-codesign --force --options runtime --entitlements Assets/Helper.entitlements --sign "$signing_identity" "$app"
+codesign --force --timestamp --options runtime --sign "$signing_identity" "$app/Contents/Resources/CodexPPStartup.dylib"
+codesign --force --timestamp --options runtime --entitlements Assets/Helper.entitlements --sign "$signing_identity" "$app"
+codesign --verify --deep --strict "$app"
+if [ -n "${CODEXPP_NOTARY_PROFILE:-}" ]; then
+  archive="$PWD/dist/Codex++-$version.zip"
+  ditto -c -k --keepParent "$app" "$archive"
+  xcrun notarytool submit "$archive" --keychain-profile "$CODEXPP_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$app"
+  xcrun stapler validate "$app"
+fi
 printf 'Built %s\n' "$app"

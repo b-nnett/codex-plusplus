@@ -12,7 +12,7 @@ The patch signer now requires an explicitly pinned Apple-issued Developer ID App
 
 The vendor launcher still performs its original allocator setup and calls `ChromeMain`. Its unique framework-path string is redirected to a small signed startup library. Before loading Electron, that library calls `SecKeychainSetUserInteractionAllowed(false)`. Failure to establish the policy stops startup. It then loads the original framework with the vendor's global symbol scope, preserves arguments, and returns its result. An inaccessible Keychain item must return an access error without a dialog; normal profiles never use mock encryption. Native-addon initialization and the disabled interaction policy are checked in startup probes and recorded in boot diagnostics.
 
-This is a local development patch, not a notarized redistribution. A different machine needs its own Developer ID and existing Keychain authorization. The code refuses a missing or self-signed legacy certificate pin; it cannot promise silent access to a Keychain item that has never authorized that signer.
+This is a source-distributed local development patch. Published releases contain source and checksums rather than a prebuilt helper. Each machine needs its own Developer ID and existing Keychain authorization; a local builder may notarize that helper with `CODEXPP_NOTARY_PROFILE`. The code refuses a missing or self-signed legacy certificate pin; it cannot promise silent access to a Keychain item that has never authorized that signer.
 
 ## Updater authentication
 

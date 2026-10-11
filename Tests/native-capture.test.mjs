@@ -56,6 +56,7 @@ function harness(onMessage) {
     setTimeout,
     clearTimeout,
     queueMicrotask,
+    URL,
     require(name) {
       if (name === 'child_process') return childProcess;
       if (name === 'fs') return {statSync: () => ({isFile: () => true})};
@@ -74,10 +75,11 @@ function validRequest(app = targetApp) {
   };
 }
 
-function sender() {
+function sender(url = 'app://-/index.html') {
   const sent = [];
-  return {sent, isDestroyed: () => false, send: (channel, message) => sent.push({channel, message})};
+  return {sent, mainFrame:{url}, isDestroyed: () => false, send: (channel, message) => sent.push({channel, message})};
 }
+const event = view => ({sender:view, senderFrame:view.mainFrame});
 
 function standardRuntime({payload = {text: 'AX tree', screenshotDataURL: 'data:image/png;base64,iVBORw0KGgo='}, scopes} = {}) {
   let toolCall;
@@ -113,7 +115,7 @@ test('headless capture preserves the signed-launch, MCP, approval, and renderer 
   assert.equal(h.bridge.handles(validRequest()), true);
   assert.equal(h.bridge.handles({...validRequest(), url: 'vscode://codex/computer-use-frontmost-window'}), false);
 
-  const relay = h.bridge.relay(view, validRequest());
+  const relay = h.bridge.relay(event(view), validRequest());
   assert.deepEqual(view.sent.map(item => item.message.type), ['fetch-response', 'computer-use-capture-updated']);
   assert.equal(view.sent[1].message.update.type, 'metadata');
   await relay;
@@ -166,7 +168,8 @@ test('elicitation scope changes fail closed until connector, tool, and app all m
   ]});
   const h = harness(runtime.onMessage);
   t.after(() => h.bridge.dispose());
-  await h.bridge.relay(sender(), validRequest());
+  const view = sender();
+  await h.bridge.relay(event(view), validRequest());
   assert.deepEqual(runtime.approvals, ['decline', 'decline', 'decline', 'accept']);
 });
 
@@ -183,7 +186,7 @@ test('response-shape changes fail the acknowledged capture without emitting part
     });
     t.after(() => h.bridge.dispose());
     const view = sender();
-    await h.bridge.relay(view, validRequest());
+    await h.bridge.relay(event(view), validRequest());
     assert.equal(view.sent.length, 3);
     assert.equal(view.sent[0].message.type, 'fetch-response');
     assert.equal(view.sent[0].message.responseType, 'success');
@@ -202,16 +205,25 @@ test('unexpected server identity and malformed requests fail before capture even
 
   const neverStarted = harness(() => assert.fail('invalid input must not start the runtime'));
   const view = sender();
-  await neverStarted.bridge.relay(view, {...validRequest(), body: JSON.stringify({requestId: '', bundleIdentifier: '../bad app'})});
+  await neverStarted.bridge.relay(event(view), {...validRequest(), body: JSON.stringify({requestId: '', bundleIdentifier: '../bad app'})});
   assert.equal(neverStarted.spawnCalls.length, 0);
   assert.equal(view.sent[0].message.responseType, 'error');
   assert.match(view.sent[0].message.error, /invalid/);
 });
 
+test('capture requests require the trusted app main frame', async () => {
+  const h = harness(() => assert.fail('untrusted senders must not start the runtime'));
+  const website = sender('https://example.com/');
+  await assert.rejects(h.bridge.relay(event(website), validRequest()), /Invalid Appshot sender/);
+  const app = sender();
+  await assert.rejects(h.bridge.relay({sender:app, senderFrame:{url:'app://-/index.html'}}, validRequest()), /Invalid Appshot sender/);
+  assert.equal(h.spawnCalls.length, 0);
+});
+
 test('live signed runtime still satisfies the Appshot contract', {skip: !process.env.CODEXPP_LIVE_APPSHOT_APP, timeout: 60000}, async t => {
   const resourcesPath = process.env.CODEXPP_CUA_RESOURCES ?? '/Applications/ChatGPT.app/Contents/Resources';
   const liveProcess = {resourcesPath, env: process.env};
-  const factory = vm.runInNewContext(source, {console, process: liveProcess, setTimeout, clearTimeout, require: hostRequire}, {filename: 'native-capture.js'});
+  const factory = vm.runInNewContext(source, {console, process: liveProcess, setTimeout, clearTimeout, URL, require: hostRequire}, {filename: 'native-capture.js'});
   const bridge = factory({});
   t.after(() => bridge.dispose());
   for (let attempt = 1; attempt <= 2; attempt++) {
@@ -219,7 +231,7 @@ test('live signed runtime still satisfies the Appshot contract', {skip: !process
     const request = validRequest(process.env.CODEXPP_LIVE_APPSHOT_APP);
     request.requestId = `fetch-${attempt}`;
     request.body = JSON.stringify({requestId: `capture-${attempt}`, bundleIdentifier: process.env.CODEXPP_LIVE_APPSHOT_APP});
-    const relay = bridge.relay(view, request);
+    const relay = bridge.relay(event(view), request);
     assert.equal(view.sent[0]?.message?.responseType, 'success', `attempt ${attempt}: capture was not acknowledged synchronously`);
     await relay;
     const response = view.sent[0]?.message;
