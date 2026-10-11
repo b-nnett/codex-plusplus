@@ -141,6 +141,91 @@ final class AppPatcherTests: XCTestCase {
         XCTAssertTrue(dynamic.accepts(receiptAdapter: "chatgpt-macos-777-v31"))
         let fixture = PatchAdapter(id: "fixture", version: "1", build: "1", main: "m", mainHash: "", headerHash: "")
         XCTAssertTrue(fixture.accepts(receiptAdapter: "fixture"))
-        XCTAssertFalse(fixture.accepts(receiptAdapter: "chatgpt-macos-1-v1"))
+        XCTAssertFalse(fixture.accepts(receiptAdapter: "chatgpt-macos-2-v1"))
+    }
+    private func revision(_ patcher: AppPatcher, _ n: Int) -> AppPatcher {
+        let a = patcher.adapter
+        return AppPatcher(support: patcher.support, helper: patcher.helper, adapter: PatchAdapter(id: "chatgpt-macos-\(a.build)-v\(n)", version: a.version, build: a.build, main: a.main, mainHash: a.mainHash, headerHash: a.headerHash))
+    }
+    private func installedAdapter(_ app: URL) throws -> String {
+        try JSONDecoder().decode(PatchReceipt.self, from: Data(contentsOf: app.appendingPathComponent("Contents/Resources/codexpp-patch.json"))).adapter
+    }
+    private func installRevision(_ patcher: AppPatcher, _ app: URL, _ root: URL) throws -> PatchReport {
+        _ = try patcher.stage(app); try setPhase("verified", root)
+        return try patcher.commit(app)
+    }
+    func testUpgradeStagesWhileOldPatchStaysInstalled() throws {
+        let (root, app, base) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let original = try Data(contentsOf: app.appendingPathComponent("Contents/Info.plist"))
+        let v1 = revision(base, 1), v2 = revision(base, 2)
+        let backup = try XCTUnwrap(try installRevision(v1, app, root).backupPath)
+        let stage = try v2.stage(app)
+        XCTAssertEqual(try installedAdapter(app), v1.adapter.id)
+        XCTAssertEqual(try installedAdapter(stage), v2.adapter.id)
+        try setPhase("verified", root)
+        let report = try v2.commit(app)
+        XCTAssertEqual(report.state, "patched")
+        XCTAssertEqual(report.backupPath, backup)
+        XCTAssertEqual(try installedAdapter(app), v2.adapter.id)
+        XCTAssertEqual(try hiddenBundles(root), [URL(fileURLWithPath: backup).lastPathComponent])
+        XCTAssertEqual(try v2.restore(app).state, "unpatched")
+        XCTAssertEqual(try Data(contentsOf: app.appendingPathComponent("Contents/Info.plist")), original)
+        XCTAssertEqual(try hiddenBundles(root), [])
+    }
+    func testFailedUpgradeKeepsOldPatch() throws {
+        let (root, app, base) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let v1 = revision(base, 1), v2 = revision(base, 2)
+        let backup = try XCTUnwrap(try installRevision(v1, app, root).backupPath)
+        let stage = try v2.stage(app); try setPhase("verified", root)
+        let path = stage.appendingPathComponent("Contents/Resources/app.asar")
+        var bytes = try Data(contentsOf: path); bytes[bytes.count - 1] ^= 1; try bytes.write(to: path)
+        XCTAssertThrowsError(try v2.commit(app))
+        XCTAssertEqual(try installedAdapter(app), v1.adapter.id)
+        try v2.recover(app)
+        XCTAssertEqual(try v2.status(app).state, "patched")
+        XCTAssertEqual(try hiddenBundles(root), [URL(fileURLWithPath: backup).lastPathComponent])
+    }
+    func testInterruptedUpgradeExchangeRollsBackToOldPatch() throws {
+        let (root, app, base) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let v1 = revision(base, 1), v2 = revision(base, 2)
+        let backup = try XCTUnwrap(try installRevision(v1, app, root).backupPath)
+        let stage = try v2.stage(app); try setPhase("exchanging", root)
+        XCTAssertEqual(renameatx_np(AT_FDCWD, app.path, AT_FDCWD, stage.path, UInt32(RENAME_SWAP)), 0)
+        XCTAssertEqual(try installedAdapter(app), v2.adapter.id)
+        try v2.recover(app)
+        XCTAssertEqual(try installedAdapter(app), v1.adapter.id)
+        XCTAssertEqual(try v2.status(app).state, "patched")
+        XCTAssertEqual(try hiddenBundles(root), [URL(fileURLWithPath: backup).lastPathComponent])
+    }
+    func testUnswappedUpgradeExchangeDiscardsStage() throws {
+        let (root, app, base) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let v1 = revision(base, 1), v2 = revision(base, 2)
+        _ = try installRevision(v1, app, root)
+        let stage = try v2.stage(app); try setPhase("exchanging", root)
+        try v2.recover(app)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stage.path))
+        XCTAssertEqual(try installedAdapter(app), v1.adapter.id)
+    }
+    func testStagingPrunesOnlyUnownedChatGPTLeftovers() throws {
+        let (root, app, patcher) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        for name in [".ChatGPT.codexpp-original-OLD.app", ".ChatGPT.codexpp-stage-DEAD.app"] {
+            try fm.copyItem(at: app, to: root.appendingPathComponent(name))
+        }
+        let foreign = root.appendingPathComponent(".ChatGPT.codexpp-original-FOREIGN.app")
+        try fm.copyItem(at: root.appendingPathComponent("Helper.app"), to: foreign)
+        let other = root.appendingPathComponent(".ChatGPT.codexpp-other.app")
+        try fm.copyItem(at: app, to: other)
+        let backup = try XCTUnwrap(try installRevision(patcher, app, root).backupPath)
+        // A patched sibling outside the transaction names keeps its backup.
+        let kept = root.appendingPathComponent(".ChatGPT.codexpp-original-KEPT.app")
+        try fm.copyItem(at: URL(fileURLWithPath: backup), to: kept)
+        try fm.removeItem(at: other); try fm.copyItem(at: app, to: other)
+        let receiptURL = other.appendingPathComponent("Contents/Resources/codexpp-patch.json")
+        var receipt = try JSONSerialization.jsonObject(with: Data(contentsOf: receiptURL)) as! [String: Any]
+        receipt["backupPath"] = kept.path
+        try JSONSerialization.data(withJSONObject: receipt).write(to: receiptURL)
+        XCTAssertEqual(try patcher.restore(app).state, "unpatched")
+        XCTAssertEqual(Set(try hiddenBundles(root)), [foreign.lastPathComponent, other.lastPathComponent, kept.lastPathComponent])
     }
 }

@@ -145,4 +145,9 @@ final class AsarPatchTests: XCTestCase {
             XCTAssertTrue($0.localizedDescription.contains("exceeds"), $0.localizedDescription)
         }
     }
+    func testSizeReadsHeaderWithoutPayload() throws {
+        let (path, source, _) = try Self.fixture(); defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        XCTAssertEqual(try AsarArchive(path).size(at: "main.js"), source.count)
+        XCTAssertThrowsError(try AsarArchive(path).size(at: "missing.js"))
+    }
 }

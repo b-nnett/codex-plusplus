@@ -25,6 +25,8 @@ private struct PatchJournal: Codable {
     let backup: String
     let receipt: PatchReceipt
     var phase: String
+    /// Set when upgrading an installed patch in place: its patched archive hash.
+    var replaces: String? = nil
 }
 
 public struct PatchReport: Codable, Sendable {
@@ -124,6 +126,30 @@ public struct AppPatcher: Sendable {
               URL(fileURLWithPath: journal.backup).lastPathComponent.hasPrefix(".ChatGPT.codexpp-original-") else { throw PatchError.invalid("Invalid patch recovery journal.") }
         return journal
     }
+    /// Removes stage and original bundles that no transaction or receipt owns.
+    /// Callers hold the transaction lock. Only ChatGPT bundles with Codex++
+    /// names are considered; receipts in other sibling bundles keep their backups.
+    private func pruneLeftovers(_ app: URL) {
+        guard !fm.fileExists(atPath: journalURL.path) else { return }
+        let parent = app.deletingLastPathComponent()
+        guard let names = try? fm.contentsOfDirectory(atPath: parent.path) else { return }
+        func owned(_ name: String) -> Bool { name.hasSuffix(".app") && (name.hasPrefix(".ChatGPT.codexpp-stage-") || name.hasPrefix(".ChatGPT.codexpp-original-")) }
+        var referenced: Set<String> = []
+        for name in names where name.hasSuffix(".app") && !owned(name) {
+            if let data = try? Data(contentsOf: receiptURL(parent.appendingPathComponent(name))),
+               let receipt = try? JSONDecoder().decode(PatchReceipt.self, from: data) {
+                referenced.insert(URL(fileURLWithPath: receipt.backupPath).standardizedFileURL.path)
+            }
+        }
+        for name in names where owned(name) {
+            let bundle = parent.appendingPathComponent(name)
+            guard !referenced.contains(bundle.standardizedFileURL.path),
+                  let data = try? Data(contentsOf: bundle.appendingPathComponent("Contents/Info.plist")),
+                  let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+                  info["CFBundleIdentifier"] as? String == DesktopAppLocator.bundleIdentifier else { continue }
+            try? fm.removeItem(at: bundle)
+        }
+    }
     private func archiveHash(_ bundle: URL) -> String? {
         fm.fileExists(atPath: archive(bundle).path) ? try? fileSHA256(archive(bundle)) : nil
     }
@@ -143,13 +169,13 @@ public struct AppPatcher: Sendable {
     static func requiredStagingCapacity(bundleAllocatedSize: Int64, archiveSize: Int64) -> Int64 {
         max(0, bundleAllocatedSize) + max(0, archiveSize) + 1_073_741_824
     }
-    private func ensureStagingCapacity(_ app: URL) throws {
+    private func ensureStagingCapacity(_ app: URL, copies: Int64 = 1) throws {
         let parent = app.deletingLastPathComponent()
         let values = try parent.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
         let fallback = values.volumeAvailableCapacity.map(Int64.init)
         guard let available = values.volumeAvailableCapacityForImportantUsage ?? fallback else { return }
         let archiveSize = Int64((try archive(app).resourceValues(forKeys: [.fileSizeKey])).fileSize ?? 0)
-        let required = Self.requiredStagingCapacity(bundleAllocatedSize: try allocatedSize(of: app), archiveSize: archiveSize)
+        let required = Self.requiredStagingCapacity(bundleAllocatedSize: copies * (try allocatedSize(of: app)), archiveSize: archiveSize)
         guard available >= required else {
             let formatter = ByteCountFormatter(); formatter.countStyle = .file
             throw PatchError.invalid("Not enough free disk space to stage ChatGPT safely. Free at least \(formatter.string(fromByteCount: required - available)) more and retry.")
@@ -160,20 +186,41 @@ public struct AppPatcher: Sendable {
         try withLock {
             guard !fm.fileExists(atPath: journalURL.path) else { throw PatchError.invalid("A pending patch transaction exists. Commit or recover it first.") }
             onProgress("Verifying update…")
-            guard try status(app).state == "unpatched" else { throw PatchError.invalid("ChatGPT is already patched.") }
+            pruneLeftovers(app)
+            let id = UUID().uuidString, parent = app.deletingLastPathComponent()
+            let stage = parent.appendingPathComponent(".ChatGPT.codexpp-stage-\(id).app")
+            // An older patch stays installed while its replacement is staged
+            // from the verified vendor original it recorded.
+            let origin: URL, backup: URL, replaces: String?
+            if try status(app).state == "patched", let installed = try receipt(app) {
+                guard installed.adapter != adapter.id else { throw PatchError.invalid("ChatGPT is already patched.") }
+                let recorded = URL(fileURLWithPath: installed.backupPath)
+                guard recorded.lastPathComponent.hasPrefix(".ChatGPT.codexpp-original-"),
+                      recorded.standardizedFileURL == recorded.resolvingSymlinksInPath(),
+                      archiveHash(recorded) == installed.originalArchiveHash, try status(recorded).state == "unpatched" else { throw PatchError.invalid("The original app backup failed verification.") }
+                // Journal exchanges stay within the installation directory.
+                backup = recorded.deletingLastPathComponent() == parent ? recorded : parent.appendingPathComponent(".ChatGPT.codexpp-original-\(id).app")
+                origin = recorded; replaces = installed.patchedArchiveHash
+            } else {
+                origin = app; replaces = nil
+                backup = parent.appendingPathComponent(".ChatGPT.codexpp-original-\(id).app")
+            }
+            let copiesBackup = replaces != nil && backup != origin
             guard Bundle(url: helper)?.bundleIdentifier == "dev.codexpp.helper" else { throw PatchError.invalid("Build Codex++.app before patching.") }
             try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", helper.path])
             let identity = try signingIdentity()
-            let info = try plist(app), original = try AsarArchive(archive(app))
+            let info = try plist(origin), original = try AsarArchive(archive(origin))
             let source = try adapter.validate(version: info["CFBundleShortVersionString"] as! String, build: info["CFBundleVersion"] as! String, archive: original)
             let bootstrap = try adapter.bootstrap(original: source, port: port, helper: helper, support: support)
-            try ensureStagingCapacity(app)
-            let id = UUID().uuidString, parent = app.deletingLastPathComponent()
-            let stage = parent.appendingPathComponent(".ChatGPT.codexpp-stage-\(id).app")
-            let backup = parent.appendingPathComponent(".ChatGPT.codexpp-original-\(id).app")
+            // A cross-volume upgrade also copies the original next to the app.
+            try ensureStagingCapacity(origin, copies: copiesBackup ? 2 : 1)
             do {
                 onProgress("Preparing update…")
-                try command("/usr/bin/ditto", [app.path, stage.path], timeout: 120)
+                if copiesBackup {
+                    try command("/usr/bin/ditto", [origin.path, backup.path], timeout: 120)
+                    guard archiveHash(backup) == archiveHash(origin) else { throw PatchError.invalid("The original app backup failed verification.") }
+                }
+                try command("/usr/bin/ditto", [origin.path, stage.path], timeout: 120)
                 if adapter.isReviewed {
                     let updater = helper.appendingPathComponent("Contents/Resources/Sparkle.framework")
                     guard fm.fileExists(atPath: updater.path) else { throw PatchError.invalid("Build Codex++ with its authenticated updater framework before patching.") }
@@ -231,22 +278,27 @@ public struct AppPatcher: Sendable {
                     let framework = stage.appendingPathComponent("Contents/Frameworks/Codex Framework.framework")
                     let helpers = framework.appendingPathComponent("Versions/Current/Helpers")
                     for bundle in try fm.contentsOfDirectory(at: helpers, includingPropertiesForKeys: nil).filter({ $0.pathExtension == "app" }) {
-                        let originalBundle = app.appendingPathComponent("Contents/Frameworks/Codex Framework.framework/Versions/Current/Helpers/\(bundle.lastPathComponent)")
+                        let originalBundle = origin.appendingPathComponent("Contents/Frameworks/Codex Framework.framework/Versions/Current/Helpers/\(bundle.lastPathComponent)")
                         try signLocal(bundle, original: originalBundle, identity: identity)
                     }
                     try command("/usr/bin/codesign", ["--force", "--sign", identity, "--timestamp=none", "--preserve-metadata=flags", framework.path], timeout: 120)
                     frameworkHash = try fileSHA256(binary)
                 }
-                let receipt = PatchReceipt(schema: 1, adapter: adapter.id, version: adapter.version, build: adapter.build, originalArchiveHash: try fileSHA256(archive(app)), patchedArchiveHash: try fileSHA256(stagedArchive), patchedHeaderHash: headerHash, bootstrapHash: sha256(bootstrap), patchedFrameworkHash: frameworkHash, main: adapter.main, port: port, helperPath: helper.path, backupPath: backup.path, installedAt: Date())
+                let receipt = PatchReceipt(schema: 1, adapter: adapter.id, version: adapter.version, build: adapter.build, originalArchiveHash: try fileSHA256(archive(origin)), patchedArchiveHash: try fileSHA256(stagedArchive), patchedHeaderHash: headerHash, bootstrapHash: sha256(bootstrap), patchedFrameworkHash: frameworkHash, main: adapter.main, port: port, helperPath: helper.path, backupPath: backup.path, installedAt: Date())
                 try JSONEncoder().encode(receipt).write(to: receiptURL(stage), options: .atomic)
-                try signLocal(stage, original: app, identity: identity)
+                try signLocal(stage, original: origin, identity: identity)
                 onProgress("Verifying patched update…")
                 _ = try status(stage)
                 // Detect vendor updater changes while staging, before committing.
-                guard try fileSHA256(archive(app)) == receipt.originalArchiveHash, try plist(app)["CFBundleVersion"] as? String == receipt.build else { throw PatchError.invalid("ChatGPT changed during staging. Retry against the updated app.") }
-                try writeJournal(PatchJournal(schema: 1, target: app.path, stage: stage.path, backup: backup.path, receipt: receipt, phase: "prepared"))
+                guard try fileSHA256(archive(app)) == replaces ?? receipt.originalArchiveHash, archiveHash(backup) == receipt.originalArchiveHash || replaces == nil,
+                      try plist(app)["CFBundleVersion"] as? String == receipt.build else { throw PatchError.invalid("ChatGPT changed during staging. Retry against the updated app.") }
+                try writeJournal(PatchJournal(schema: 1, target: app.path, stage: stage.path, backup: backup.path, receipt: receipt, phase: "prepared", replaces: replaces))
                 return stage
-            } catch { try? fm.removeItem(at: stage); throw error }
+            } catch {
+                try? fm.removeItem(at: stage)
+                if copiesBackup { try? fm.removeItem(at: backup) }
+                throw error
+            }
         }
     }
     private func signLocal(_ bundle: URL, original: URL, identity: String) throws {
@@ -272,13 +324,17 @@ public struct AppPatcher: Sendable {
             guard journal.phase == "verified" else { throw PatchError.invalid("The staged app must pass its startup probe before installation.") }
             let stage = URL(fileURLWithPath: journal.stage), backup = URL(fileURLWithPath: journal.backup)
             _ = try status(stage)
-            guard try status(app).state == "unpatched", try fileSHA256(archive(app)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The original app changed. Recover the staged transaction before retrying.") }
+            let installed = journal.replaces.map { ("patched", $0) } ?? ("unpatched", journal.receipt.originalArchiveHash)
+            guard try status(app).state == installed.0, try fileSHA256(archive(app)) == installed.1,
+                  journal.replaces == nil || archiveHash(backup) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The original app changed. Recover the staged transaction before retrying.") }
             journal.phase = "exchanging"; try writeJournal(journal)
             try exchange(app, stage)
             let result: PatchReport
             do {
                 result = try status(app)
-                try fm.moveItem(at: stage, to: backup)
+                // An upgrade leaves the vendor original where it is; the stage
+                // path now holds the replaced patch, removed once committed.
+                if journal.replaces == nil { try fm.moveItem(at: stage, to: backup) }
             } catch {
                 let original = fm.fileExists(atPath: stage.path) ? stage : backup
                 do { try exchange(app, original) }
@@ -290,11 +346,11 @@ public struct AppPatcher: Sendable {
             // still recovers consistently: "exchanging" rolls back, "committed" keeps it.
             journal.phase = "committed"; try? writeJournal(journal)
             try fm.removeItem(at: journalURL)
+            pruneLeftovers(app)
             return result
         }
     }
     public func install(_ app: URL) throws -> PatchReport {
-        if let installed = try receipt(app), installed.adapter != adapter.id { _ = try restore(app) }
         if try prepare(app) == nil { return try status(app) }
         return try commit(app)
     }
@@ -303,7 +359,7 @@ public struct AppPatcher: Sendable {
             guard fm.fileExists(atPath: journalURL.path) else { return nil }
             let journal = try validatedJournal(app)
             guard journal.phase == "prepared" || journal.phase == "verified",
-                  try fileSHA256(archive(app)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("Interrupted installation requires recovery before continuing.") }
+                  try fileSHA256(archive(app)) == journal.replaces ?? journal.receipt.originalArchiveHash else { throw PatchError.invalid("Interrupted installation requires recovery before continuing.") }
             let stage = URL(fileURLWithPath: journal.stage)
             _ = try status(stage)
             return (stage, journal.phase == "prepared")
@@ -313,7 +369,7 @@ public struct AppPatcher: Sendable {
             if needsProbe { try probe(stage) }
             return stage
         }
-        if try status(app).state == "patched" { return nil }
+        if try status(app).state == "patched", try receipt(app)?.adapter == adapter.id { return nil }
         let stage = try stage(app)
         try probe(stage)
         return stage
@@ -327,9 +383,11 @@ public struct AppPatcher: Sendable {
             if journal.phase == "committed" {
                 _ = try status(app)
                 guard try fileSHA256(archive(backup)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The recovery backup failed verification.") }
+                if fm.fileExists(atPath: stage.path) { try fm.removeItem(at: stage) }
             } else if appHash == journal.receipt.patchedArchiveHash {
+                // Undo the exchange: an upgrade's stage holds the replaced patch.
                 let original = fm.fileExists(atPath: stage.path) ? stage : backup
-                guard try fileSHA256(archive(original)) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The original recovery bundle failed verification.") }
+                guard try fileSHA256(archive(original)) == journal.replaces ?? journal.receipt.originalArchiveHash else { throw PatchError.invalid("The original recovery bundle failed verification.") }
                 try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", original.path])
                 try exchange(app, original); try fm.removeItem(at: original)
             } else {
@@ -338,6 +396,7 @@ public struct AppPatcher: Sendable {
                 let swapped: Bool
                 switch journal.phase {
                 case "prepared", "verified": swapped = false
+                case "exchanging" where journal.replaces != nil: swapped = archiveHash(stage) == journal.replaces
                 case "exchanging": swapped = archiveHash(stage) != journal.receipt.patchedArchiveHash
                 case "restoring": swapped = archiveHash(backup) != journal.receipt.originalArchiveHash
                 default: swapped = true
@@ -348,6 +407,7 @@ public struct AppPatcher: Sendable {
                 if journal.phase == "restoring", archiveHash(backup) == journal.receipt.patchedArchiveHash { try fm.removeItem(at: backup) }
             }
             try fm.removeItem(at: journalURL)
+            pruneLeftovers(app)
         }
     }
     public func restore(_ app: URL) throws -> PatchReport {
@@ -380,6 +440,7 @@ public struct AppPatcher: Sendable {
             try fm.removeItem(at: backup)
             try fm.removeItem(at: journalURL)
             if recordedBackup != backup, archiveHash(recordedBackup) == receipt.originalArchiveHash { try? fm.removeItem(at: recordedBackup) }
+            pruneLeftovers(app)
             return result
         }
     }

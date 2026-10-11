@@ -11,8 +11,10 @@ public enum BookmarksAdapter {
         for path in try archive.packedFiles(in: "webview/assets").filter({ path in
             path.hasSuffix(".js") && families.contains { URL(fileURLWithPath: path).lastPathComponent.hasPrefix($0) }
         }) {
-            let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
-            guard data.count <= 16 * 1024 * 1024, let source = String(data: data, encoding: .utf8) else { continue }
+            let replaced = replacements.first(where: { $0.0 == path })?.1
+            guard try replaced?.count ?? archive.size(at: path) <= AsarArchive.maxEntrySize else { continue }
+            let data = try replaced ?? archive.data(at: path)
+            guard let source = String(data: data, encoding: .utf8) else { continue }
             if (source.contains("threadWorkspace.newTab.suggested.heading") && source.contains("onNavigate")) ||
                 (source.contains("onOpenBrowserSettings") && source.contains("onOpenHistory")) ||
                 (source.contains("renderSlots") && source.contains("isFloatingComposerVisible")) { modules[path] = source }

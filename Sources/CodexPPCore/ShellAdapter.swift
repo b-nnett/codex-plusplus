@@ -6,8 +6,10 @@ public enum ShellAdapter {
         try PatchAdapter.approveArchive(archive)
         var matches: [(String, Data)] = []
         for path in try archive.packedFiles(in: "webview/assets").filter({ $0.hasSuffix(".js") }) {
+            // Unrelated oversized assets cannot be the shell module; skip them.
+            guard try archive.size(at: path) <= AsarArchive.maxEntrySize else { continue }
             let data = try archive.data(at: path)
-            guard data.count <= 16 * 1024 * 1024, let text = String(data: data, encoding: .utf8) else { continue }
+            guard let text = String(data: data, encoding: .utf8) else { continue }
             if text.contains("data-app-shell-frame") && text.contains("data-app-shell-left-panel-appearance") && text.contains("data-app-shell-main-surface") {
                 matches.append((path, data))
             }

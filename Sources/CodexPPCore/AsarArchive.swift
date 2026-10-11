@@ -64,6 +64,11 @@ public struct AsarArchive {
         guard let result = node as? [String: Any] else { throw PatchError.invalid("Invalid ASAR entry.") }
         return result
     }
+    /// Declared size from the header, without reading the payload.
+    public func size(at path: String) throws -> Int {
+        guard let size = try entry(path)["size"] as? Int, size >= 0 else { throw PatchError.invalid("Invalid ASAR entry bounds.") }
+        return size
+    }
     public func data(at path: String) throws -> Data {
         let node = try entry(path)
         guard let size = node["size"] as? Int, size <= Self.maxEntrySize else { throw PatchError.invalid("ASAR entry \(path) exceeds the \(Self.maxEntrySize >> 20) MB limit.") }

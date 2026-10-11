@@ -89,9 +89,8 @@ enum PatchCLI {
                     guard !ProcessLiveness.isAlive(running.processIdentifier) else { throw PatchError.invalid("ChatGPT is still open. Finish any quit dialog before installing the verified patch.") }
                 }
                 do {
-                    // prepare verifies an existing patch; upgrade from its verified
-                    // original only after the running app has closed.
-                    if needsUpgrade { _ = try patcher.restore(app) }
+                    // prepare staged any upgrade from the verified original while
+                    // the old patch stayed installed; install only commits it.
                     report = try patcher.install(app)
                     if needsUpgrade { try stopHelper() }
                 }

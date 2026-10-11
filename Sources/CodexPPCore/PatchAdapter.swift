@@ -17,7 +17,7 @@ public struct PatchAdapter: Codable, Sendable {
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
-        guard isReviewed, let match = id.wholeMatch(of: /chatgpt-macos-([0-9]+)-v([0-9]+)/),
+        guard let match = id.wholeMatch(of: /chatgpt-macos-([0-9]+)-v([0-9]+)/),
               String(match.1) == build, let revision = Int(match.2) else { return id == self.id }
         return (1...Self.revision).contains(revision)
     }
