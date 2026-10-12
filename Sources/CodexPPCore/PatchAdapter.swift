@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 70
+    public static let revision = 71
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
@@ -129,6 +129,11 @@ public struct PatchAdapter: Codable, Sendable {
                     void ppElectron.app.whenReady().then(() => { const ppFlush = setTimeout(() => { try { ppModule.flushCompileCache?.(); } catch {} }, 15000); ppFlush.unref?.(); });
                   }
                 } catch (error) { console.error('[Codex++] compile cache:', error); }
+              }
+              // Experimental V8 flags for renderers (e.g. a larger young generation).
+              if (typeof ppExperiments.jsFlags === 'string' && /^(--[a-z0-9-]+(=[\\w.]+)?\\s*)+$/.test(ppExperiments.jsFlags.trim())) {
+                const ppFlags = [ppElectron.app.commandLine.getSwitchValue('js-flags'), ppExperiments.jsFlags.trim()].filter(Boolean).join(' ');
+                ppElectron.app.commandLine.appendSwitch('js-flags', ppFlags);
               }
               if (ppExperiments.codeCache === true) {
                 const ppRegisterSchemes = ppElectron.protocol.registerSchemesAsPrivileged.bind(ppElectron.protocol);

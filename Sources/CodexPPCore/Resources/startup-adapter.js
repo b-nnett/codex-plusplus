@@ -41,6 +41,10 @@
 //   <link rel=modulepreload> for the chunks the previous launch of this build
 //   requested in its first 1.5 s (at most 40; fetched and compiled, not run),
 //   and record this launch's list about 8 s in. Needs chunkTimings.
+// deferDockIcon (main process): window-manager setup applies the Dock icon
+//   preference synchronously (image decode plus app.dock.setIcon, about 50 ms)
+//   before the first window exists. Apply it 3 s later instead; theme-change
+//   updates are unchanged, and the default preference looks the same.
 // appGateReasons (diagnostic): the component that holds the window until auth,
 //   app info, platform and the query client are loaded records which of its
 //   four flags were still set on each blocking render, in
@@ -376,7 +380,27 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `if(ppCached?.key===ppKey&&Array.isArray(ppCached.overrides)&&ppCached.overrides.every(ppItem=>ppItem==="features.secret_auth_storage=true")){` +
           `ppFresh.catch(()=>{});(globalThis.__codexPPStartupMain??={}).authStorageGate="cached";return ppCached.overrides}return ppFresh}` };
       });
-    } else skipped.authStorageGateCacheFirst = 'module not found';
+      // let L = () => { if (!mac) return; let e = pref(); I(e), loadIcon({preference: e, resourceName: ...}).then(...) }; if (mac) { L(); ... }
+      const docks = [];
+      const dockFns = new Set();
+      walk(trees.main, node => {
+        if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier' && node.init?.type === 'ArrowFunctionExpression' && node.init.params.length === 0) {
+          const text = src.slice(node.init.start, node.init.end);
+          if (text.includes('{preference:') && text.includes('resourceName:') && text.includes('.then(')) dockFns.add(node.id.name);
+        }
+      });
+      walk(trees.main, node => {
+        if (node.type !== 'IfStatement' || node.consequent.type !== 'BlockStatement') return;
+        const first = node.consequent.body[0];
+        const call = first?.type === 'ExpressionStatement' ? first.expression : null;
+        if (call?.type === 'CallExpression' && call.arguments.length === 0 && call.callee.type === 'Identifier' && dockFns.has(call.callee.name) &&
+            src.slice(node.start, node.end).includes('nativeTheme')) docks.push({ call });
+      });
+      record('deferDockIcon', 'main', docks, ({ call }) => ({ start: call.start, end: call.end, text: `${marker}setTimeout(${call.callee.name},3e3)` }));
+    } else {
+      skipped.authStorageGateCacheFirst = 'module not found';
+      skipped.deferDockIcon = 'module not found';
+    }
 
     if (trees.requirements) {
       const src = sources.requirements, phases = [];

@@ -368,8 +368,13 @@ class Experiments:
 
     def __enter__(self):
         if self.enabled:
+            # NAME or NAME=VALUE (a string value, e.g. jsFlags=--max-semi-space-size=64).
+            settings = {}
+            for name in self.names:
+                key, sep, value = name.partition("=")
+                settings[key] = value if sep else True
             with open(self.file, "w") as f:
-                json.dump({name: True for name in self.names}, f)
+                json.dump(settings, f)
         return self
 
     def __exit__(self, *_):

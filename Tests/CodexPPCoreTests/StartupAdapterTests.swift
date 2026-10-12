@@ -12,7 +12,7 @@ final class StartupAdapterTests: XCTestCase {
     func testInProcessFallbackAppliesAllFourEdits() throws {
         let output = try StartupAdapter.adaptInProcess(input: ["shared": shared, "initial": initial])
         XCTAssertEqual(output.applied, ["statsigCacheFirst": "shared", "statsigUserCacheFirst": "initial", "deferDictationCues": "initial", "loadingGateTimings": "initial"])
-        XCTAssertEqual(output.skipped.keys.sorted(), ["appGateReasons", "authStorageGateCacheFirst", "chunkTimings", "learnedStartupPreload", "policyPhaseTimings", "settingsCacheFirst", "startupRevealUnthrottled", "statsigBootstrapCacheFirst"])
+        XCTAssertEqual(output.skipped.keys.sorted(), ["appGateReasons", "authStorageGateCacheFirst", "chunkTimings", "deferDockIcon", "learnedStartupPreload", "policyPhaseTimings", "settingsCacheFirst", "startupRevealUnthrottled", "statsigBootstrapCacheFirst"])
         XCTAssertTrue(output.shared?.contains("values_updated") == true)
         XCTAssertFalse(output.initial?.contains("window.setTimeout(()=>{try{Qpl()}") ?? true)
         XCTAssertThrowsError(try StartupAdapter.adaptInProcess(input: ["shared": output.shared!, "initial": initial]))

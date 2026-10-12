@@ -44,7 +44,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'learnedStartupPreload', 'policyPhaseTimings', 'settingsCacheFirst', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'learnedStartupPreload', 'policyPhaseTimings', 'settingsCacheFirst', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
