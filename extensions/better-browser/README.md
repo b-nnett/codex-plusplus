@@ -16,6 +16,8 @@ To apply the patch while preserving the current pause setting, run the rebuilt h
 dist/Codex++.app/Contents/MacOS/CodexPP --patch-and-restart /Applications/ChatGPT.app
 ```
 
+If a ChatGPT framework update renames the browser view classes AutoFill depends on, the extension reports that AutoFill is unavailable while bookmarks keep working. If ChatGPT starts passing its own context-menu frame, Codex++ keeps that frame as the fallback instead of failing the patch.
+
 Disabling, pausing or removing the extension stops supplying the frame on the next menu opening. Existing open menus close normally. The extension runs only in the app renderer; macOS handles credential selection and insertion. The extension does not read password stores or inject scripts into browser pages.
 
 Requires macOS and the reviewed ChatGPT build supported by Codex++. OS-provided menu availability is controlled by macOS. Native menu support uses Electron's [context-menu frame option](https://www.electronjs.org/docs/latest/tutorial/context-menu#additional-macos-menu-items-eg-writing-tools).

@@ -254,9 +254,24 @@ public struct AppPatcher: Sendable {
                     let baseRenderers = discovery.patches.filter({ $0.0 != shellPath }) + [(shellPath, shellSource)]
                     let bookmarkRenderers = try BookmarksAdapter.discover(archive: original, replacements: baseRenderers)
                     let bookmarkPaths = Set(bookmarkRenderers.map { $0.0 })
-                    replacements += baseRenderers.filter({ !bookmarkPaths.contains($0.0) }) + bookmarkRenderers
+                    var renderers = baseRenderers.filter({ !bookmarkPaths.contains($0.0) }) + bookmarkRenderers
+                    // Optional: a sidebar contract mismatch leaves better-sidebar to
+                    // report its missing capabilities; it never blocks the patch.
+                    if let sidebar = SidebarAdapter.discover(archive: original, replacements: renderers) {
+                        renderers = renderers.filter({ $0.0 != sidebar.path }) + [(sidebar.path, sidebar.source)]
+                        try JSONEncoder().encode(SidebarDiscoveryReport(missing: sidebar.missing, capabilities: sidebar.report)).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-sidebar-discovery.json"), options: .atomic)
+                    }
+                    // The startup fast path also edits the main bundle, so it builds
+                    // on the browser adapter's output rather than replacing it.
                     let (browserPath, browserSource) = try NativeBrowserAdapter.patch(archive: original)
-                    replacements.append((browserPath, browserSource))
+                    renderers = renderers.filter({ $0.0 != browserPath }) + [(browserPath, browserSource)]
+                    // Optional startup fast path: unmatched code stays unpatched.
+                    if let startup = StartupAdapter.discover(archive: original, replacements: renderers) {
+                        let paths = Set(startup.replacements.map { $0.0 })
+                        renderers = renderers.filter({ !paths.contains($0.0) }) + startup.replacements
+                        try JSONEncoder().encode(StartupDiscoveryReport(applied: startup.applied, skipped: startup.skipped)).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-startup-discovery.json"), options: .atomic)
+                    }
+                    replacements += renderers
                 }
                 let headerHash = try AsarArchive(stagedArchive).replacing(replacements, output: temporary)
                 try fm.removeItem(at: stagedArchive); try fm.moveItem(at: temporary, to: stagedArchive)

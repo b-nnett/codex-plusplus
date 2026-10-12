@@ -105,6 +105,23 @@ Settings and installed extensions live in `~/Library/Application Support/CodexPP
 open 'dist/Codex++ Preview.app'
 ```
 
+`scripts/bench-startup.py` measures cold-launch time to interactivity of the installed patch against the retained original bundle, using ChatGPT's own `app_start` span (home and sidebar ready) and an external wall clock. Launches alternate between variants; backgrounded windows are relaunched, and leftover bundle processes are cleared first. `--variants original,patched,patched-paused` also measures the patch with extensions paused. It quits and relaunches ChatGPT repeatedly, so leave the Mac idle while it runs:
+
+```sh
+python3 scripts/bench-startup.py --runs 15 --out /tmp/startup.json
+```
+
+`--record DIR` films each measured launch (Screen Recording permission required); `scripts/launch-video.py` turns the recordings into clips cropped to the ChatGPT window, with a timer from the click and an "interactive" stamp at ChatGPT's own `app_start`, plus a side-by-side of each variant's median launch. `patched-traced` launches create `Diagnostics/trace.enable` (optionally holding `CODEXPP_TRACE_<PROBE>=0|1` lines) and write `Diagnostics/startup-trace-<pid>.json` with Codex++ spans, main-thread stalls, vendor IPC timings, renderer extension costs, loading-gate timings and a renderer CPU profile; the main-process profiler is opt-in (`CODEXPP_TRACE_MAIN_PROFILE=1`) because it can stall the app. `scripts/trace-report.py` ranks the worst offenders before `app_start`, and `scripts/startup-critical-path.py` rebuilds any launch's request timeline from ChatGPT's own logs.
+
+### Startup fast path
+
+An optional AST adapter (`startup-adapter.js`) shortens the stock startup path; `Contents/Resources/codexpp-startup-discovery.json` lists which edits matched. For ChatGPT sign-ins the app normally fetches a Statsig bootstrap payload from OpenAI before rendering anything but a spinner (about a second on a good network, many seconds on a poor one). Codex++ keeps the last payload for the same identity (Statsig key, app version, device, user, account, email) in IndexedDB, builds the client from it immediately, and applies the fresh payload when the request completes. It also ends Statsig's async loading state once cached values are live and drops the eager dictation-cue `AudioContext` preload. A first launch, another account or app version, or an unrecognised build starts exactly as unpatched.
+
+```sh
+python3 scripts/bench-startup.py --variants original,patched --runs 5 --record dist/launches --out dist/launches/bench.json
+python3 scripts/launch-video.py dist/launches/bench.json
+```
+
 The default suite includes a simulated Appshot contract test. It pins the MCP initialization shape, signed-runtime environment, exact elicitation scope, payload limits, renderer update sequence, and fail-closed behavior for changed server identities or response shapes. During review of a new ChatGPT build, run the same bridge against its bundled signed runtime and an open test app:
 
 ```sh

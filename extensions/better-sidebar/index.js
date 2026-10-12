@@ -8,6 +8,35 @@ const optionalDestinations = new Set(['builtin:images','builtin:space','builtin:
 const optionalRailSelector = [...optionalDestinations].map(id=>`${railSelector} button[data-sidebar-destination="${id}"]`).join(',');
 const projectRowSelector = '[data-app-action-sidebar-project-row]';
 const inactiveHomeSelector = `:is([data-better-sidebar-inactive], ${railSelector}[data-better-sidebar-selection] button[data-sidebar-destination="builtin:home"])`;
+let sidebarIntl;
+const sidebarMessages={
+  pinSidebar:{id:'codex.tabs.contextMenu.pinToSidebar',defaultMessage:'Pin to sidebar'},
+  unpinSidebar:{id:'codex.tabs.contextMenu.unpinFromSidebar',defaultMessage:'Unpin from sidebar'},
+  pinChat:{id:'sidebarElectron.pinThread',defaultMessage:'Pin chat'},
+  unpinChat:{id:'sidebarElectron.unpinThread',defaultMessage:'Unpin chat'},
+  recents:{id:'sidebarElectron.chatGptWork.recents',defaultMessage:'Recents'},
+  pinned:{id:'sidebarElectron.pinnedThreads',defaultMessage:'Pinned'},
+  dot:{id:'sidebar.dot.defaultName',defaultMessage:'Your dot'},
+  project:{id:'sidebarElectron.productMode.trigger',defaultMessage:'Switch mode, current mode: {mode}'}
+};
+const sidebarStyleLabels={
+  en:['Sidebar Style','Latest','Old'],fr:['Style de la barre latérale','Actuel','Ancien'],
+  de:['Seitenleistenstil','Aktuell','Alt'],es:['Estilo de la barra lateral','Actual','Anterior'],
+  it:['Stile della barra laterale','Attuale','Precedente'],pt:['Estilo da barra lateral','Atual','Anterior'],
+  ja:['サイドバーのスタイル','最新','旧式'],ko:['사이드바 스타일','최신','이전'],
+  zh:['侧边栏样式','最新','旧版'],ar:['نمط الشريط الجانبي','الحالي','القديم'],
+  nl:['Zijbalkstijl','Huidig','Oud'],ru:['Стиль боковой панели','Текущий','Старый'],
+  tr:['Kenar çubuğu stili','Güncel','Eski'],pl:['Styl paska bocznego','Aktualny','Stary']
+};
+function sidebarLabel(key,values) {
+  const message=sidebarMessages[key];
+  if(message){
+    try {return sidebarIntl?.formatMessage(message,values)||message.defaultMessage.replace('{mode}',values?.mode||'');}catch{}
+    return message.defaultMessage.replace('{mode}',values?.mode||'');
+  }
+  const language=(sidebarIntl?.locale||document.documentElement.lang||'en').toLowerCase().split(/[-_]/)[0];
+  return (sidebarStyleLabels[language]||sidebarStyleLabels.en)[{style:0,latest:1,old:2}[key]];
+}
 
 api.addStyle(`
   ${railSelector} > div > button[data-slot="popover-trigger"]:not([data-sidebar-destination]):has(svg[viewBox="0 0 20 20"] > path[d="${ellipsisDot}"]) {
@@ -59,9 +88,9 @@ function appBindings(element) {
     if (!bindings.sectionId && props?.sectionKey?.startsWith('custom:')) bindings.sectionId = props.sectionKey.slice(7);
     // The compiler caches the native Scope facade here. Context maps also
     // expose get/set, so those must not be mistaken for the section store.
-    for (const cache of fiber.updateQueue?.memoCache?.data || []) {
+    if (!bindings.scope) for (const cache of fiber.updateQueue?.memoCache?.data || []) {
       const scope = cache.find(value => value?.chain && value?.node && typeof value.get === 'function' && typeof value.set === 'function');
-      if (!bindings.scope && scope) bindings.scope = scope;
+      if (scope) { bindings.scope = scope; break; }
     }
     if (!bindings.destination && props?.item?.id === 'builtin:orbit') bindings.destination = props.item;
     const value = props?.value;
@@ -69,6 +98,12 @@ function appBindings(element) {
     if (!bindings.intl && typeof value?.formatMessage === 'function') bindings.intl = value;
     if (!bindings.accountId && typeof value?.accountId === 'string') bindings.accountId = value.accountId;
     fiber = fiber.return;
+  }
+  // The compiler cache is a React internal. Fall back to the app scope that
+  // the patch-time contract captures from the app's own scope factory.
+  if (!bindings.scope) {
+    const scope = globalThis.__codexPPSidebar?.appScope?.();
+    if (typeof scope?.get === 'function' && typeof scope?.set === 'function') bindings.scope = scope;
   }
   return bindings;
 }
@@ -158,11 +193,13 @@ function beginProjectPreview(id){
   clearTimeout(previewTimer);previewTimer=undefined;refresh();
 }
 const projectBindings = new Map(), projectButtons = new Map();
+let rowBindings = new WeakMap();
 const filteredNodes = new Set(), shortenedLabels = new Map(), brandedHeaders = new Map();
 const initializedProjectSections = new Set();
-let projectDivider, pendingSectionCreation, nativeProjectAPI, nativeProjectModule;
+let projectDivider, pendingSectionCreation, nativeProjectAPI, nativeProjectModule, nativeModuleURL;
 const projectKey = suffix => projectAccount ? `codexpp.better-sidebar.${suffix}:${projectAccount}` : undefined;
-const sidebarLayoutGate='3085093835';
+// Builds patched before the sidebar contract existed read this gate directly.
+const legacySidebarLayoutGate='3085093835';
 let sidebarStyleAdapter, sidebarStylePending=false;
 const sidebarStyleKey=account=>account?`codexpp.better-sidebar.sidebar-style:${account}`:undefined;
 function sidebarStyle(account=projectAccount){return readJSON(sidebarStyleKey(account),'latest')==='old'?'old':'latest';}
@@ -171,19 +208,27 @@ async function syncSidebarStyle(bindings){
   sidebarStylePending=true;
   try{
     const native=await loadProjectAPI();
-    if(disposed || !native.UIt || !native.Tz)return;
-    if(!sidebarStyleAdapter)sidebarStyleAdapter={scope:bindings.scope,native,original:bindings.scope.get(native.UIt,sidebarLayoutGate)};
+    const gate=native.sidebarLayoutGate;
+    if(disposed || !native.UIt || !gate || !validScope(native,bindings.scope))return;
+    if(!sidebarStyleAdapter) {
+      // Gates are booleans. Anything else means the gate changed meaning.
+      const original=bindings.scope.get(native.UIt,gate);
+      if(typeof original!=='boolean'){reportSidebarIssue('gate','better-sidebar disabled Sidebar Style: its layout gate is not a boolean in this build.');return;}
+      sidebarStyleAdapter={scope:bindings.scope,native,gate,original};
+    }
     const adapter=sidebarStyleAdapter,desired=sidebarStyle(bindings.accountId)==='old'?false:adapter.original;
-    if(adapter.scope.get(native.UIt,sidebarLayoutGate)!==desired){
+    if(adapter.scope.get(native.UIt,adapter.gate)!==desired){
       clearProjectPreview();restoreExplore();restoreProjectView();removeSection();
-      adapter.scope.set(native.UIt,sidebarLayoutGate,desired);
+      adapter.scope.set(native.UIt,adapter.gate,desired);
     }
   }catch(error){api.log('Sidebar style unavailable:',error.message);}
   finally{sidebarStylePending=false;}
 }
 function sidebarStyleMenu(account){
-  return {id:'codexpp-sidebar-style',nativeLabel:'Sidebar Style',submenu:['latest','old'].map(style=>({
-    id:`codexpp-sidebar-style-${style}`,type:'radio',nativeLabel:style==='latest'?'Latest':'Old',checked:sidebarStyle(account)===style,
+  // Unavailable when this build no longer reads the reviewed layout gate.
+  const available=!nativeProjectModule || Boolean(nativeProjectModule.sidebarLayoutGate);
+  return {id:'codexpp-sidebar-style',nativeLabel:sidebarLabel('style'),enabled:available,submenu:['latest','old'].map(style=>({
+    id:`codexpp-sidebar-style-${style}`,type:'radio',nativeLabel:sidebarLabel(style),checked:sidebarStyle(account)===style,
     onSelect:()=>{localStorage.setItem(sidebarStyleKey(account),JSON.stringify(style));refresh();}
   }))};
 }
@@ -199,8 +244,9 @@ function projectRow(id) {
   return rows.find(row=>row.checkVisibility?.({visibilityProperty:true})!==false)||rows[0];
 }
 function syncProjects(bindings) {
+  sidebarIntl=bindings.intl||sidebarIntl;
   if (projectAccount !== bindings.accountId) {
-    clearProjectPreview();restoreExplore();restoreProjectView(); projectBindings.clear(); projectButtons.clear();
+    clearProjectPreview();restoreExplore();restoreProjectView(); projectBindings.clear(); projectButtons.clear(); rowBindings = new WeakMap();
     projectAccount = bindings.accountId;
     focusedProject = projectAccount ? sessionStorage.getItem(projectKey('focused-project')) : null;
   }
@@ -210,7 +256,10 @@ function syncProjects(bindings) {
   projectSections = sections && typeof sections === 'object' && !Array.isArray(sections) ? sections : {};
   for (const row of document.querySelectorAll(projectRowSelector)) {
     const id = row.getAttribute('data-app-action-sidebar-project-id');
-    const native = appBindings(row);
+    // Each walk climbs to the fiber root. Reuse it until the row re-renders.
+    const fiber = fiberOf(row), cached = rowBindings.get(row);
+    const native = cached && cached.fiber === fiber && cached.props === fiber?.memoizedProps ? cached.native : appBindings(row);
+    if (!cached || cached.native !== native) rowBindings.set(row, {fiber, props:fiber?.memoizedProps, native});
     if (id && native.openProject && native.project) projectBindings.set(id, native);
   }
   let renamed = false;
@@ -240,10 +289,126 @@ function setProjectPinned(row, bindings, pinned) {
   if (!pinned && focusedProject === id) setFocus(null);
   refresh();
 }
+// Codex++ patches a stable contract into the app (sidebar-adapter.js) that
+// names each capability by its code shape. Present it under the names this
+// file uses. Builds patched before the contract existed fall back to the
+// reviewed minified exports, validated before use.
+const contractNames={PCn:'react',Dgn:'reactDOM',BO:'tooltip',ER:'renameSection',uR:'moveSectionItem',dR:'removeSectionItem',
+  sR:'createSection',cR:'canonicalKey',SR:'sections',j0t:'navigationSignal',UIt:'gates',Prt:'pinIcon',Irt:'unpinIcon'};
+function sidebarContract(){
+  const contract=globalThis.__codexPPSidebar;
+  if(contract?.protocol!==1)return;
+  const native={source:contract,sidebarLayoutGate:contract.sidebarLayoutGate||null,reactVersion:contract.reactVersion||null,missing:[...(contract.missing||[])]};
+  for(const [name,capability] of Object.entries(contractNames))Object.defineProperty(native,name,{enumerable:true,configurable:true,get:()=>contract[capability]});
+  return native;
+}
+const sidebarIssues=new Map();
+function reportSidebarIssue(key,message) {
+  // Shown in Settings and the helper while the extension keeps running.
+  if(message)sidebarIssues.set(key,message);else sidebarIssues.delete(key);
+  const text=[...sidebarIssues.values()].join(' ');
+  if(typeof api.warn==='function')api.warn(text);else if(message)api.log(message);
+}
+// Each check confirms what a capability is, not only that a value exists, so
+// a renamed export that now names an unrelated function is never called. The
+// markers are literals that the reviewed implementations contain.
+const sourceOf=value=>{try{return Function.prototype.toString.call(value);}catch{return '';}};
+const implementation=(marker,arity)=>value=>typeof value==='function' && marker.test(sourceOf(value)) && (arity===undefined || value.length<=arity);
+const atomLike=value=>typeof value==='object' && value!==null && !Array.isArray(value);
+const elementType=value=>typeof value==='function' || (typeof value==='object' && value!==null && typeof value.$$typeof==='symbol');
+const nativeChecks={
+  PCn:value=>typeof value==='function', Dgn:value=>typeof value==='function',
+  BO:implementation(/\btooltipContent\b/,1), ER:implementation(/\bdetails\b/), uR:implementation(/\bmove\b/),
+  dR:implementation(/\bremove\b/), sR:implementation(/\brandomUUID\b/),
+  SR:atomLike, j0t:atomLike, UIt:atomLike, Prt:elementType, Irt:elementType
+};
+function checkNativeAPI(native) {
+  const missing=[...native.missing||[]].map(entry=>entry.split(' (')[0]);
+  for(const [name,check] of Object.entries(nativeChecks)) {
+    if(check(native[name]))continue;
+    missing.push(native[name]===undefined?contractNames[name]:`${contractNames[name]} (did not validate)`);
+    // Unvalidated values are withdrawn; feature guards then treat them as absent.
+    Object.defineProperty(native,name,{value:undefined,configurable:true,enumerable:true});
+  }
+  // Optional: without it, section keys are used as the app reports them.
+  if(native.cR!==undefined && !implementation(/codex:thread:/)(native.cR)) {
+    missing.push('canonicalKey (did not validate)');
+    Object.defineProperty(native,'cR',{value:undefined,configurable:true,enumerable:true});
+  }
+  if(!native.sidebarLayoutGate)missing.push('sidebarLayoutGate');
+  reportSidebarIssue('native',missing.length?`Some better-sidebar features are unavailable in this ChatGPT build (${[...new Set(missing)].join(', ')}). Repatch ChatGPT from Codex++, or wait for an update.`:'');
+  return native;
+}
+// React is validated by use: element creation, the version the patch saw, and
+// a throwaway root, before any native control is rendered with it.
+function checkReact(native) {
+  if(native.reactChecked!==undefined)return native.reactChecked;
+  let problem='';
+  try {
+    const React=native.PCn?.(),renderer=native.Dgn?.();
+    if(!React || !['createElement','cloneElement','isValidElement','useState','useRef'].every(key=>typeof React[key]==='function'))problem='React';
+    else if(!React.isValidElement(React.createElement('span')))problem='React elements';
+    else if(native.reactVersion && React.version!==native.reactVersion)problem=`React ${React.version} (patched against ${native.reactVersion})`;
+    else if(typeof renderer?.createRoot!=='function')problem='react-dom';
+    else {
+      const root=renderer.createRoot(document.createElement('div'));
+      if(typeof root?.render!=='function' || typeof root?.unmount!=='function')problem='react-dom roots';
+      else root.unmount();
+    }
+  } catch(error) { problem=`React (${error.message})`; }
+  native.reactChecked=!problem;
+  reportSidebarIssue('react',problem?`better-sidebar cannot render native controls: ${problem} did not validate.`:'');
+  return native.reactChecked;
+}
+// App scopes are checked by reading the sections atom once per scope object.
+const scopeChecks=new WeakMap();
+function validScope(native,scope) {
+  if(!scope || !native?.SR)return Boolean(scope);
+  let valid=scopeChecks.get(scope);
+  if(valid===undefined) {
+    try {
+      const sections=scope.get(native.SR);
+      valid=typeof scope.set==='function' && Array.isArray(sections) &&
+        sections.every(section=>typeof section?.id==='string' && typeof section.name==='string' && Array.isArray(section.itemKeys));
+    } catch { valid=false; }
+    scopeChecks.set(scope,valid);
+    if(!valid)reportSidebarIssue('scope','better-sidebar found an app scope whose sections did not validate; project sections are unavailable.');
+  }
+  return valid;
+}
+let resolvedNative;
+async function loadNativeAPI() {
+  const contract=globalThis.__codexPPSidebar;
+  if(contract?.protocol===1){
+    if(resolvedNative?.source!==contract)resolvedNative=checkNativeAPI(sidebarContract());
+    if(nativeProjectModule && nativeProjectModule!==resolvedNative)nativeProjectModule=resolvedNative;
+    return resolvedNative;
+  }
+  // Follow the app's own preload instead of retaining a build-specific asset
+  // filename across updates. Only use reviewed exports, never invoke arbitrary
+  // exports while searching for React.
+  const nativeURL=[...document.querySelectorAll('link[href],script[src]')].map(node=>node.href||node.src)
+    .find(url=>/^app:\/\/-\/assets\/app-shared-[a-z0-9]+\.js$/.test(url));
+  if(!nativeURL)throw new Error('The app has not exposed its native sidebar module yet.');
+  if(nativeModuleURL!==nativeURL){nativeModuleURL=nativeURL;nativeProjectAPI=undefined;nativeProjectModule=undefined;}
+  if(!nativeProjectAPI){
+    // Importing evaluates the module, which defines the contract when patched.
+    const request=import(nativeURL).then(module=>sidebarContract()||({...module,PCn:module.PCn||module.ggn,Dgn:module.Dgn||module.$fn,
+      sidebarLayoutGate:module.Tz?legacySidebarLayoutGate:null})).then(native=>(resolvedNative=checkNativeAPI(native)));
+    nativeProjectAPI=request;
+    // A transient load failure must not poison every subsequent sidebar action.
+    request.catch(()=>{if(nativeProjectAPI===request)nativeProjectAPI=undefined;});
+  }
+  return nativeProjectAPI;
+}
+async function loadNativeUI() {
+  const native=await loadNativeAPI();
+  if(typeof native.PCn!=='function' || typeof native.Dgn!=='function')throw new Error('Native sidebar rendering is unavailable.');
+  if(!checkReact(native))throw new Error('Native sidebar rendering has changed.');
+  return native;
+}
 async function loadProjectAPI() {
-  // Reviewed exports from this app's native section store and router.
-  nativeProjectAPI ??= import('app://-/assets/app-shared-2f2228189a8d.js');
-  const module = await nativeProjectAPI;
+  const module = await loadNativeAPI();
   if (typeof module.ER !== 'function' || !module.SR || !module.j0t) throw new Error('This app version does not expose the reviewed project section adapter.');
   if(!nativeProjectModule){nativeProjectModule=module;if(!disposed)refresh();}
   return module;
@@ -256,6 +421,7 @@ function projectBinding(id) {
       if (native.scope && native.accountId === projectAccount) {bindings.scope=native.scope;bindings.accountId=native.accountId;break;}
     }
   }
+  if (bindings.scope && nativeProjectModule && !validScope(nativeProjectModule, bindings.scope)) delete bindings.scope;
   return bindings;
 }
 async function openPinnedProject(pin) {
@@ -266,7 +432,9 @@ async function openPinnedProject(pin) {
   if (bindings.openProject) bindings.openProject();
   else {
     const native = await loadProjectAPI();
-    bindings.scope.get(native.j0t).navigate('/',{state:{project:{type:pin.kind,projectId:pin.id}}});
+    const signal = bindings.scope.get(native.j0t);
+    if (typeof signal?.navigate !== 'function') throw new Error('Project navigation is unavailable in this app version.');
+    signal.navigate('/',{state:{project:{type:pin.kind,projectId:pin.id}}});
   }
   // Expand the native project group so its chats are available in the view.
   if (row?.getAttribute('aria-expanded') === 'false') row.click();
@@ -323,16 +491,51 @@ function renderProjectPins(home) {
   }
   cleanupTooltips();
 }
+// React 19 contexts are their own providers; earlier builds expose .Provider.
+const reactContextType=Symbol.for('react.context');
+function contextProvider(context){return context?.Provider??(context?.$$typeof===reactContextType?context:undefined);}
+function fiberOf(element){return element?.[Object.keys(element).find(key=>key.startsWith('__reactFiber$'))];}
+// Contexts a native fiber reads, in nesting order. With ancestors, also the
+// providers above it, so a separately rendered copy sees the same values.
+function nativeContexts(fiber,ancestors=false) {
+  const contexts=new Map();
+  for(let node=fiber;node;node=ancestors?node.return:null) {
+    for(let dependency=node.dependencies?.firstContext;dependency;dependency=dependency.next)
+      if(dependency.context&&!contexts.has(dependency.context))contexts.set(dependency.context,dependency.memoizedValue);
+    const context=ancestors&&node.tag===10?(node.type?._context||node.type):undefined;
+    if(context&&!contexts.has(context))contexts.set(context,node.memoizedProps?.value);
+  }
+  return contexts;
+}
+function withContexts(React,contexts,content) {
+  for(const [context,value] of contexts){const Provider=contextProvider(context);if(Provider)content=React.createElement(Provider,{value},content);}
+  return content;
+}
+function sameContexts(a,b) {
+  if(!a||!b||a.size!==b.size)return false;
+  for(const [context,value] of a)if(b.get(context)!==value)return false;
+  return true;
+}
+// Copies render outside the app tree, so theme or locale changes reach them
+// only when they are re-rendered with the native fiber's current values.
+function tooltipContexts(element) {
+  if(!resolvedNative?.BO)return;
+  let fiber=fiberOf(element);
+  while(fiber && fiber.type!==resolvedNative.BO)fiber=fiber.return;
+  return nativeContexts(fiber);
+}
 const nativeTooltips=new Map();
 async function syncNativeTooltip(button,label,home,shortcut) {
   const peekEnabled=button.hasAttribute('data-better-sidebar-project') && !projectSidebarOpen();
   let entry=nativeTooltips.get(button);
   if(entry?.root)button.removeAttribute('title');
-  if(entry?.label===label && entry?.shortcut===shortcut && entry?.peekEnabled===peekEnabled)return;
+  const contexts=tooltipContexts(home);
+  if(entry?.ready && entry?.label===label && entry?.shortcut===shortcut && entry?.peekEnabled===peekEnabled &&
+    (!contexts || sameContexts(entry.contexts,contexts)))return;
   if(!entry){entry={label};nativeTooltips.set(button,entry);}else entry.label=label;
   entry.shortcut=shortcut;entry.peekEnabled=peekEnabled;
   try {
-    const native=await loadProjectAPI();
+    const native=await loadNativeUI();
     if(disposed || !button.isConnected || !native.PCn || !native.Dgn || !native.BO)return;
     const React=native.PCn();
     if(!entry.root){
@@ -340,14 +543,13 @@ async function syncNativeTooltip(button,label,home,shortcut) {
       entry.root=native.Dgn().createRoot(entry.host);
     }
     let content=React.createElement(native.BO,{tooltipContent:entry.label,shortcut:entry.shortcut,open:entry.peekEnabled?false:undefined,side:'right',closeOnTriggerClick:true,triggerElement:button});
-    let fiber=home[Object.keys(home).find(key=>key.startsWith('__reactFiber$'))];
+    let fiber=fiberOf(home);
     while(fiber && fiber.type!==native.BO)fiber=fiber.return;
-    for(let dependency=fiber?.dependencies?.firstContext;dependency;dependency=dependency.next) {
-      if(dependency.context)content=React.createElement(dependency.context.Provider,{value:dependency.memoizedValue},content);
-    }
-    entry.root.render(content);
+    entry.contexts=nativeContexts(fiber);
+    entry.root.render(withContexts(React,entry.contexts,content));
+    entry.ready=true;
     button.removeAttribute('title');
-  }catch(error){api.log('Native sidebar tooltip unavailable:',error.message);}
+  }catch(error){entry.ready=false;button.title=shortcut?`${label} (${shortcut})`:label;api.log('Native sidebar tooltip unavailable:',error.message);}
 }
 let homeOutline;
 async function syncHomeOutline(home) {
@@ -364,7 +566,7 @@ async function syncHomeOutline(home) {
       host.append(glyph);home.firstElementChild.append(host);homeOutline={home,host};
       return;
     }
-    const native=await loadProjectAPI();
+    const native=await loadNativeUI();
     if(disposed || !home.isConnected || !native.PCn || !native.Dgn)return;
     homeOutline?.root?.unmount();homeOutline?.host.remove();
     const React=native.PCn(),host=document.createElement('span');host.dataset.betterSidebarHomeOutline='';home.firstElementChild.append(host);
@@ -374,7 +576,7 @@ async function syncHomeOutline(home) {
 // Render the existing Explore popover and rows with local open state. The app's
 // outer Explore controller uses shared navigation state, so mounting that outer
 // controller twice would open two popovers at once.
-function NativeExploreView({React,popover,extraItems,pinIcon}) {
+function NativeExploreView({React,popover,extraItems}) {
     const [open,setOpen]=React.useState(false),contentRef=React.useRef(null);
     const originals=popover.props.children[0];
     const rows=originals.map(row=>{
@@ -388,7 +590,7 @@ function NativeExploreView({React,popover,extraItems,pinIcon}) {
       const icon=React.isValidElement(item.largeIcon)?item.largeIcon:React.createElement(item.largeIcon);
       const choose=React.cloneElement(select,{id,key:'select',ref:undefined,'aria-current':item.isCurrentDestination?'page':undefined,onClick:()=>{setOpen(false);item.onSelect();},onFocus:item.onPrefetch,onPointerEnter:item.onPrefetch,
         children:React.cloneElement(select.props.children,{leftIcon:icon,trailingContent:item.endContent,children:item.label})});
-      const repin=React.cloneElement(pinSlot,{key:'pin',children:React.cloneElement(tooltip,{tooltipContent:'Pin to sidebar',children:React.cloneElement(pin,{ariaLabel:'Pin to sidebar',disabled:false,children:React.createElement(pinIcon),onClick:()=>setDestinationPinned(item.id,true)})})});
+      const repin=React.cloneElement(pinSlot,{key:'pin',children:React.cloneElement(tooltip,{tooltipContent:sidebarLabel('pinSidebar'),children:React.cloneElement(pin,{ariaLabel:sidebarLabel('pinSidebar'),disabled:false,onClick:()=>setDestinationPinned(item.id,true)})})});
       const nativeGroup=React.cloneElement(group,{'aria-labelledby':id,children:[choose,repin,React.cloneElement(unread,{key:'unread',hasUnreadActivity:item.hasUnreadActivity})]});
       rows.push(React.cloneElement(template,{key:item.id,extraItems:item.contextMenuItems,getExtraItems:item.getContextMenuItems,children:nativeGroup}));
     }
@@ -396,7 +598,29 @@ function NativeExploreView({React,popover,extraItems,pinIcon}) {
       onOpenAutoFocus:()=>contentRef.current?.querySelector('button')?.focus(),
       onHoverKeyDown:undefined,trigger:React.cloneElement(popover.props.trigger,{onKeyDown:event=>{if(['ArrowDown','ArrowUp'].includes(event.key)){event.preventDefault();setOpen(true);}}}),children:[rows,...popover.props.children.slice(1)]});
 }
-let exploreRoot;
+// Search the owner's subtree rather than assuming the popover is its first
+// descendant. Reject ambiguous matches instead of cloning the wrong component.
+function nativeExplorePopover(owner) {
+  const stack=owner?.child?[owner.child]:[],matches=[];
+  let visited=0;
+  while(stack.length && visited++<1000) {
+    const fiber=stack.pop(),props=fiber.memoizedProps;
+    if(props?.contentRef && props?.trigger && Array.isArray(props.children?.[0]) && props.children[0].length)matches.push(fiber);
+    if(fiber.sibling)stack.push(fiber.sibling);
+    if(fiber.child)stack.push(fiber.child);
+  }
+  return !stack.length && matches.length===1?matches[0]:undefined;
+}
+function validExploreRows(popover) {
+  const rows=popover?.memoizedProps?.children?.[0];
+  return Array.isArray(rows) && rows.length>0 && rows.every(row=>{
+    const children=row?.props?.children?.props?.children;
+    if(!Array.isArray(children))return false;
+    const [select,pinSlot,unread]=children,tooltip=pinSlot?.props?.children,pin=tooltip?.props?.children;
+    return typeof select?.props?.onClick==='function' && !!select.props.children?.props && !!pin?.props && !!unread?.props;
+  });
+}
+let exploreRoot,exploreRequest;
 function hiddenDestinations() {
   const ids=readJSON(projectKey('hidden-destinations'),[]);
   if(!Array.isArray(ids))return [];
@@ -411,48 +635,45 @@ function setDestinationPinned(id,pinned) {
   refresh();
 }
 function restoreExplore() {
+  exploreRequest=undefined;
   exploreRoot?.root.unmount();exploreRoot?.host.remove();exploreRoot?.button.removeAttribute('data-better-sidebar-hidden');exploreRoot=undefined;
   document.querySelectorAll('[data-better-sidebar-unpinned-destination]').forEach(button=>{button.removeAttribute('data-better-sidebar-unpinned-destination');button.removeAttribute('data-better-sidebar-hidden');});
 }
 async function syncExplore(rail) {
+  const request={};exploreRequest=request;
   const ids=hiddenDestinations().filter(id=>rail.querySelector(`button[data-sidebar-destination="${id}"]`));
   if(!ids.length){if(exploreRoot)restoreExplore();return;}
   const button=[...rail.querySelectorAll('button[data-slot="popover-trigger"]:not([data-sidebar-destination])')].find(button=>button.querySelector(`path[d="${ellipsisDot}"]`));
-  if(!button)return;
+  if(!button){restoreExplore();return;}
   let fiber=button[Object.keys(button).find(key=>key.startsWith('__reactFiber$'))];
   while(fiber && !(typeof fiber.type==='function' && Array.isArray(fiber.memoizedProps?.items)))fiber=fiber.return;
-  if(!fiber)return; // Keep all destinations accessible when the native adapter changes.
+  if(!fiber){restoreExplore();return;} // Keep all destinations accessible when the native adapter changes.
   const sourceProps=fiber.memoizedProps,account=projectAccount;
-  let popover=fiber.child;
-  while(popover && !(popover.memoizedProps?.contentRef && popover.memoizedProps?.trigger && Array.isArray(popover.memoizedProps?.children?.[0])))popover=popover.child;
-  if(!popover?.memoizedProps.children[0]?.length)return;
+  const popover=nativeExplorePopover(fiber);
+  if(!validExploreRows(popover)){restoreExplore();return;}
   const destinations=ids.map(id=>appBindings(rail.querySelector(`button[data-sidebar-destination="${id}"]`)).navItem).filter(Boolean);
-  if(destinations.length!==ids.length)return;
-  if(exploreRoot?.button===button && exploreRoot.props===sourceProps && exploreRoot.popoverProps===popover.memoizedProps && exploreRoot.ids===ids.join() && destinations.every((item,index)=>exploreRoot.items[index]===item))return;
+  if(destinations.length!==ids.length){restoreExplore();return;}
+  if(exploreRoot?.button===button && exploreRoot.props===sourceProps && exploreRoot.popoverProps===popover.memoizedProps && exploreRoot.ids===ids.join() && destinations.every((item,index)=>exploreRoot.items[index]===item) &&
+    sameContexts(exploreRoot.contexts,nativeContexts(fiber,true)))return;
   try {
-    const native=await loadProjectAPI();
-    if(disposed || account!==projectAccount || !button.isConnected || !native.PCn || !native.Dgn || !native.Prt)return;
-    if(exploreRoot?.button!==button){restoreExplore();const host=document.createElement('div');host.dataset.betterSidebarExplore='';button.after(host);exploreRoot={button,host,root:native.Dgn().createRoot(host)};}
+    const native=await loadNativeUI();
+    if(disposed || exploreRequest!==request || account!==projectAccount || !button.isConnected || !rail.isConnected)return;
+    if(exploreRoot?.button!==button){restoreExplore();const host=document.createElement('div');host.dataset.betterSidebarExplore='';button.after(host);exploreRoot={button,host,root:native.Dgn().createRoot(host,{onUncaughtError:error=>{if(exploreRoot?.host===host)restoreExplore();api.log('Native Explore rendering failed:',error.message);}})};}
+    exploreRequest=request;
     const React=native.PCn();
     const items=destinations.map(item=>({...item,visibleByDefault:false,
-      getContextMenuItems:async()=>[{id:'codexpp-better-sidebar-repin-destination',nativeLabel:'Pin to sidebar',message:{defaultMessage:'Pin to sidebar'},onSelect:()=>setDestinationPinned(item.id,true)},...(await item.getContextMenuItems?.()||item.contextMenuItems||[])],
+      getContextMenuItems:async()=>[{id:'codexpp-better-sidebar-repin-destination',nativeLabel:sidebarLabel('pinSidebar'),message:{defaultMessage:'Pin to sidebar'},onSelect:()=>setDestinationPinned(item.id,true)},...(await item.getContextMenuItems?.()||item.contextMenuItems||[])],
       onSelect:(...args)=>{setFocus(null);restoreProjectView();item.onSelect(...args);refresh();}
     }));
-    let content=React.createElement(NativeExploreView,{React,popover:{type:popover.type,props:popover.memoizedProps},extraItems:items,pinIcon:native.Prt});
-    const contexts=new Set();
+    let content=React.createElement(NativeExploreView,{React,popover:{type:popover.type,props:popover.memoizedProps},extraItems:items});
     // Preserve the native account, scope, localization and shared tooltip contexts.
-    for(let ancestor=fiber;ancestor;ancestor=ancestor.return) {
-      for(let dependency=ancestor.dependencies?.firstContext;dependency;dependency=dependency.next)if(dependency.context&&!contexts.has(dependency.context)){
-        contexts.add(dependency.context);content=React.createElement(dependency.context.Provider,{value:dependency.memoizedValue},content);
-      }
-      const context=ancestor.tag===10?(ancestor.type?._context||ancestor.type):undefined;
-      if(context?.Provider&&!contexts.has(context)){contexts.add(context);content=React.createElement(context.Provider,{value:ancestor.memoizedProps.value},content);}
-    }
-    exploreRoot.props=sourceProps;exploreRoot.popoverProps=popover.memoizedProps;exploreRoot.ids=ids.join();exploreRoot.items=destinations;exploreRoot.root.render(content);
+    const contexts=nativeContexts(fiber,true);
+    content=withContexts(React,contexts,content);
+    exploreRoot.contexts=contexts;exploreRoot.props=sourceProps;exploreRoot.popoverProps=popover.memoizedProps;exploreRoot.ids=ids.join();exploreRoot.items=destinations;exploreRoot.root.render(content);
     button.setAttribute('data-better-sidebar-hidden','');
     for(const id of ids){const destination=rail.querySelector(`button[data-sidebar-destination="${id}"]`);destination.setAttribute('data-better-sidebar-unpinned-destination','');destination.setAttribute('data-better-sidebar-hidden','');}
     for(const destination of rail.querySelectorAll('[data-better-sidebar-unpinned-destination]'))if(!ids.includes(destination.dataset.sidebarDestination)){destination.removeAttribute('data-better-sidebar-unpinned-destination');destination.removeAttribute('data-better-sidebar-hidden');}
-  }catch(error){restoreExplore();api.log('Native Explore menu unavailable:',error.message);}
+  }catch(error){if(exploreRequest===request)restoreExplore();api.log('Native Explore menu unavailable:',error.message);}
 }
 function cleanupTooltips() {
   for(const [button,entry] of nativeTooltips)if(disposed || !button.isConnected){entry.root?.unmount();entry.host?.remove();nativeTooltips.delete(button);}
@@ -512,7 +733,7 @@ function focusProjectView(rail, home) {
     sectionIDs.set(nativeSection,id);
     const full=nativeSection.getAttribute('data-app-action-sidebar-section-heading')||'';
     const belongs=projectSections[id]?.projectId===pin.id || full.startsWith(`${title} » `);
-    const projectPinned=belongs && (projectSections[id]?.kind==='pinned' || full===`${title} » Pinned`);
+    const projectPinned=belongs && (projectSections[id]?.kind==='pinned' || (full===`${title} » Pinned` || full===`${title} » ${sidebarLabel('pinned')}`));
     const wrapper=nativeSection.closest('[data-sidebar-project-container-id^="custom:"]')||nativeSection;
     const sectionItems=projectPinned && nativeProjectModule?bindings.scope?.get(nativeProjectModule.SR):undefined;
     if(projectPinned && (sectionItems||sections)?.find(section=>section.id===id || section.name===full)?.itemKeys.length===0){hideProjectNode(wrapper);continue;}
@@ -532,11 +753,12 @@ function focusProjectView(rail, home) {
 
       if(targetGroup && !belongs) {
         const label=nativeSection.querySelector('[data-app-action-sidebar-section-toggle] > span');
-        if(label && label.textContent!=='Recents'){shortenedLabels.set(label,{full,short:'Recents'});label.textContent='Recents';}
+        const recents=sidebarLabel('recents');
+        if(label && label.textContent!==recents){shortenedLabels.set(label,{full,short:recents});label.textContent=recents;}
       }
       if(belongs) {
         const label=nativeSection.querySelector('[data-app-action-sidebar-section-toggle] > span');
-        const short=full.includes(' » ')?full.slice(full.indexOf(' » ')+3):full;
+        const short=projectPinned?sidebarLabel('pinned'):(full.includes(' » ')?full.slice(full.indexOf(' » ')+3):full);
         if(label && label.textContent!==short){shortenedLabels.set(label,{full,short});label.textContent=short;}
       }
     }
@@ -568,12 +790,12 @@ function focusProjectView(rail, home) {
   const button=nav.querySelector('button[aria-haspopup="menu"]');
   const brand=button?.querySelector('span[class*="font-openai-sans"]');
   if(brand) {
-    if(!brandedHeaders.has(button))brandedHeaders.set(button,{label:button.getAttribute('aria-label'),replacement:`Switch mode, current project: ${title}`});
+    if(!brandedHeaders.has(button))brandedHeaders.set(button,{label:button.getAttribute('aria-label'),replacement:sidebarLabel('project',{mode:title})});
     setAttributeIfChanged(brand,'data-better-sidebar-project-brand','');
     let label=brand.querySelector('[data-better-sidebar-project-title]');
     if(!label){label=document.createElement('span');label.dataset.betterSidebarProjectTitle='';brand.append(label);}
     if(label.textContent!==title)label.textContent=title;
-    const aria=`Switch mode, current project: ${title}`;brandedHeaders.get(button).replacement=aria;if(button.getAttribute('aria-label')!==aria)button.setAttribute('aria-label',aria);
+    const aria=sidebarLabel('project',{mode:title});brandedHeaders.get(button).replacement=aria;if(button.getAttribute('aria-label')!==aria)button.setAttribute('aria-label',aria);
   }
 }
 
@@ -585,7 +807,7 @@ function projectThreadKey(row) {
 }
 function pinnedProjectSection(pin,sections) {
   return sections.find(section=>projectSections[section.id]?.projectId===pin.id && projectSections[section.id]?.kind==='pinned') ||
-    sections.find(section=>section.name===`${pin.title} » Pinned`);
+    sections.find(section=>section.name===`${pin.title} » Pinned` || section.name===`${pin.title} » ${sidebarLabel('pinned')}`);
 }
 async function projectThreadIsPinned(row) {
   const pin=projectPins.find(pin=>pin.id===focusedProject),key=projectThreadKey(row);
@@ -606,11 +828,11 @@ async function setProjectThreadPinned(row,pinned) {
   let section=pinnedProjectSection(pin,sections);
   if(pinned) {
     if(!section) {
-      const id=native.sR(bindings.scope,`${pin.title} » Pinned`,[canonical]);
+      const id=native.sR(bindings.scope,`${pin.title} » ${sidebarLabel('pinned')}`,[canonical]);
       if(!id)throw new Error('Could not create the project’s Pinned section.');
       section={id};
     } else if(!section.itemKeys.includes(canonical))native.uR(bindings.scope,section.id,canonical,section.itemKeys[0],{threadHostId:row.getAttribute('data-app-action-sidebar-thread-host-id')||undefined});
-    projectSections[section.id]={projectId:pin.id,name:'Pinned',kind:'pinned'};
+    projectSections[section.id]={projectId:pin.id,name:sidebarLabel('pinned'),kind:'pinned'};
     localStorage.setItem(projectKey('project-sections'),JSON.stringify(projectSections));
   } else if(section?.itemKeys.includes(canonical))native.dR(bindings.scope,canonical,account);
   refresh();
@@ -619,7 +841,7 @@ async function projectThreadMenu(items,row) {
   if(!focusedProject || !row.matches('[data-app-action-sidebar-thread-row]') || !projectThreadKey(row))return items;
   const pinned=await projectThreadIsPinned(row);
   const original=items.find(item=>['pin-thread','unpin-thread','remove-from-section'].includes(item.id));
-  const action={...original,id:pinned?'unpin-thread':'pin-thread',nativeLabel:pinned?'Unpin chat':'Pin chat',onSelect:()=>{void setProjectThreadPinned(row,!pinned).catch(error=>api.log(error.message));}};
+  const action={...original,id:pinned?'unpin-thread':'pin-thread',nativeLabel:sidebarLabel(pinned?'unpinChat':'pinChat'),onSelect:()=>{void setProjectThreadPinned(row,!pinned).catch(error=>api.log(error.message));}};
   if(original)return items.flatMap(item=>item===original?[action]:['pin-thread','unpin-thread'].includes(item.id)||(pinned && item.id==='remove-from-section')?[]:[item]);
   return [action,{id:'codexpp-project-pin-separator',type:'separator'},...items];
 }
@@ -670,14 +892,15 @@ async function syncProjectPinControls() {
       if(!buttonFiber)continue;
       let entry=projectPinControls.get(button);
       if(!entry){const host=document.createElement('span');button.after(host);entry={host,root:native.Dgn().createRoot(host)};projectPinControls.set(button,entry);}
-      if(entry.pinned!==pinned) {
+      const pinContexts=tooltipContexts(button);
+      if(entry.pinned!==pinned || (pinContexts && !sameContexts(entry.contexts,pinContexts))) {
         const change=pinned=>{void setProjectThreadPinned(row,pinned).catch(error=>api.log(error.message));};
-        const label=pinned?'Unpin chat':'Pin chat';
+        const label=sidebarLabel(pinned?'unpinChat':'pinChat');
         let content=React.createElement(native.BO,{tooltipContent:label,side:'top',closeOnTriggerClick:true,children:React.createElement(buttonFiber.type,{...buttonFiber.memoizedProps,'aria-label':label,onClick:event=>{event.stopPropagation();change(!pinned);},onPointerDown:event=>event.stopPropagation(),onKeyDown:event=>{if(['Enter',' '].includes(event.key))event.stopPropagation();},children:React.createElement(pinned?native.Irt:native.Prt)})});
-        let fiber=button[Object.keys(button).find(key=>key.startsWith('__reactFiber$'))];
+        let fiber=fiberOf(button);
         while(fiber && fiber.type!==native.BO)fiber=fiber.return;
-        for(let dependency=fiber?.dependencies?.firstContext;dependency;dependency=dependency.next)if(dependency.context)content=React.createElement(dependency.context.Provider,{value:dependency.memoizedValue},content);
-        entry.root.render(content);
+        entry.contexts=nativeContexts(fiber);
+        entry.root.render(withContexts(React,entry.contexts,content));
         entry.pinned=pinned;entry.host.dataset.betterSidebarChatPin=String(pinned);
       }
       button.setAttribute('data-better-sidebar-hidden','');
@@ -718,8 +941,27 @@ function reconcileNativeSectionCreation() {
   else if(pending.sawDialog&&!pending.submitted)pendingSectionCreation=undefined;
 }
 
+// Markup checks for selectors that depend on icons and utility classes. A
+// mismatch that persists across checks is reported instead of silently
+// hiding or mislabelling items.
+let domCheckAt = 0, domMisses = new Map();
+function checkSidebarDOM() {
+  const now = performance.now();
+  if (now - domCheckAt < 2000) return;
+  domCheckAt = now;
+  const rail = document.querySelector(railSelector), row = document.querySelector(orbitSelector);
+  const checks = {
+    explore: rail && ![...rail.querySelectorAll('button[data-slot="popover-trigger"]:not([data-sidebar-destination])')].some(button => button.querySelector(`path[d="${ellipsisDot}"]`)),
+    dot: row && !(row.querySelector('.text-fade-truncate') && row.querySelector('.icon-leading-slot > *'))
+  };
+  for (const [name, missing] of Object.entries(checks)) domMisses.set(name, missing ? (domMisses.get(name) || 0) + 1 : 0);
+  const changed = [...domMisses].filter(([, count]) => count >= 3).map(([name]) => ({explore:'Explore button', dot:'dot label or icon'})[name]);
+  reportSidebarIssue('dom', changed.length ? `better-sidebar no longer recognizes the app's ${changed.join(' and ')}; those items keep their native placement.` : '');
+}
 function refresh() {
   if (disposed) return;
+  observeSidebarText();
+  checkSidebarDOM();
   const rail = document.querySelector(railSelector);
   const row = document.querySelector(orbitSelector);
   if (!rail) {
@@ -769,10 +1011,10 @@ function refresh() {
     list.insertBefore(section, anchor);
   }
   if (row) lastDot = {
-    label: row.querySelector('.text-fade-truncate')?.textContent?.trim() || 'Your dot',
+    label: row.querySelector('.text-fade-truncate')?.textContent?.trim() || sidebarLabel('dot'),
     icon: row.querySelector('.icon-leading-slot > *')?.cloneNode(true)
   };
-  const label = lastDot?.label || 'Your dot';
+  const label = lastDot?.label || sidebarLabel('dot');
   const icon = lastDot?.icon;
   // The dot destination retains the last selected chat even on other pages.
   // Require the app's Home rail item to be current as well as the dot row.
@@ -848,16 +1090,16 @@ async function showMenu(event, row, bindings, pinnedOnly = false) {
     let action;
     if (projectId) {
       const pinned = projectPins.some(pin=>pin.id===projectId);
-      action = {id:pinned?'codexpp-better-sidebar-unpin-project':'codexpp-better-sidebar-pin-project',nativeLabel:pinned?'Unpin from sidebar':'Pin to sidebar',onSelect:()=>{
+      action = {id:pinned?'codexpp-better-sidebar-unpin-project':'codexpp-better-sidebar-pin-project',nativeLabel:sidebarLabel(pinned?'unpinSidebar':'pinSidebar'),onSelect:()=>{
         const source=projectRow(projectId);
         if(source)setProjectPinned(source,appBindings(source),!pinned);
         else if(pinned){projectPins=projectPins.filter(pin=>pin.id!==projectId);localStorage.setItem(projectKey('pin-projects'),JSON.stringify(projectPins));if(focusedProject===projectId)setFocus(null);refresh();}
       }};
     } else if(row.matches(optionalRailSelector) && bindings.navItem) {
-      action={id:'codexpp-better-sidebar-unpin-destination',nativeLabel:'Unpin from sidebar',onSelect:()=>setDestinationPinned(bindings.navItem.id,false)};
+      action={id:'codexpp-better-sidebar-unpin-destination',nativeLabel:sidebarLabel('unpinSidebar'),onSelect:()=>setDestinationPinned(bindings.navItem.id,false)};
     } else if(isDot) {
       const key=pinKey(bindings),pinned=isPinned(key);
-      action={id:pinned?unpinAction:pinAction,nativeLabel:pinned?'Unpin from sidebar':'Pin to sidebar',onSelect:()=>setPinned(key,!pinned)};
+      action={id:pinned?unpinAction:pinAction,nativeLabel:sidebarLabel(pinned?'unpinSidebar':'pinSidebar'),onSelect:()=>setPinned(key,!pinned)};
     }
     if(focusedProject && row.matches('section[data-app-action-sidebar-section]'))items=await withNativeSectionCreation(items);
     if(focusedProject){items=scopeProjectMenu(items,row);items=await projectThreadMenu(items,row);}
@@ -966,15 +1208,29 @@ function sidebarMutationNeedsRefresh(record) {
   // refreshing for streamed messages, browser content or unrelated controls.
   return record.type==='childList' && [...record.addedNodes,...record.removedNodes].some(node=>node.nodeType===Node.ELEMENT_NODE && (node.matches(sidebarSurfaceSelector) || node.querySelector(sidebarSurfaceSelector) || pendingSectionCreation && (node.matches('[role="dialog"]') || node.querySelector('[role="dialog"]'))));
 }
-const observer = new MutationObserver(records => {
+const scheduleRefresh = records => {
   if(!records.some(sidebarMutationNeedsRefresh))return;
   if (!frame) frame = requestAnimationFrame(() => { frame = 0; refresh(); });
-});
-observer.observe(document.documentElement, {subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['src', 'aria-current','data-slate-sidebar-peeking','data-app-shell-sidebar-open','aria-expanded']});
+};
+// Streamed chat text arrives as character data. Watch it only inside the
+// sidebar surfaces; the document observer still sees surfaces being replaced.
+const observer = new MutationObserver(scheduleRefresh);
+observer.observe(document.documentElement, {subtree: true, childList: true, attributes: true, attributeFilter: ['src', 'aria-current','data-slate-sidebar-peeking','data-app-shell-sidebar-open','aria-expanded']});
+const textObserver = new MutationObserver(scheduleRefresh);
+let textSurfaces = [];
+function observeSidebarText() {
+  const surfaces = [...document.querySelectorAll(sidebarSurfaceSelector)].filter((node, index, all) => !all.some(other => other !== node && other.contains(node)));
+  if (surfaces.length === textSurfaces.length && surfaces.every((node, index) => node === textSurfaces[index])) return;
+  const pending = textObserver.takeRecords();
+  textObserver.disconnect();
+  textSurfaces = surfaces;
+  for (const surface of surfaces) textObserver.observe(surface, {subtree: true, characterData: true});
+  if (pending.length) scheduleRefresh(pending);
+}
 api.onCleanup(() => {
   disposed = true; ++menuGeneration;clearProjectPreview();
-  if(sidebarStyleAdapter){const {scope,native,original}=sidebarStyleAdapter;scope.set(native.UIt,sidebarLayoutGate,original);sidebarStyleAdapter=undefined;}
-  observer.disconnect(); cancelAnimationFrame(frame);
+  if(sidebarStyleAdapter){const {scope,native,gate,original}=sidebarStyleAdapter;scope.set(native.UIt,gate,original);sidebarStyleAdapter=undefined;}
+  observer.disconnect(); textObserver.disconnect(); textSurfaces = []; cancelAnimationFrame(frame);
   setRailSelection(undefined);dotSelectionPending=false;removeSection();restoreExplore();restoreProjectView();pendingSectionCreation=undefined;projectButtons.clear();homeOutline?.root?.unmount();homeOutline?.host.remove();
 });
 refresh();

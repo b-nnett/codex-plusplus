@@ -1,5 +1,6 @@
 // Headless Appshot bridge for the reviewed main-process bootstrap.
-(function createNativeCapture(electron) {
+(function createNativeCapture(electron, trace) {
+  trace ||= {span:(_name, fn) => fn(), async:(_name, fn) => fn()};
   const childProcess = require('child_process');
   const fs = require('fs');
   const path = require('path');
@@ -12,6 +13,7 @@
   let runtime = null;
   let starting = null;
   let captureQueue = Promise.resolve();
+  let warmupTimer = null;
 
   function trustedEvent(event) {
     try {
@@ -22,9 +24,17 @@
     } catch { return false; }
   }
 
-  function vendorExecutable(file) {
-    const verification = childProcess.spawnSync('/usr/bin/codesign', ['--verify', '--strict', file], {encoding: 'utf8'});
-    const identity = childProcess.spawnSync('/usr/bin/codesign', ['-d', '-vv', file], {encoding: 'utf8'});
+  // Asynchronous so signature checks never block the Electron main thread.
+  function codesign(args) {
+    return new Promise(resolve => {
+      childProcess.execFile('/usr/bin/codesign', args, {encoding: 'utf8'}, (error, stdout, stderr) => {
+        resolve({status: error ? (typeof error.code === 'number' ? error.code : 1) : 0, stdout, stderr});
+      });
+    });
+  }
+
+  async function vendorExecutable(file) {
+    const [verification, identity] = await Promise.all([codesign(['--verify', '--strict', file]), codesign(['-d', '-vv', file])]);
     if (verification.status !== 0 || identity.status !== 0 || !String(identity.stderr).includes('TeamIdentifier=2DC432GLL2')) {
       throw new Error(`The bundled ${path.basename(file)} runtime is not signed by the expected vendor team.`);
     }
@@ -115,8 +125,7 @@
       for (const file of [node, nodeRepl, wrapper]) {
         if (!fs.statSync(file).isFile()) throw new Error('The bundled headless capture runtime is incomplete.');
       }
-      vendorExecutable(node);
-      vendorExecutable(nodeRepl);
+      await trace.async('capture.signatures', () => Promise.all([vendorExecutable(node), vendorExecutable(nodeRepl)]));
 
       const environment = {...process.env};
       delete environment.ELECTRON_RUN_AS_NODE;
@@ -130,7 +139,7 @@
       environment.NODE_REPL_DISABLE_ANALYTICS = '1';
       environment.BROWSER_USE_DISABLE_AMBIENT_NETWORK = '1';
 
-      const child = childProcess.spawn(node, [wrapper], {env: environment, stdio: ['pipe', 'pipe', 'pipe']});
+      const child = trace.span('capture.spawn', () => childProcess.spawn(node, [wrapper], {env: environment, stdio: ['pipe', 'pipe', 'pipe']}));
       const state = {activeApp: null, child, nextId: 1, pending: new Map(), stderr: '', stdout: ''};
       runtime = state;
       child.stdout.setEncoding('utf8');
@@ -144,11 +153,11 @@
         if (runtime === state) runtime = null;
       });
 
-      const initialized = await rpc(state, 'initialize', {
+      const initialized = await trace.async('capture.initialize', () => rpc(state, 'initialize', {
         protocolVersion: '2025-11-25',
         capabilities: {elicitation: {form: {}}},
         clientInfo: {name: 'codexpp-appshot', version: '1'}
-      });
+      }));
       if (initialized?.serverInfo?.name !== 'rmcp') throw new Error('The bundled headless capture runtime returned an unexpected identity.');
       send(state, {jsonrpc: '2.0', method: 'notifications/initialized', params: {}});
       return state;
@@ -250,8 +259,19 @@
       return request?.type === 'fetch' && request?.method === 'POST' && request?.url === startURL;
     },
     relay,
-    warmup() { return start().then(() => undefined); },
+    // A delayed warmup keeps the runtime launch off the app's startup critical
+    // path; a capture requested earlier starts the runtime itself.
+    warmup(delayMs = 0) {
+      if (!(delayMs > 0)) return start().then(() => undefined);
+      clearTimeout(warmupTimer);
+      return new Promise((resolve, reject) => {
+        warmupTimer = setTimeout(() => { warmupTimer = null; start().then(() => resolve(), reject); }, delayMs);
+        warmupTimer.unref?.();
+      });
+    },
     dispose() {
+      clearTimeout(warmupTimer);
+      warmupTimer = null;
       const state = runtime;
       runtime = null;
       starting = null;

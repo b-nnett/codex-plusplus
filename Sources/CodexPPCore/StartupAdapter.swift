@@ -1,0 +1,90 @@
+import Foundation
+import JavaScriptCore
+
+/// Startup fast path for the renderer: cache-first Statsig gating and a
+/// deferred dictation-cue preload. Optional by design: each edit applies only
+/// when its code shape matches exactly once, and an unrecognised build starts
+/// exactly as it does unpatched instead of blocking the patch.
+public enum StartupAdapter {
+    public struct Result: Sendable {
+        public let replacements: [(String, Data)]
+        public let applied: [String: String]
+        public let skipped: [String: String]
+    }
+    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String? }
+
+    public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
+        do {
+            try PatchAdapter.approveArchive(archive)
+            func module(_ prefix: String, in directory: String = "webview/assets") throws -> (String, String)? {
+                let paths = try archive.packedFiles(in: directory).filter {
+                    let name = URL(fileURLWithPath: $0).lastPathComponent
+                    return name.hasPrefix(prefix) && name.hasSuffix(".js")
+                }
+                guard paths.count == 1, let path = paths.first else { return nil }
+                let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
+                guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8) else { return nil }
+                return (path, source)
+            }
+            let shared = try module("app-shared-"), initial = try module("app-initial-")
+            let requirements = try module("startup-requirements-", in: ".vite/build")
+            let main = try module("main-", in: ".vite/build")
+            // index.html and its entry module, for the entry preload hints.
+            let htmlPath = "webview/index.html"
+            let htmlData = try replacements.first(where: { $0.0 == htmlPath })?.1 ?? archive.data(at: htmlPath)
+            let html = String(data: htmlData, encoding: .utf8)
+            // The entry is the page's module script, not any index-* chunk.
+            let entry: (String, String)? = try html.flatMap { page -> (String, String)? in
+                guard let match = page.firstMatch(of: /<script type="module" crossorigin src="\.\/assets\/([\w.-]+\.js)">/) else { return nil }
+                let path = "webview/assets/\(match.1)"
+                guard let source = String(data: try archive.data(at: path), encoding: .utf8) else { return nil }
+                return (path, source)
+            }
+            var input: [String: Any] = [:]
+            if let shared { input["shared"] = shared.1 }
+            if let initial { input["initial"] = initial.1 }
+            if let requirements { input["requirements"] = requirements.1 }
+            if let main { input["main"] = main.1 }
+            if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
+            let output = try adapt(input: input, archive: archive)
+            var result: [(String, Data)] = []
+            if let source = output.shared, let shared { result.append((shared.0, Data(source.utf8))) }
+            if let source = output.initial, let initial { result.append((initial.0, Data(source.utf8))) }
+            if let source = output.requirements, let requirements { result.append((requirements.0, Data(source.utf8))) }
+            if let source = output.html { result.append((htmlPath, Data(source.utf8))) }
+            if let source = output.main, let main { result.append((main.0, Data(source.utf8))) }
+            return Result(replacements: result, applied: output.applied, skipped: output.skipped)
+        } catch {
+            return nil
+        }
+    }
+
+    private static func adapt(input: [String: Any], archive: AsarArchive) throws -> Output {
+        if let output = try JavaScriptDiscovery.run(archive: archive, adapter: "startup", input: input) {
+            return try JSONDecoder().decode(Output.self, from: output)
+        }
+        return try adaptInProcess(input: input)
+    }
+
+    /// JavaScriptCore fallback when the app's signed Node runtime is absent.
+    static func adaptInProcess(input: [String: Any]) throws -> Output {
+        guard let context = JSContext() else { throw PatchError.invalid("Could not create the startup parser.") }
+        for name in ["acorn", "startup-adapter"] {
+            guard let url = Bundle.module.url(forResource: name, withExtension: "js") else {
+                throw PatchError.invalid("The startup parser is missing.")
+            }
+            context.evaluateScript(try String(contentsOf: url, encoding: .utf8))
+            if let exception = context.exception { throw PatchError.invalid(exception.toString()) }
+        }
+        context.setObject(input, forKeyedSubscript: "ppStartupInput" as NSString)
+        guard let result = context.evaluateScript("JSON.stringify(CodexPPStartupAdapter.adapt(ppStartupInput))")?.toString(), context.exception == nil else {
+            throw PatchError.invalid(context.exception?.toString() ?? "Startup discovery failed.")
+        }
+        return try JSONDecoder().decode(Output.self, from: Data(result.utf8))
+    }
+}
+
+struct StartupDiscoveryReport: Encodable {
+    let applied: [String: String]
+    let skipped: [String: String]
+}

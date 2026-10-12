@@ -23,6 +23,22 @@
   }
   const available = process.platform === 'darwin' && native?.protocol === 1 &&
     typeof native.prepare === 'function' && typeof native.cancel === 'function';
+  // Older signed modules lack the check; assume their reviewed classes exist.
+  const viewClasses = () => {
+    try { return typeof native?.viewClassesAvailable === 'function' ? native.viewClassesAvailable() === true : true; }
+    catch { return false; }
+  };
+  // The armed popup belongs to one window. Revoking another window's owner
+  // must not cancel it.
+  let preparedWindow = null;
+  function cancelFor(owner) {
+    let ownerWindow = null;
+    try { ownerWindow = owner.isDestroyed() ? null : electron.BrowserWindow?.fromWebContents?.(owner) ?? null; } catch {}
+    if (!preparedWindow || !ownerWindow || ownerWindow === preparedWindow) {
+      native.cancel();
+      preparedWindow = null;
+    }
+  }
   const browser = Object.freeze({
     setEnabled(event, enabled) {
       if (!isAppFrame(event.senderFrame) || event.senderFrame !== event.sender.mainFrame ||
@@ -32,7 +48,7 @@
       if (enabled && !owners.has(owner)) {
         const revoke = () => {
           owners.delete(owner);
-          native.cancel();
+          cancelFor(owner);
           owner.removeListener('destroyed', revoke);
           owner.removeListener('did-start-navigation', navigate);
         };
@@ -43,7 +59,7 @@
         owner.on('destroyed', revoke);
         owner.on('did-start-navigation', navigate);
       } else if (!enabled) owners.get(owner)?.();
-      return {supported:true, nativeVersion:2};
+      return {supported:true, nativeVersion:2, viewClasses:viewClasses()};
     },
     frameForContextMenu(params, contents, window) {
       if (!available || !params.isEditable) return undefined;
@@ -60,11 +76,12 @@
         if (manifest.id !== 'better-browser' || manifest.scope !== 'renderer') return undefined;
         contents?.focus?.();
         const prepared = native.prepare(window.getNativeWindowHandle());
+        preparedWindow = prepared === true ? window : null;
         record({editable:true, clickedFrame:!!params.frame, focusedFrame:!!contents?.focusedFrame,
           mainFrame:!!contents?.mainFrame, suppliedFrame:true, nativePrepared:prepared === true});
         return frame;
       } catch {
-        native.cancel();
+        native.cancel(); preparedWindow = null;
         record({editable:true, suppliedFrame:false, nativePrepared:false});
         return undefined;
       }

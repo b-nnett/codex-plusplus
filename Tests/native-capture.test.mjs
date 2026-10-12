@@ -36,11 +36,11 @@ function harness(onMessage) {
   child.kill = () => { child.exitCode = 0; child.emit('exit', 0, null); };
   const reply = message => queueMicrotask(() => child.stdout.emit('data', `${JSON.stringify(message)}\n`));
   const childProcess = {
-    spawnSync(executable, args, options) {
+    execFile(executable, args, options, callback) {
       signatureCalls.push({executable, args, options});
-      return args[0] === '--verify'
-        ? {status: 0, stdout: '', stderr: ''}
-        : {status: 0, stdout: '', stderr: 'TeamIdentifier=2DC432GLL2\n'};
+      queueMicrotask(() => args[0] === '--verify'
+        ? callback(null, '', '')
+        : callback(null, '', 'TeamIdentifier=2DC432GLL2\n'));
     },
     spawn(executable, args, options) {
       spawnCalls.push({executable, args, options});
@@ -218,6 +218,38 @@ test('capture requests require the trusted app main frame', async () => {
   const app = sender();
   await assert.rejects(h.bridge.relay({sender:app, senderFrame:{url:'app://-/index.html'}}, validRequest()), /Invalid Appshot sender/);
   assert.equal(h.spawnCalls.length, 0);
+});
+
+test('delayed warmup keeps the runtime off the startup path and dispose cancels it', async t => {
+  const runtime = standardRuntime();
+  const h = harness(runtime.onMessage);
+  t.after(() => h.bridge.dispose());
+  const warm = h.bridge.warmup(30);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(h.signatureCalls.length, 0);
+  assert.equal(h.spawnCalls.length, 0);
+  await warm;
+  assert.equal(h.signatureCalls.length, 4);
+  assert.equal(h.spawnCalls.length, 1);
+
+  const cancelled = harness(standardRuntime().onMessage);
+  void cancelled.bridge.warmup(10);
+  cancelled.bridge.dispose();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(cancelled.signatureCalls.length, 0);
+  assert.equal(cancelled.spawnCalls.length, 0);
+});
+
+test('a capture before the delayed warmup starts the runtime once', async t => {
+  const runtime = standardRuntime();
+  const h = harness(runtime.onMessage);
+  t.after(() => h.bridge.dispose());
+  const warm = h.bridge.warmup(20);
+  const view = sender();
+  await h.bridge.relay(event(view), validRequest());
+  await warm;
+  assert.equal(h.spawnCalls.length, 1);
+  assert.equal(view.sent.at(-1).message.update.type, 'completed');
 });
 
 test('live signed runtime still satisfies the Appshot contract', {skip: !process.env.CODEXPP_LIVE_APPSHOT_APP, timeout: 60000}, async t => {

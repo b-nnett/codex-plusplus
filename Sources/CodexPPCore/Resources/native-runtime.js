@@ -1,5 +1,6 @@
 // Main-process extension host. It never opens a debugger or network listener.
-(function createNativeRuntime(electron, support, rendererRuntime, rendererBridge) {
+(function createNativeRuntime(electron, support, rendererRuntime, rendererBridge, trace) {
+  trace ||= {enabled:false, span:(_name, fn) => fn(), async:(_name, fn) => fn(), collector() {}};
   const crypto = require('crypto');
   const fs = require('fs');
   const path = require('path');
@@ -136,8 +137,12 @@
     try {
       // Syntax validation occurs in the main process. The renderer receives an
       // ordinary function literal and does not need eval or a CSP exception.
-      new Function('api', `"use strict";\n${item.code}`);
-      result = `{id:${literal(item.manifest.id)},fingerprint:${literal(item.fingerprint)},start:async function(api){"use strict";\n${item.code}\n}}`;
+      trace.span(`extension.compile:${item.manifest.id}`, () => new Function('api', `"use strict";\n${item.code}`));
+      // The renderer passes its timing primitives in a scope object so a
+      // traced launch can attribute callback time to each extension. The
+      // inner block lets an extension redeclare any of these names.
+      result = `{id:${literal(item.manifest.id)},fingerprint:${literal(item.fingerprint)},start:async function(api,codexPPScope){"use strict";` +
+        `const {MutationObserver,requestAnimationFrame,setTimeout,setInterval}=codexPPScope||globalThis;{\n${item.code}\n}}}`;
     } catch (error) {
       result = `{id:${literal(item.manifest.id)},fingerprint:${literal(item.fingerprint)},error:${literal(String(error))}}`;
     }
@@ -160,16 +165,17 @@
     let timer;
     return Promise.race([promise, new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`${label} did not respond within ${syncTimeoutMs / 1000} seconds.`)), syncTimeoutMs);
+      timer.unref?.();
     })]).finally(() => clearTimeout(timer));
   }
 
   async function synchronize(contents, desired, key) {
-    const status = await contents.executeJavaScript(statusExpression, true);
+    const status = await trace.async('runtime.sync.status', () => contents.executeJavaScript(statusExpression, true));
     if (status?.key === key && Array.isArray(status.states)) return status.states;
     // The window is new, reloaded or out of date: deliver the full payload.
-    const expression = `${rendererRuntime}\n${rendererBridge}\n` +
-      `globalThis.__codexPP.sync([${desired.map(prepared).join(',')}],${literal(key)})`;
-    const states = await contents.executeJavaScript(expression, true);
+    const expression = trace.span('runtime.sync.prepare', () => `${rendererRuntime}\n${rendererBridge}\n` +
+      `globalThis.__codexPP.sync([${desired.map(prepared).join(',')}],${literal(key)}${trace.enabled && trace.renderer !== false ? ',{trace:true}' : ''})`);
+    const states = await trace.async('runtime.sync.full', () => contents.executeJavaScript(expression, true));
     return Array.isArray(states) ? states : [];
   }
 
@@ -205,9 +211,9 @@
   let lastErrors = {};
   async function pollOnce() {
     try {
-      const configuration = settings();
-      const loaded = extensions();
-      const contents = appContents();
+      const configuration = trace.span('runtime.poll.settings', settings);
+      const loaded = trace.span('runtime.poll.extensions', extensions);
+      const contents = trace.span('runtime.poll.windows', appContents);
       const desired = configuration.extensionsPaused ? [] : loaded.items.filter(item => configuration.enabled[item.manifest.id] === true);
       const key = digest([configuration.extensionsPaused, desired.map(item => [item.manifest.id, item.fingerprint])]);
       const results = await Promise.all(contents.map(async item => {
@@ -222,9 +228,9 @@
       lastErrors = errors;
       // Only changed snapshots cross into each Settings renderer.
       const value = snapshot(configuration, loaded, errors);
-      await Promise.all(contents.map(item => publishSettings(item, value).catch(() => {})));
-      writeDiagnostics({schema:1, pid:process.pid, windows:contents.length,
-        activeExtensions:[...active], runtimeErrors:errors, problems:loaded.problems});
+      await trace.async('runtime.poll.publishSettings', () => Promise.all(contents.map(item => publishSettings(item, value).catch(() => {}))));
+      trace.span('runtime.poll.diagnostics', () => writeDiagnostics({schema:1, pid:process.pid, windows:contents.length,
+        activeExtensions:[...active], runtimeErrors:errors, problems:loaded.problems}));
     } catch (error) {
       writeDiagnostics({schema:1, pid:process.pid, windows:0,
         activeExtensions:[], runtimeErrors:{runtime:String(error)}});
@@ -238,7 +244,7 @@
     if (disposed) return Promise.resolve();
     if (polling) { pollAgain = true; return polling; }
     polling = (async () => {
-      try { do { pollAgain = false; await pollOnce(); } while (pollAgain && !disposed); }
+      try { do { pollAgain = false; await trace.async('runtime.poll', pollOnce); } while (pollAgain && !disposed); }
       finally { polling = null; }
     })();
     return polling;
@@ -328,6 +334,12 @@
     contents.on('destroyed', () => { inflight.delete(contents.id); lastStates.delete(contents.id); });
   };
   electron.app.on('web-contents-created', created);
+  // Traced launches pull each window's extension timing report.
+  trace.collector(() => Promise.all(appContents().map(contents => withTimeout(
+    contents.executeJavaScript('globalThis.__codexPP?.trace?.()??null', true), 'An app window'
+  ).then(report => report && {webContentsId:contents.id, page:new URL(contents.mainFrame.url).pathname,
+    visible:electron.BrowserWindow.fromWebContents(contents)?.isVisible?.() ?? null, ...report}, () => null)))
+    .then(reports => reports.filter(Boolean)));
   timer = setInterval(() => void poll(), 1000);
   timer.unref?.();
   void electron.app.whenReady().then(poll);

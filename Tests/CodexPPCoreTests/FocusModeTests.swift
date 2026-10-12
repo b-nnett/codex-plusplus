@@ -951,4 +951,44 @@ final class FocusModeTests: XCTestCase {
         """, in: view)
         XCTAssertEqual(rehidden, "true")
     }
+
+    @MainActor func testIdleFocusModeDoesNoPerMutationWork() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        globalThis.idleScans = 0;
+        globalThis.originalMatches = Element.prototype.matches;
+        Element.prototype.matches = function(...args) { idleScans++; return originalMatches.apply(this, args); };
+        for (let i=0;i<200;i++) {
+          const block = document.createElement('div');
+          block.append(document.createElement('span'));
+          document.querySelector('main').append(block);
+          block.className = 'streaming-' + i;
+        }
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(30))
+        let idle = try await evaluate("""
+        Element.prototype.matches = originalMatches;
+        String(idleScans === 0 && !document.documentElement.classList.contains('codexpp-focus-mode'));
+        """, in: view)
+        XCTAssertEqual(idle, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testBecomingVisibleRenewsHiddenControlsImmediately() async throws {
+        let view = try await fixture()
+        _ = try await evaluate("""
+        document.dispatchEvent(new KeyboardEvent('keydown', {code:'Backslash', metaKey:true, shiftKey:true, bubbles:true}));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(50))
+        let renewed = try await evaluate("""
+        bridgeMessages.length = 0;
+        // Offscreen test views report hidden; model the window returning.
+        Object.defineProperty(document, 'hidden', {value:false, configurable:true});
+        document.dispatchEvent(new Event('visibilitychange'));
+        String(document.documentElement.classList.contains('codexpp-focus-mode') &&
+          bridgeMessages.length === 1 && bridgeMessages[0].hidden === true);
+        """, in: view)
+        XCTAssertEqual(renewed, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
 }

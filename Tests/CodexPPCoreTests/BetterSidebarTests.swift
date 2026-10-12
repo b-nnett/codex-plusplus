@@ -42,7 +42,7 @@ final class BetterSidebarTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let runtime = try String(contentsOf: root.appendingPathComponent("Sources/CodexPP/Resources/runtime.js"), encoding: .utf8)
         let code = try String(contentsOf: root.appendingPathComponent("extensions/better-sidebar/index.js"), encoding: .utf8)
-        let fixtureCode = projects ? code.replacingOccurrences(of: "import('app://-/assets/app-shared-2f2228189a8d.js')", with: "Promise.resolve(globalThis.testProjectAPI)") : code
+        let fixtureCode = (projects ? code.replacingOccurrences(of: "import(nativeURL)", with: "(globalThis.requestedNativeModuleURL=nativeURL,globalThis.testNativeImport ? testNativeImport(nativeURL) : Promise.resolve(globalThis.testProjectAPI))") : code) + "\nglobalThis.sidebarCompatibility={nativeExplorePopover,validExploreRows,syncExplore,ellipsisDot,sidebarLabel,checkNativeAPI,checkReact,validScope,sidebarIssues};"
         let package = String(decoding: try JSONSerialization.data(withJSONObject: [["id": "better-sidebar", "code": fixtureCode]]), as: UTF8.self)
         _ = try await evaluate("""
         globalThis.menuCalls = []; globalThis.originalActions = 0; globalThis.originalMenus = 0; globalThis.opens = 0;
@@ -58,6 +58,7 @@ final class BetterSidebarTests: XCTestCase {
         row.addEventListener('click',()=>opens++);
         window.electronBridge = {showContextMenu:async(items,position)=>{menuCalls.push({items,position});return {id:selection}}};
         \(projects ? Self.projectFixture : "")
+        \(projects ? "const preload=document.createElement('link');preload.rel='fixture-module';preload.href='app://-/assets/app-shared-abcdef012345.js';document.head.append(preload);" : "")
         \(trackFrames ? "globalThis.rafCallbacks=[];globalThis.rafRequests=0;globalThis.requestAnimationFrame=callback=>{rafRequests++;rafCallbacks.push(callback);return rafRequests;};globalThis.cancelAnimationFrame=()=>{};" : "")
         \(runtime)
         globalThis.extensionPackage = \(package);
@@ -79,7 +80,7 @@ final class BetterSidebarTests: XCTestCase {
     for(const [projectRow,id,label] of [[alpha,'alpha','Alpha'],[beta,'beta','Beta']]) {
       projectRow.__reactFiber$fixture={memoizedProps:{group:{projectId:id,label,projectKind:'local'},selectAction:{onSelect:()=>{projectOpens++;document.querySelector('[data-sidebar-destination="builtin:home"]').setAttribute('aria-current','page');}},getItems:async()=>[{id:'pin-project',message:{defaultMessage:'Pin'},onSelect:()=>originalActions++},{id:'edit-project',message:{defaultMessage:'Edit'},onSelect:()=>originalActions++}]},dependencies:{firstContext:{memoizedValue:new Map(),next:null}},updateQueue:{memoCache:{data:[[fakeScope]]}},return:provider};
     }
-    globalThis.testProjectAPI={SR:{},j0t:{},uR:(scope,id,key)=>{for(const section of createdSections)section.itemKeys=section.itemKeys.filter(item=>item!==key);createdSections.find(section=>section.id===id).itemKeys.unshift(key);},dR:(scope,key)=>{for(const section of createdSections)section.itemKeys=section.itemKeys.filter(item=>item!==key);},ER:(scope,id,name)=>{const stored=createdSections.find(s=>s.id===id);stored.name=name;const element=sidebar.querySelector('[data-section-id='+id+']');element.setAttribute('data-app-action-sidebar-section-heading',name);element.querySelector('span').textContent=name;},sR:(scope,name,itemKeys)=>{
+    globalThis.testProjectAPI={SR:{},j0t:{},uR:(scope,id,key)=>{const change={kind:'move'};for(const section of createdSections)section.itemKeys=section.itemKeys.filter(item=>item!==key);createdSections.find(section=>section.id===id).itemKeys.unshift(key);},dR:(scope,key)=>{const change={kind:'remove'};for(const section of createdSections)section.itemKeys=section.itemKeys.filter(item=>item!==key);},ER:(scope,id,name)=>{const change={kind:'details'};const stored=createdSections.find(s=>s.id===id);stored.name=name;const element=sidebar.querySelector('[data-section-id='+id+']');element.setAttribute('data-app-action-sidebar-section-heading',name);element.querySelector('span').textContent=name;},sR:(scope,name,itemKeys)=>{crypto.randomUUID();
       const id='section-'+(createdSections.length+1);createdSections.push({id,name,itemKeys});
       const section=document.createElement('section');section.setAttribute('data-section-id',id);section.setAttribute('data-app-action-sidebar-section','');section.setAttribute('data-app-action-sidebar-section-heading',name);section.innerHTML='<button data-app-action-sidebar-section-toggle><span></span></button>';
       section.querySelector('span').textContent=name;section.__reactFiber$fixture={memoizedProps:{sectionKey:'custom:'+id},return:provider};sidebar.querySelector('[data-app-action-sidebar-scroll]').append(section);return id;
@@ -193,6 +194,157 @@ final class BetterSidebarTests: XCTestCase {
         _ = try await evaluate("selection='pin-thread';alphaThread.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}))", in:view)
         let repinned = try await evaluate("String(createdSections.length===2 && createdSections[0].itemKeys[0]==='codex:thread:local:one' && !sidebar.querySelector('[data-app-action-sidebar-section-heading=\"Alpha » Pinned\"]').hasAttribute('data-better-sidebar-hidden') && globalPinActions===0)", in:view)
         XCTAssertEqual(repinned,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testNativeModuleFollowsAppPreloadAfterAssetFilenameChanges() async throws {
+        let view = try await fixture(existingDivider:false, projects:true)
+        _ = try await evaluate("""
+        document.querySelector('link[rel=fixture-module]').href='app://-/assets/app-shared-012345abcdef.js';
+        selection='codexpp-better-sidebar-pin-project';alpha.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+        """, in:view)
+        _ = try await evaluate("document.querySelector('[data-better-sidebar-project=alpha]').click()", in:view)
+        let follows = try await evaluate("String(requestedNativeModuleURL==='app://-/assets/app-shared-012345abcdef.js')", in:view)
+        XCTAssertEqual(follows,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testNativeModuleRecoversFromTransientImportFailure() async throws {
+        let view = try await fixture(existingDivider:false, projects:true)
+        _ = try await evaluate("""
+        document.querySelector('link[rel=fixture-module]').href='app://-/assets/app-shared-111111abcdef.js';
+        globalThis.nativeImportAttempts=0;
+        globalThis.testNativeImport=()=>++nativeImportAttempts===1?Promise.reject(new Error('Transient load failure')):Promise.resolve(testProjectAPI);
+        localStorage.setItem('codexpp.better-sidebar.pin-projects:account-one',JSON.stringify([{id:'alpha',title:'Alpha',kind:'local'}]));
+        window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.hidden-destinations:account-one'}));
+        """, in:view)
+        _ = try await evaluate("window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.hidden-destinations:account-one'}))", in:view)
+        let recovered = try await evaluate("String(nativeImportAttempts>=2)", in:view)
+        XCTAssertEqual(recovered,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testNativeTooltipsDoNotRequireProjectSectionExports() async throws {
+        let view = try await fixture(existingDivider:false, projects:true)
+        _ = try await evaluate("""
+        document.querySelector('link[rel=fixture-module]').href='app://-/assets/app-shared-222222abcdef.js';
+        globalThis.nativeRenders=0;
+        globalThis.testProjectAPI={
+          ggn:()=>({createElement:()=>({}),cloneElement:()=>({}),isValidElement:()=>true,useState:()=>{},useRef:()=>{}}),
+          $fn:()=>({createRoot:()=>({render:()=>nativeRenders++,unmount:()=>{}})}),BO:props=>props.tooltipContent
+        };
+        localStorage.setItem('codexpp.better-sidebar.pin-projects:account-one',JSON.stringify([{id:'alpha',title:'Alpha',kind:'local'}]));
+        window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.hidden-destinations:account-one'}));
+        """, in:view)
+        let rendered = try await evaluate("String(nativeRenders>0)", in:view)
+        XCTAssertEqual(rendered,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testLocalizedProjectPinningKeepsIdentityAcrossLanguageChanges() async throws {
+        let view = try await fixture(existingDivider:false,projects:true)
+        _ = try await evaluate("""
+        globalThis.translations={
+          'codex.tabs.contextMenu.pinToSidebar':'Épingler à la barre latérale',
+          'codex.tabs.contextMenu.unpinFromSidebar':'Détacher de la barre latérale',
+          'sidebarElectron.pinThread':'Épingler la conversation',
+          'sidebarElectron.unpinThread':'Détacher la conversation',
+          'sidebarElectron.chatGptWork.recents':'Récents',
+          'sidebarElectron.pinnedThreads':'Épinglés'
+        };
+        const intl=provider.return.memoizedProps.value;intl.locale='fr';intl.formatMessage=(message,values)=>translations[message.id]||message.defaultMessage.replace('{mode}',values?.mode||'');
+        window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.pin-projects:account-one'}));
+        selection='codexpp-better-sidebar-pin-project';alpha.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+        """, in:view)
+        let translatedMenu = try await evaluate("String(menuCalls.at(-1).items[0].label==='Épingler à la barre latérale')", in:view)
+        XCTAssertEqual(translatedMenu,"true")
+        _ = try await evaluate("document.querySelector('[data-better-sidebar-project=alpha]').click()", in:view)
+        let recents = try await evaluate("String(sidebar.querySelector('[data-app-action-sidebar-section-toggle] > span').textContent==='Récents')", in:view)
+        XCTAssertEqual(recents,"true")
+        _ = try await evaluate("""
+        globalThis.localizedThread=alpha.parentElement.querySelector('[data-app-action-sidebar-thread-row]');
+        localizedThread.__reactFiber$fixture={memoizedProps:{getItems:()=>[{id:'pin-thread',message:{id:'sidebarElectron.pinThread',defaultMessage:'Pin chat'}}]},return:provider};
+        selection='pin-thread';localizedThread.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+        """, in:view)
+        let pinned = try await evaluate("String(createdSections.length===1 && createdSections[0].name==='Alpha » Épinglés' && menuCalls.at(-1).items.some(item=>item.label==='Épingler la conversation'))", in:view)
+        XCTAssertEqual(pinned,"true")
+        _ = try await evaluate("""
+        intl.locale='de';translations['sidebarElectron.pinnedThreads']='Angeheftet';translations['sidebarElectron.unpinThread']='Chat lösen';
+        window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.project-sections:account-one'}));
+        selection='unpin-thread';localizedThread.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+        """, in:view)
+        let sameSection = try await evaluate("String(createdSections.length===1 && createdSections[0].itemKeys.length===0 && menuCalls.at(-1).items.some(item=>item.label==='Chat lösen') && sidebarCompatibility.sidebarLabel('style')==='Seitenleistenstil')", in:view)
+        XCTAssertEqual(sameSection,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testCustomStyleLabelsSupportJapaneseAndArabic() async throws {
+        let view = try await fixture(existingDivider:false)
+        let translated = try await evaluate("""
+        document.documentElement.lang='ja-JP';
+        const japanese=sidebarCompatibility.sidebarLabel('style')==='サイドバーのスタイル';
+        document.documentElement.lang='ar';
+        String(japanese && sidebarCompatibility.sidebarLabel('style')==='نمط الشريط الجانبي');
+        """, in:view)
+        XCTAssertEqual(translated,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testExploreSearchHandlesWrappersSiblingsAndRejectsAmbiguity() async throws {
+        let view = try await fixture(existingDivider:false)
+        let found = try await evaluate("""
+        (()=>{
+          const popover={memoizedProps:{contentRef:{},trigger:{},children:[[{}]]}};
+          const owner={child:{child:{memoizedProps:{}},sibling:{child:popover}}};
+          const found=sidebarCompatibility.nativeExplorePopover(owner)===popover;
+          owner.sibling={child:{memoizedProps:popover.memoizedProps}};
+          const staysInOwner=sidebarCompatibility.nativeExplorePopover(owner)===popover;
+          popover.sibling={memoizedProps:popover.memoizedProps};
+          const ambiguous=!sidebarCompatibility.nativeExplorePopover(owner);
+          return String(found && staysInOwner && ambiguous);
+        })();
+        """, in:view)
+        XCTAssertEqual(found,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testExploreValidatesNativeRowsBeforeHidingDestinations() async throws {
+        let view = try await fixture(existingDivider:false)
+        let validated = try await evaluate("""
+        (()=>{
+          const row={props:{children:{props:{children:[{props:{onClick:()=>{},children:{props:{}}}},{props:{children:{props:{children:{props:{}}}}}},{props:{}}]}}}};
+          const popover={memoizedProps:{children:[[row]]}};
+          const valid=sidebarCompatibility.validExploreRows(popover);
+          row.props.children.props.children[1]={props:{children:null}};
+          return String(valid && !sidebarCompatibility.validExploreRows(popover));
+        })();
+        """, in:view)
+        XCTAssertEqual(validated,"true")
+        _ = try await evaluate("void __codexPP.sync([])", in:view)
+    }
+
+    @MainActor func testStaleExploreImportCannotRehideRepinnedDestination() async throws {
+        let view = try await fixture(existingDivider:false,projects:true)
+        _ = try await evaluate("""
+        document.querySelector('link[rel=fixture-module]').href='app://-/assets/app-shared-333333abcdef.js';
+        globalThis.testNativeImport=()=>new Promise(resolve=>globalThis.finishNativeImport=resolve);
+        const scheduled=document.createElement('button');scheduled.dataset.sidebarDestination='builtin:automations';document.querySelector('nav > div').prepend(scheduled);
+        scheduled.__reactFiber$fixture={memoizedProps:{item:{id:'builtin:automations',onSelect:()=>{}}},return:provider};
+        const explore=document.querySelector('button[data-slot=popover-trigger]');explore.innerHTML='<svg viewBox="0 0 20 20"><path/></svg>';explore.querySelector('path').setAttribute('d',sidebarCompatibility.ellipsisDot);
+        const mockRow={props:{children:{props:{children:[{props:{onClick:()=>{},children:{props:{}}}},{props:{children:{props:{children:{props:{}}}}}},{props:{}}]}}}};
+        explore.__reactFiber$fixture={memoizedProps:{},return:{type:()=>{},memoizedProps:{items:[]},child:{type:()=>{},memoizedProps:{contentRef:{},trigger:{},children:[[mockRow]]}}}};
+        localStorage.setItem('codexpp.better-sidebar.hidden-destinations:account-one','["builtin:automations"]');
+        globalThis.pendingExplore=sidebarCompatibility.syncExplore(document.querySelector('nav'));
+        void 0;
+        """, in:view)
+        _ = try await evaluate("""
+        localStorage.setItem('codexpp.better-sidebar.hidden-destinations:account-one','[]');
+        void sidebarCompatibility.syncExplore(document.querySelector('nav'));
+        globalThis.nativeRenders=0;
+        finishNativeImport({ggn:()=>({createElement:()=>({}),cloneElement:()=>({}),isValidElement:()=>true,useState:()=>{},useRef:()=>{}}),$fn:()=>({createRoot:()=>({render:()=>nativeRenders++,unmount:()=>{}})})});
+        """, in:view)
+        let preserved = try await evaluate("String(nativeRenders===0 && !scheduled.hasAttribute('data-better-sidebar-hidden') && !document.querySelector('[data-better-sidebar-explore]'))", in:view)
+        XCTAssertEqual(preserved,"true")
         _ = try await evaluate("void __codexPP.sync([])", in:view)
     }
 
@@ -524,6 +676,111 @@ final class BetterSidebarTests: XCTestCase {
         missingAdapterRow.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
         """, in: view)
         let result = try await evaluate("String(!document.querySelector('[data-better-sidebar-dot]') && originalMenus===1 && menuCalls.length===0)", in: view)
+        XCTAssertEqual(result, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testPatchedContractReplacesMinifiedExportsAndNamesItsLayoutGate() async throws {
+        let view = try await fixture(existingDivider: false, projects: true)
+        _ = try await evaluate("""
+        globalThis.requestedNativeModuleURL = undefined;
+        globalThis.layoutGate = true; globalThis.gateKeys = [];
+        const gates = {};
+        globalThis.__codexPPSidebar = {protocol:1, react:testProjectAPI.PCn, reactDOM:testProjectAPI.Dgn, tooltip:testProjectAPI.BO,
+          renameSection:testProjectAPI.ER, moveSectionItem:testProjectAPI.uR, removeSectionItem:testProjectAPI.dR,
+          createSection:testProjectAPI.sR, canonicalKey:testProjectAPI.cR, sections:testProjectAPI.SR,
+          navigationSignal:testProjectAPI.j0t, gates, pinIcon:{}, unpinIcon:{}, sidebarLayoutGate:'contract-gate', missing:[]};
+        const originalGet = fixtureProjectScope.get;
+        fixtureProjectScope.get = (atom,key) => atom===gates ? (gateKeys.push(key), layoutGate) : originalGet(atom,key);
+        fixtureProjectScope.set = (atom,key,value) => { if (atom===gates && key==='contract-gate') layoutGate = value; };
+        document.querySelector('[data-app-navigation-rail]').__reactFiber$fixture={memoizedProps:{},updateQueue:{memoCache:{data:[[fixtureProjectScope]]}},return:provider};
+        localStorage.setItem('codexpp.better-sidebar.sidebar-style:account-one', JSON.stringify('old'));
+        window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.sidebar-style:account-one'}));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(50))
+        let result = try await evaluate("""
+        String(requestedNativeModuleURL === undefined && layoutGate === false && gateKeys.every(key => key === 'contract-gate'))
+        """, in: view)
+        XCTAssertEqual(result, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+        let restored = try await evaluate("String(layoutGate === true)", in: view)
+        XCTAssertEqual(restored, "true")
+    }
+
+    @MainActor func testStreamedTextOutsideTheSidebarIsNotObserved() async throws {
+        let view = try await fixture(existingDivider: false, projects: true, trackFrames: true)
+        _ = try await evaluate("""
+        rafCallbacks.splice(0).forEach(callback=>callback());
+        globalThis.closestCalls = 0;
+        const nativeClosest = Element.prototype.closest;
+        Element.prototype.closest = function(...args) { closestCalls++; return nativeClosest.apply(this, args); };
+        const main = document.createElement('main'); main.append(document.createTextNode('Streaming'));
+        document.body.append(main);
+        globalThis.restoreClosest = () => { Element.prototype.closest = nativeClosest; };
+        setTimeout(() => { closestCalls = 0; for (let i = 0; i < 200; i++) main.firstChild.data += ' token'; }, 0);
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(50))
+        let result = try await evaluate("restoreClosest(); String(closestCalls === 0 && rafCallbacks.length === 0)", in: view)
+        XCTAssertEqual(result, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testRuntimeValidationWithdrawsUnrelatedOrMalformedCapabilities() async throws {
+        let view = try await fixture(existingDivider: false, projects: true)
+        let result = try await evaluate("""
+        (() => {
+          const {checkNativeAPI, checkReact, validScope, sidebarIssues} = sidebarCompatibility;
+          const failures = [];
+          const expect = (condition, label) => { if (!condition) failures.push(label); };
+          let unrelatedCalls = 0;
+          const React = {createElement:() => ({}), cloneElement:() => ({}), isValidElement:() => true, useState:() => {}, useRef:() => {}, version:'19.2.7'};
+          const reactDOM = {createRoot:() => ({render(){}, unmount(){}})};
+          // A renamed export now names an unrelated function.
+          const native = checkNativeAPI({PCn:() => React, Dgn:() => reactDOM, BO:props => props.tooltipContent,
+            ER:() => { unrelatedCalls++; }, uR:function(){ return {kind:'remove'}; }, dR:() => ({kind:'remove'}),
+            sR:() => crypto.randomUUID(), cR:(scope, key) => key, SR:{}, j0t:{}, UIt:{}, Prt:() => null, Irt:Math.max,
+            sidebarLayoutGate:'gate'});
+          const text = [...sidebarIssues.values()].join(' ');
+          expect(native.ER === undefined && unrelatedCalls === 0, 'unrelated rename withdrawn');
+          expect(native.uR === undefined, 'remove implementation is not a move');
+          expect(typeof native.dR === 'function' && typeof native.sR === 'function' && typeof native.BO === 'function', 'valid kept');
+          expect(native.cR === undefined, 'canonical key needs its marker');
+          expect(native.Irt === Math.max, 'native functions are valid element types');
+          expect(/renameSection \\(did not validate\\)/.test(text) && /moveSectionItem/.test(text) && /canonicalKey/.test(text), 'reported: ' + text);
+          // React must be the version the patch was made against.
+          expect(checkReact({PCn:() => React, Dgn:() => reactDOM, reactVersion:'19.2.7'}) === true, 'matching React');
+          expect(checkReact({PCn:() => ({...React, version:'20.0.0'}), Dgn:() => reactDOM, reactVersion:'19.2.7'}) === false, 'version mismatch');
+          expect(/React 20\\.0\\.0 \\(patched against 19\\.2\\.7\\)/.test(sidebarIssues.get('react')), 'version reported');
+          expect(checkReact({PCn:() => ({...React, isValidElement:() => false}), Dgn:() => reactDOM}) === false, 'elements validated');
+          expect(checkReact({PCn:() => React, Dgn:() => ({createRoot:() => ({})})}) === false, 'roots validated');
+          // Scopes must return well-formed sections and support set().
+          const sections = {};
+          expect(validScope({SR:sections}, {get:() => [{id:'a', name:'A', itemKeys:[]}], set(){}}) === true, 'valid scope');
+          expect(validScope({SR:sections}, {get:() => ({}), set(){}}) === false, 'non-array sections');
+          expect(validScope({SR:sections}, {get:() => [{id:1}], set(){}}) === false, 'malformed section');
+          expect(validScope({SR:sections}, {get:() => [], }) === false, 'scope without set');
+          expect(validScope({SR:sections}, {get:() => { throw Error('boom'); }, set(){}}) === false, 'throwing scope');
+          return failures.length ? failures.join('; ') : 'true';
+        })()
+        """, in: view)
+        XCTAssertEqual(result, "true")
+        _ = try await evaluate("void __codexPP.sync([])", in: view)
+    }
+
+    @MainActor func testSidebarStyleRefusesANonBooleanLayoutGate() async throws {
+        let view = try await fixture(existingDivider: false, projects: true)
+        _ = try await evaluate("""
+        globalThis.gateWrites = 0;
+        testProjectAPI.UIt = {}; testProjectAPI.Tz = {};
+        const originalGet = fixtureProjectScope.get;
+        fixtureProjectScope.get = (atom, key) => atom === testProjectAPI.UIt ? {value:true} : originalGet(atom, key);
+        fixtureProjectScope.set = () => { gateWrites++; };
+        document.querySelector('[data-app-navigation-rail]').__reactFiber$fixture={memoizedProps:{},updateQueue:{memoCache:{data:[[fixtureProjectScope]]}},return:provider};
+        localStorage.setItem('codexpp.better-sidebar.sidebar-style:account-one', JSON.stringify('old'));
+        window.dispatchEvent(new StorageEvent('storage',{key:'codexpp.better-sidebar.sidebar-style:account-one'}));
+        """, in: view)
+        try await Task.sleep(for: .milliseconds(50))
+        let result = try await evaluate("String(gateWrites === 0 && /not a boolean/.test(sidebarCompatibility.sidebarIssues.get('gate')))", in: view)
         XCTAssertEqual(result, "true")
         _ = try await evaluate("void __codexPP.sync([])", in: view)
     }

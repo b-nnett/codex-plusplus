@@ -14,8 +14,34 @@ const dwellClass = 'codexpp-focus-mode-dwell';
 const exitClass = 'codexpp-focus-mode-exiting';
 const edgeDwellMs = 250;
 const edgeWidth = 8;
-const windowControlsDelayMs = 250;
 const shellLossGraceMs = 400;
+const dwellCheckMs = 32;
+// Follow ChatGPT's motion token rather than freezing today's spring timing.
+// The defaults reproduce the reviewed build: a 200 ms token gives a 250 ms
+// controls delay and a 650 ms exit window.
+function motionMs() {
+  if (globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) return 0;
+  const token = getComputedStyle(document.documentElement).getPropertyValue('--transition-duration-moderate').trim();
+  const match = /^(\d+(?:\.\d+)?)(ms|s)$/.exec(token);
+  const value = match ? Number(match[1]) * (match[2] === 's' ? 1000 : 1) : 200;
+  return Math.min(Math.max(value, 50), 1000);
+}
+const windowControlsDelay = () => { const motion = motionMs(); return motion && motion + 50; };
+const exitMotionDelay = () => Math.round(motionMs() * 3.25);
+// Leading and trailing calls, at most one per interval. Unlike animation
+// frames, this still runs in occluded or offscreen renderers.
+function throttle(callback, interval) {
+  let last = -Infinity, timer = null;
+  const run = () => { timer = null; last = performance.now(); callback(); };
+  const call = () => {
+    if (disposed) return;
+    const wait = last + interval - performance.now();
+    if (wait <= 0 && timer === null) run();
+    else if (timer === null) timer = window.setTimeout(run, Math.max(wait, 0));
+  };
+  call.cancel = () => { if (timer !== null) window.clearTimeout(timer); timer = null; };
+  return call;
+}
 let restoreSidebarOnExit = false;
 let closingSidebar = false;
 let active = false;
@@ -35,7 +61,10 @@ let browserPane = null;
 let browserHost = null;
 const browserOverrides = new Map();
 const browserResize = new ResizeObserver(() => syncBrowserViewport());
-const browserMutations = new MutationObserver(() => syncBrowserViewport());
+// Native pane motion can rewrite inline styles many times per frame. Each sync
+// reads layout, so coalesce these instead of forcing a layout per mutation.
+const scheduleBrowserViewport = throttle(() => syncBrowserViewport(), 16);
+const browserMutations = new MutationObserver(scheduleBrowserViewport);
 
 const styleNode = api.addStyle(`
   [data-codexpp-shell-role="panel"] {
@@ -132,7 +161,7 @@ function ownsFocusedUI() {
   return root().classList.contains(focusClass) && hasStyle();
 }
 function clearBrowserViewport() {
-  browserResize.disconnect(); browserMutations.disconnect();
+  browserResize.disconnect(); browserMutations.disconnect(); scheduleBrowserViewport.cancel();
   browserPane = browserHost = null;
   for (const [node, original] of browserOverrides) {
     for (const [name, value, priority] of original.properties) {
@@ -193,6 +222,7 @@ function finishSidebarJob(error) {
   job.error = error;
   if (error) api.log(String(error));
   job.resolve();
+  syncObservers();
 }
 function pumpSidebarJob(current = shell.snapshot()) {
   const job = sidebarJob;
@@ -299,8 +329,10 @@ function publishControls(hidden, epoch = generation) {
   });
   return request.promise;
 }
+const scheduleDwellCheck = throttle(() => closeDwellWhenFinished(), dwellCheckMs);
 function setDwellMode(active) {
   clearPeekTimer();
+  if (!active) scheduleDwellCheck.cancel();
   root().classList.toggle(dwellClass, active && isFocused());
 }
 function closeDwellWhenFinished() {
@@ -327,15 +359,18 @@ function enterFocusMode() {
   syncBrowserViewport(current);
   clearControlsTimer();
   void publishControls(true); // Immediate native hide; no delayed entry.
-  heartbeat = window.setInterval(() => {
-    if (!ownsFocusedUI()) { exitFocusMode({immediateWindowControls: true}); return; }
-    const latest = currentShell();
-    if (!latest) return;
-    reconcileShell(latest);
-    if (!isFocused()) return;
-    root().style.setProperty('--codexpp-focus-rail-width', latest.railWidth);
-    void publishControls(true);
-  }, 1000);
+  heartbeat = window.setInterval(heartbeatTick, 1000);
+  syncObservers();
+}
+function heartbeatTick() {
+  if (!isFocused()) return;
+  if (!ownsFocusedUI()) { exitFocusMode({immediateWindowControls: true}); return; }
+  const latest = currentShell();
+  if (!latest) return;
+  reconcileShell(latest);
+  if (!isFocused()) return;
+  root().style.setProperty('--codexpp-focus-rail-width', latest.railWidth);
+  void publishControls(true);
 }
 function exitFocusMode({keepNativeSidebar = false, immediateWindowControls = false} = {}) {
   const wasFocused = isFocused();
@@ -353,7 +388,7 @@ function exitFocusMode({keepNativeSidebar = false, immediateWindowControls = fal
     root().classList.add(exitClass);
     // Let the native spring finish underneath the shorter CSS tracking tween.
     // Re-entry/cleanup cancels this timer and restores normal entry durations.
-    exitMotionTimer = window.setTimeout(clearExitMotion, 650);
+    exitMotionTimer = window.setTimeout(clearExitMotion, exitMotionDelay());
   }
   if (heartbeat !== null) window.clearInterval(heartbeat);
   heartbeat = null;
@@ -366,7 +401,7 @@ function exitFocusMode({keepNativeSidebar = false, immediateWindowControls = fal
   else windowControlsTimer = window.setTimeout(() => {
     windowControlsTimer = null;
     void publishControls(false);
-  }, windowControlsDelayMs);
+  }, windowControlsDelay());
   if (keepNativeSidebar) finishSidebarJob();
   else if (wasFocused) {
     const current = shell.snapshot();
@@ -377,6 +412,7 @@ function exitFocusMode({keepNativeSidebar = false, immediateWindowControls = fal
   }
   restoreSidebarOnExit = false;
   focusFrame = null;
+  syncObservers();
   return Promise.all([restoredControls, sidebarJob?.promise]);
 }
 function handlePointerMove(event) {
@@ -387,7 +423,9 @@ function handlePointerMove(event) {
   }
   pointerX = event.clientX;
   pointerY = event.clientY;
-  if (root().classList.contains(dwellClass)) { closeDwellWhenFinished(); return; }
+  // Each check snapshots the shell, which reads layout. Pointer events can
+  // arrive faster than frames, so throttle them while the rail is open.
+  if (root().classList.contains(dwellClass)) { scheduleDwellCheck(); return; }
   if (event.clientX >= 0 && event.clientX <= edgeWidth) {
     const epoch = generation;
     if (peekTimer === null) peekTimer = window.setTimeout(() => {
@@ -411,7 +449,7 @@ function reconcileShell(current) {
 const roleSelector = '[data-codexpp-shell-role]';
 const observer = new MutationObserver(records => {
   // Streaming chat text and unrelated widget updates are not shell changes.
-  const changed = records.some(record => (record.type === 'attributes' && record.attributeName !== 'class') ||
+  const changed = records.some(record => record.type === 'attributes' ||
     [...record.addedNodes, ...record.removedNodes].some(node => node.nodeType === 1 &&
       (node.matches(roleSelector) || node.querySelector(roleSelector))));
   if (!isFocused()) {
@@ -425,8 +463,23 @@ const observer = new MutationObserver(records => {
   const current = currentShell();
   if (current) reconcileShell(current);
 });
-observer.observe(root(), {subtree: true, childList: true, attributes: true,
-  attributeFilter: ['data-codexpp-shell-sidebar-open', 'data-codexpp-shell-peeking', 'data-codexpp-shell-role', 'class']});
+// The document's own class is observed separately: app-wide class churn
+// (hover, streaming, Tailwind state) never reaches the subtree callback.
+const rootObserver = new MutationObserver(() => {
+  if (isFocused() && !ownsFocusedUI()) exitFocusMode({immediateWindowControls: true});
+});
+// Observe only while focused or while a bounded restoration is pending. An
+// idle Focus Mode does no per-mutation work at all.
+let observing = false;
+function syncObservers() {
+  const wanted = isFocused() || sidebarJob !== null;
+  if (wanted === observing) return;
+  observing = wanted;
+  if (!wanted) { observer.disconnect(); rootObserver.disconnect(); return; }
+  observer.observe(root(), {subtree: true, childList: true, attributes: true,
+    attributeFilter: ['data-codexpp-shell-sidebar-open', 'data-codexpp-shell-peeking', 'data-codexpp-shell-role']});
+  rootObserver.observe(root(), {attributes: true, attributeFilter: ['class']});
+}
 function toggleFocusMode() {
   if (disposed || (!isFocused() && (!hasStyle() || !shell.snapshot()))) return;
   if (isFocused()) exitFocusMode(); else enterFocusMode();
@@ -471,14 +524,21 @@ api.on(window, 'resize', () => {
     if (current) reconcileShell(current);
   }
 });
+// Hidden windows have their timers throttled, so the native controls lease can
+// lapse. Renew it and revalidate the shell the moment the window is visible.
 api.on(document, 'visibilitychange', () => {
   if (document.hidden) setDwellMode(false);
+  else heartbeatTick();
 });
+api.on(window, 'focus', heartbeatTick);
 api.on(window, 'pagehide', () => exitFocusMode({keepNativeSidebar: true, immediateWindowControls: true}));
 api.onCleanup(() => {
   disposed = true;
   clearExitMotion();
   const restored = exitFocusMode({immediateWindowControls: true});
-  return Promise.all([restored, sidebarJob?.promise]).finally(() => observer.disconnect());
+  scheduleDwellCheck.cancel(); scheduleBrowserViewport.cancel();
+  return Promise.all([restored, sidebarJob?.promise]).finally(() => {
+    observing = false; observer.disconnect(); rootObserver.disconnect();
+  });
 });
 });

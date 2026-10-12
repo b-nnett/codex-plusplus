@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 36
+    public static let revision = 70
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
@@ -84,14 +84,20 @@ public struct PatchAdapter: Codable, Sendable {
         let rendererBridge = try String(contentsOf: bridgeURL, encoding: .utf8)
         guard let bookmarksURL = Bundle.module.url(forResource: "native-bookmarks", withExtension: "js") else { throw PatchError.invalid("The native bookmarks bridge is missing.") }
         let bookmarksRuntime = try String(contentsOf: bookmarksURL, encoding: .utf8)
+        guard let traceURL = Bundle.module.url(forResource: "native-trace", withExtension: "js") else { throw PatchError.invalid("The startup tracer is missing.") }
+        let traceRuntime = try String(contentsOf: traceURL, encoding: .utf8)
         guard let appToolsParentURL = Bundle.module.url(forResource: "app-tools-parent", withExtension: "mjs") else { throw PatchError.invalid("The app-tools parent launcher is missing.") }
         let code = """
         /* Codex++ bootstrap schema 2; adapter \(id). */
         {
           const ppElectron = require('electron');
           const ppProbe = process.argv.includes('--codexpp-probe');
+          let ppTrace;
+          try { ppTrace = \(traceRuntime)(\(try literal(support.path)), \(try literal(id)), ppElectron); }
+          catch (error) { console.error('[Codex++] trace:', error); ppTrace = {enabled:false, span:(_n, f) => f(), async:(_n, f) => f(), collector() {}, start() {}, flush() {}}; }
+          const ppBootstrapStart = ppTrace.enabled ? ppTrace.now() : 0;
           try {
-            const ppBrowserNative = require(require('path').join(\(try literal(helper.path)), 'Contents', 'Resources', 'browser-native.node'));
+            const ppBrowserNative = ppTrace.span('bootstrap.nativeAddon', () => require(require('path').join(\(try literal(helper.path)), 'Contents', 'Resources', 'browser-native.node')));
             if (ppBrowserNative.protocol !== 1 || typeof ppBrowserNative.prepare !== 'function' || typeof ppBrowserNative.configureUpdates !== 'function') throw Error('Codex++ native addon contract changed.');
             if (ppBrowserNative.keychainInteractionAllowed !== false) throw Error('Codex++ noninteractive Keychain policy is unavailable.');
             ppElectron.app.commandLine.removeSwitch('remote-debugging-port');
@@ -107,6 +113,30 @@ public struct PatchAdapter: Codable, Sendable {
               if (ppProbe) ppElectron.app.exit(0);
             }).catch(error => { console.error('[Codex++] boot:', error); if (ppProbe) ppElectron.app.exit(1); });
             if (!ppProbe) {
+              void ppElectron.app.whenReady().then(() => ppTrace.start(ppElectron));
+              // Startup experiments, off unless Diagnostics/experiments.json enables
+              // them; read once, before the app registers anything.
+              let ppExperiments = {};
+              try { ppExperiments = JSON.parse(require('fs').readFileSync(require('path').join(\(try literal(support.path)), 'Diagnostics', 'experiments.json'), 'utf8')) ?? {}; } catch {}
+              // Node's on-disk compile cache for the app's main-process bundles,
+              // keyed to this adapter; flushed once startup has settled. On by
+              // default (about 0.1 s per launch); experiments can turn it off.
+              if (ppExperiments.compileCache !== false) {
+                try {
+                  const ppModule = require('module');
+                  if (typeof ppModule.enableCompileCache === 'function') {
+                    ppModule.enableCompileCache(require('path').join(\(try literal(support.path)), 'CompileCache', \(try literal(id))));
+                    void ppElectron.app.whenReady().then(() => { const ppFlush = setTimeout(() => { try { ppModule.flushCompileCache?.(); } catch {} }, 15000); ppFlush.unref?.(); });
+                  }
+                } catch (error) { console.error('[Codex++] compile cache:', error); }
+              }
+              if (ppExperiments.codeCache === true) {
+                const ppRegisterSchemes = ppElectron.protocol.registerSchemesAsPrivileged.bind(ppElectron.protocol);
+                ppElectron.protocol.registerSchemesAsPrivileged = schemes => ppRegisterSchemes(Array.isArray(schemes)
+                  ? schemes.map(entry => entry?.scheme === 'app' && entry.privileges?.standard === true && entry.privileges.codeCache === undefined
+                    ? {...entry, privileges: {...entry.privileges, codeCache: true}} : entry)
+                  : schemes);
+              }
               Object.defineProperty(globalThis, '__codexPPWrapAppToolsConfig', {value: config => {
                 if (process.platform !== 'darwin') return config;
                 const parent = \(try literal(appToolsParentURL.path));
@@ -129,17 +159,17 @@ public struct PatchAdapter: Codable, Sendable {
                 }
                 return loaded;
               };
-              const ppNativeBrowser = \(browserRuntime)(ppElectron, \(try literal(support.path)), ppBrowserNative);
-              const ppNativeBookmarks = \(bookmarksRuntime)(ppElectron, \(try literal(support.path)));
-              const ppNativeShell = \(shellRuntime)(ppElectron, \(try literal(support.path)));
+              const ppNativeBrowser = ppTrace.span('bootstrap.browser', () => \(browserRuntime)(ppElectron, \(try literal(support.path)), ppBrowserNative));
+              const ppNativeBookmarks = ppTrace.span('bootstrap.bookmarks', () => \(bookmarksRuntime)(ppElectron, \(try literal(support.path))));
+              const ppNativeShell = ppTrace.span('bootstrap.shell', () => \(shellRuntime)(ppElectron, \(try literal(support.path))));
               const ppCaptureRequestChannel = 'codex_desktop:message-from-view';
               const ppCaptureResponseChannel = 'codex_desktop:message-for-view';
-              const ppNativeCapture = \(captureRuntime)(ppElectron);
-              const ppNativeRuntime = \(hostRuntime)(ppElectron, \(try literal(support.path)), \(try literal(rendererRuntime)), \(try literal(rendererBridge)));
+              const ppNativeCapture = ppTrace.span('bootstrap.capture', () => \(captureRuntime)(ppElectron, ppTrace));
+              const ppNativeRuntime = ppTrace.span('bootstrap.runtime', () => \(hostRuntime)(ppElectron, \(try literal(support.path)), \(try literal(rendererRuntime)), \(try literal(rendererBridge)), ppTrace));
 
               const ppHandle = ppElectron.ipcMain.handle.bind(ppElectron.ipcMain);
               ppElectron.ipcMain.handle = (channel, listener) => ppHandle(channel, channel === ppCaptureRequestChannel
-                ? (event, request) => {
+                ? (event, request) => ppTrace.span(`ipc.${typeof request?.type === 'string' ? request.type.slice(0, 48) : 'unknown'}`, () => {
                     if (ppNativeBookmarks.handles(request)) { ppNativeBookmarks.handle(event, request); return; }
                     if (ppNativeRuntime.handles(request)) { ppNativeRuntime.handle(event, request); return; }
                     if (request?.type === 'codexpp-shell-shortcut') {
@@ -167,13 +197,17 @@ public struct PatchAdapter: Codable, Sendable {
                       return;
                     }
                     return listener(event, request);
-                  }
+                  })
                 : listener);
-              void ppElectron.app.whenReady().then(() => ppNativeCapture.warmup()).catch(error => console.error('[Codex++] headless Appshot warmup:', error));
+              // Warm the Appshot runtime after startup settles, not while the first window loads.
+              void ppElectron.app.whenReady().then(() => ppNativeCapture.warmup(15000)).catch(error => console.error('[Codex++] headless Appshot warmup:', error));
               ppElectron.app.on('before-quit', () => { ppNativeCapture.dispose(); ppNativeRuntime.dispose(); });
 
-              const child = require('child_process').spawn('/usr/bin/open', ['-g', \(try literal(helper.path))], {detached:true, stdio:'ignore'});
-              child.on('error', error => console.error('[Codex++] helper:', error)); child.unref();
+              ppTrace.span('bootstrap.helper', () => {
+                const child = require('child_process').spawn('/usr/bin/open', ['-g', \(try literal(helper.path))], {detached:true, stdio:'ignore'});
+                child.on('error', error => console.error('[Codex++] helper:', error)); child.unref();
+              });
+              if (ppTrace.enabled) ppTrace.measure('bootstrap.total', ppBootstrapStart);
             }
           } catch (error) { console.error('[Codex++] bootstrap:', error); if (ppProbe) ppElectron.app.exit(1); }
           if (ppProbe) return;

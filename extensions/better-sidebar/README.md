@@ -20,7 +20,28 @@ Install this folder through **Settings → Codex++ → Extensions**, then enable
 Matches the ellipsis SVG's first dot path inside the navigation rail's popover
 buttons, as verified in ChatGPT 26.1007.21159. It does not depend on the translated
 Explore label or generated element IDs. An icon or markup change may require a
-selector update.
+selector update. If the Explore button or the dot's label and icon stop matching
+for several seconds, the extension reports it in Settings and the helper instead
+of failing silently.
+
+App internals (React, the tooltip, section actions, navigation, feature gates and
+the pin icons) come from a contract that Codex++ patches into the app (patch v37
+or later). The patcher finds each one by its code shape, not by minified export
+names, so app updates that only rename exports keep working. A capability that no
+longer matches is reported as missing, the features that need it turn off, and
+the rest of the patch still installs. Older patches fall back to the reviewed
+minified exports, validated before use. The **Sidebar Style** menu is disabled
+when the build no longer reads its layout gate.
+
+Each capability must pass several independent checks at patch time, such as
+react-dom verifying React's version, every section action sharing one mutator,
+and the tooltip being rendered with `tooltipContent` across the app. The patched
+app records why each one matched in `codexpp-sidebar-discovery.json`. At
+runtime, the extension confirms what each value actually is before using it:
+section actions must contain their change-record kind, React must match the
+version the patch saw and create a working root, app scopes must return
+well-formed sections, and the layout gate must be a boolean. Anything that fails
+is withdrawn and named in the extension's warning.
 
 The dot menu adapter reads React's existing menu and navigation callbacks and
 uses the app's localization provider to preserve the original native actions,
@@ -71,6 +92,16 @@ the destination to the rail. Scheduled's **Mark all as read** remains available.
 These preferences are local per account; disabling restores the native rail.
 If the Explore adapter is unavailable, destinations stay accessible in the rail.
 
+The adapter discovers the app's current JavaScript module from its preload links,
+checks native rendering capabilities, and retries transient import failures.
+Explore and tooltips do not require project-section exports. Changed preload
+URLs invalidate the module cache; failed Explore renders restore native rail
+controls. Native internals still need compatibility review when their contracts
+change; these safeguards preserve access rather than guessing new store APIs.
+Explore searches the owner's full React subtree, rejects ambiguous popovers,
+and validates native row structure before hiding rail destinations. Older async
+refreshes cannot overwrite newer pin preferences or tear down a newer menu.
+
 Inside a pinned project, **Pin chat** creates or reuses its own native **Pinned**
 section. It is stored as `{ProjectName} » Pinned` and displayed as **Pinned**
 inside that project. The context menu and inline pin button use project section
@@ -109,3 +140,9 @@ Empty space in Latest’s outer navigation rail offers the same style menu.
 Latest is the default; Old uses the app’s existing classic sidebar layout, with
 labeled navigation and the native profile footer. The choice is saved per
 account. Disabling the extension restores the app’s original layout setting.
+
+Native labels use the app’s translation catalog. Project pin sections retain
+their IDs and kind across locale changes; existing English sections remain
+compatible. The extension’s Sidebar Style menu has translations for English,
+French, German, Spanish, Italian, Portuguese, Japanese, Korean, Chinese, Arabic,
+Dutch, Russian, Turkish, and Polish, with English fallback for other locales.

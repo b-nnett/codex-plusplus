@@ -92,3 +92,11 @@ native zoom/scaling and cursor overlays; cached, staged, background and ambiguou
 surfaces are left alone. Overrides are removed on exit and disable. Exit CSS
 tracking uses a shorter 90 ms tween so it does not trail the native sidebar spring;
 entry motion, the 250 ms traffic-light delay, and Reduce Motion are unchanged.
+
+The traffic-light delay and exit window follow ChatGPT's
+`--transition-duration-moderate` token (250 ms and 650 ms for its current 200 ms),
+so a change to the app's motion timing carries over. Shell observers run only
+while Focus Mode is active or restoring the sidebar; an idle Focus Mode does no
+per-mutation work. Pointer checks during edge dwell and browser-pane tracking
+are throttled. When a hidden window becomes visible again, the native-controls
+lease is renewed immediately rather than at the next heartbeat.

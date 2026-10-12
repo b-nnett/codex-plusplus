@@ -48,6 +48,13 @@ static NSView *viewForMenu(NSView *view, NSWindow *eventWindow) {
   return eligible ? input : view;
 }
 
+// Chromium's private view classes can be renamed by a framework update. Report
+// that up front instead of letting AutoFill disappear at the first right-click.
+static bool viewClassesAvailable() {
+  return NSClassFromString(@"RenderWidgetHostViewCocoa") != nil &&
+    NSClassFromString(@"BridgedContentView") != nil;
+}
+
 static void popup(id cls, SEL selector, NSMenu *menu, NSEvent *event, NSView *view) {
   NSView *target = viewForMenu(view, event.window);
   ((void (*)(id, SEL, NSMenu *, NSEvent *, NSView *))originalPopup)(cls, selector, menu, event, target);
@@ -90,6 +97,12 @@ static napi_value cancel(napi_env env, napi_callback_info info) {
   return result;
 }
 
+static napi_value viewClasses(napi_env env, napi_callback_info info) {
+  napi_value result;
+  napi_get_boolean(env, viewClassesAvailable(), &result);
+  return result;
+}
+
 static napi_value init(napi_env env, napi_value exports) {
   Method method = class_getClassMethod(NSMenu.class, @selector(popUpContextMenu:withEvent:forView:));
   if (!method) { napi_throw_error(env, nullptr, "The native context-menu API is unavailable."); return nullptr; }
@@ -99,6 +112,8 @@ static napi_value init(napi_env env, napi_value exports) {
   napi_set_named_property(env, exports, "prepare", fn);
   napi_create_function(env, "cancel", NAPI_AUTO_LENGTH, cancel, nullptr, &fn);
   napi_set_named_property(env, exports, "cancel", fn);
+  napi_create_function(env, "viewClassesAvailable", NAPI_AUTO_LENGTH, viewClasses, nullptr, &fn);
+  napi_set_named_property(env, exports, "viewClassesAvailable", fn);
   napi_create_function(env, "configureUpdates", NAPI_AUTO_LENGTH, configureUpdates, nullptr, &fn);
   napi_set_named_property(env, exports, "configureUpdates", fn);
   napi_create_int32(env, 1, &protocol);

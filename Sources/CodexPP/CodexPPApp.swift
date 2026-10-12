@@ -56,7 +56,11 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        showMenu(); return false
+        // ChatGPT's bootstrap reopens the helper with `open -g` on every launch,
+        // which does not activate it. Only a user-initiated open (Finder,
+        // Spotlight, Dock) activates the app, so only that shows the menu.
+        DispatchQueue.main.async { [weak self] in if NSApp.isActive { self?.showMenu() } }
+        return false
     }
     private func menuBarIcon() -> NSImage {
         let image = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { _ in

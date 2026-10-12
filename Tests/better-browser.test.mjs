@@ -38,7 +38,23 @@ test('Browser discovery preserves actions and supplies the actual clicked frame'
 test('Missing, ambiguous and already modified menus fail closed', () => {
   assert.throws(() => parser.CodexPPBrowserAdapter.adapt('throw new Error("do not execute");'), /expected one match/);
   assert.throws(() => parser.CodexPPBrowserAdapter.adapt(fixture() + fixture('duplicate')), /found 2/);
-  assert.throws(() => parser.CodexPPBrowserAdapter.adapt(parser.CodexPPBrowserAdapter.adapt(fixture())), /found 0/);
+  assert.throws(() => parser.CodexPPBrowserAdapter.adapt(parser.CodexPPBrowserAdapter.adapt(fixture())), /already adapted/);
+});
+
+test('An upstream frame option is kept as the fallback instead of failing the patch', () => {
+  const upstream = fixture().replace('.popup({window:w})', '.popup({window:w,frame:p.frame})');
+  const source = parser.CodexPPBrowserAdapter.adapt(upstream);
+  const native = {}, upstreamFrame = {}, calls = [];
+  const run = enabled => {
+    const ctx = vm.createContext({ Electron: { Menu: { buildFromTemplate: items => ({ popup: options => calls.push(options) }) } },
+      __codexPPNativeBrowser: { frameForContextMenu: () => enabled ? native : undefined } });
+    vm.runInContext(source, ctx);
+    ctx.menu({params:{isEditable:true,frame:upstreamFrame},window:{}});
+  };
+  run(true); run(false);
+  assert.equal(calls[0].frame, native);
+  assert.equal(calls[1].frame, upstreamFrame);
+  assert.throws(() => parser.CodexPPBrowserAdapter.adapt(source), /already adapted/);
 });
 
 function native(platform = 'darwin', available = true) {
@@ -207,4 +223,30 @@ test('Extension waits for browser modules when the preload arrives first', async
     api:{onCleanup:fn=>cleanups.push(fn)}});
   await vm.runInContext(`(new Function('api', ${JSON.stringify(extension)}))(api)`,ctx);
   assert.equal(starts,1);for(const cleanup of cleanups)await cleanup();assert.equal(stops,1);
+});
+
+test('Revoking one window keeps another window\'s armed menu and reports view classes', () => {
+  const calls = [];
+  const windows = new Map();
+  const electron = {BrowserWindow:{fromWebContents:contents => windows.get(contents) ?? null}};
+  const ctx = vm.createContext({URL,process:{platform:'darwin'},require:name => name === 'path' ? path : {
+    readFileSync(file) {
+      return file.endsWith('settings.json') ? JSON.stringify({enabled:{'better-browser':true}, extensionsPaused:false})
+        : JSON.stringify({id:'better-browser',scope:'renderer'});
+    }
+  }});
+  const module = {protocol:1, prepare() {calls.push('prepare'); return true;}, cancel() {calls.push('cancel');},
+    viewClassesAvailable:() => false};
+  const bridge = vm.runInContext(resource('native-browser'), ctx)(electron, '/support', module);
+  const owner = () => { const o = new EventEmitter(); o.mainFrame = {url:'app://-/index.html'}; o.isDestroyed = () => false; return o; };
+  const first = owner(), second = owner();
+  const firstWindow = {getNativeWindowHandle:() => ({})}, secondWindow = {getNativeWindowHandle:() => ({})};
+  windows.set(first, firstWindow); windows.set(second, secondWindow);
+  assert.equal(bridge.setEnabled({sender:first,senderFrame:first.mainFrame}, true).viewClasses, false);
+  bridge.setEnabled({sender:second,senderFrame:second.mainFrame}, true);
+  bridge.frameForContextMenu({isEditable:true,frame:{}}, {}, firstWindow);
+  second.emit('destroyed');
+  assert.equal(calls.includes('cancel'), false);
+  first.emit('destroyed');
+  assert.equal(calls.at(-1), 'cancel');
 });

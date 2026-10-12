@@ -25,16 +25,24 @@ globalThis.CodexPPBrowserAdapter = Object.freeze({
         const build = call.callee.object;
         if (build.type !== 'CallExpression' || build.callee.type !== 'MemberExpression' || build.callee.computed || build.callee.property.name !== 'buildFromTemplate') return;
         const options = call.arguments[0];
-        if (options?.type !== 'ObjectExpression' || options.properties.length !== 1) return;
-        const property = options.properties[0];
-        if (property.type !== 'Property' || property.computed || (property.key.name || property.key.value) !== 'window' || property.value.name !== window.name) return;
-        matches.push({ position: options.end - 1, params: params.name, contents: contents.name, window: window.name });
+        if (options?.type !== 'ObjectExpression' || !options.properties.every(p => p.type === 'Property' && !p.computed)) return;
+        const named = new Map(options.properties.map(p => [p.key.name || p.key.value, p]));
+        const windowOption = named.get('window'), frameOption = named.get('frame');
+        if (windowOption?.value.name !== window.name || named.size !== (frameOption ? 2 : 1)) return;
+        // Upstream may adopt Electron's public frame option. Keep its value as
+        // the fallback instead of failing the patch, but never adapt twice.
+        if (frameOption && source.slice(frameOption.value.start, frameOption.value.end).includes('__codexPPNativeBrowser')) {
+          throw new Error('Native browser menu already adapted.');
+        }
+        matches.push({ position: options.end - 1, frame: frameOption?.value, params: params.name, contents: contents.name, window: window.name });
       });
     });
     if (matches.length !== 1) throw new Error(`Native browser menu: expected one match, found ${matches.length}.`);
     const match = matches[0];
-    const result = source.slice(0, match.position) +
-      `,frame:globalThis.__codexPPNativeBrowser?.frameForContextMenu(${match.params},${match.contents},${match.window})` + source.slice(match.position);
+    const ours = `globalThis.__codexPPNativeBrowser?.frameForContextMenu(${match.params},${match.contents},${match.window})`;
+    const result = match.frame
+      ? source.slice(0, match.frame.start) + `${ours}??(${source.slice(match.frame.start, match.frame.end)})` + source.slice(match.frame.end)
+      : source.slice(0, match.position) + `,frame:${ours}` + source.slice(match.position);
     acorn.parse(result, { ecmaVersion: 'latest', sourceType: 'script' });
     return result;
   }

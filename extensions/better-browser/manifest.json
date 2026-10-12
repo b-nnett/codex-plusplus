@@ -1,7 +1,7 @@
 {
   "id": "better-browser",
   "name": "better-browser",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Native macOS AutoFill and persistent browser bookmarks.",
   "scope": "renderer",
   "main": "index.js"

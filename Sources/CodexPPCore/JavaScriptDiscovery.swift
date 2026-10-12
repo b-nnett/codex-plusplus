@@ -19,7 +19,7 @@ enum JavaScriptDiscovery {
               SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSStrictValidate), requirement) == errSecSuccess else {
             throw PatchError.invalid("The bundled parser runtime failed OpenAI signature verification.")
         }
-        guard ["settings", "bookmarks", "shell", "browser"].contains(adapter),
+        guard ["settings", "bookmarks", "shell", "browser", "sidebar", "startup"].contains(adapter),
               let runner = Bundle.module.url(forResource: "parser-runner", withExtension: "js") else {
             throw PatchError.invalid("The parser runner is unavailable.")
         }

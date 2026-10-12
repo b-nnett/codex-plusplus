@@ -25,6 +25,12 @@ return (async () => {
   if (result.supported !== true || result.nativeVersion !== 2) {
     throw new Error('Update Codex++ and restart ChatGPT to install the native macOS AutoFill adapter.');
   }
+  // A framework update can rename the private view classes AutoFill needs.
+  // Menus then keep their original items, so say so instead of failing silently.
+  if (result.viewClasses === false) {
+    const message = 'AutoFill is unavailable in this ChatGPT build: its browser view classes changed. Bookmarks still work.';
+    if (typeof api.warn === 'function') api.warn(message); else api.log(message);
+  }
   // Some windows expose the preload bridge before the browser modules finish loading.
   for (let attempt = 0; !globalThis.__codexPPBookmarks && attempt < 200; attempt++) {
     await new Promise(resolve => setTimeout(resolve, 50));
