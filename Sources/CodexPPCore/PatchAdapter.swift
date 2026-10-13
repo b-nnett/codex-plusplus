@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 98
+    public static let revision = 106
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {

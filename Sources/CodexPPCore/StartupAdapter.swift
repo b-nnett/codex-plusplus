@@ -117,7 +117,7 @@ public struct StartupStatus: Equatable, Sendable {
         "learnedStartupPreload": "Learned chunk preload", "entryPreload": "Entry chunk preload",
         "shellEnvironmentCacheFirst": "Cached shell environment", "authStorageGateCacheFirst": "Cached auth storage flag",
         "deferDockIcon": "Deferred Dock icon", "caretBlinkTimeout": "Idle text cursor", "lazyPageWindowPrewarm": "On-demand Page window",
-        "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window", "lazyCheckoutPricingPrewarm": "On-demand upgrade page", "lazyCheckoutCreditPrewarm": "On-demand credit checkout",
+        "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window", "lazyCheckoutPricingPrewarm": "On-demand upgrade page", "lazyCheckoutCreditPrewarm": "On-demand credit checkout", "skipHiddenThreadRefetch": "No MCP refetch for hidden threads",
     ]
     public let active: [String]
     /// Speed-ups that did not match this build, with the adapter's reason.

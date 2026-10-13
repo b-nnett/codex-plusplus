@@ -42,6 +42,13 @@
 //   is focused, even untouched. Where CSS caret-animation is supported, take
 //   the blink over: blink for 5 s after typing, a click or focus, then hold the
 //   cursor steady (always steady with Reduce Motion), like GTK's blink timeout.
+// skipHiddenThreadRefetch: after every turn the app forks the conversation to
+//   predict the next prompt (and starts other hidden generation threads for
+//   titles, and prewarms a thread for the next new chat). When such a thread's
+//   MCP servers report ready, the window refetched the host's whole MCP
+//   inventory, which starts every MCP server again (two bursts of about six node
+//   processes, 1.2 s each). Skip those refetches for threads the window has no
+//   conversation for.
 // lazyCheckoutPricingPrewarm, lazyCheckoutCreditPrewarm: personal ChatGPT
 //   accounts boot a hidden, signed-in chatgpt.com checkout page at launch so an
 //   upgrade or credit purchase opens instantly (about 250 MB plus the web app's
@@ -348,6 +355,46 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
       // First statement of the initial bundle: learned preload of startup chunks.
       const firstStatement = trees.initial.body.find(statement => statement.type !== 'ImportDeclaration');
+      // n.subscribe({...,listener:(a,o)=>{switch(a.method){...case`mcpServer/startupStatus/updated`:...toolsAndAuthOnly...}}})
+      // where n is the host's conversation manager (n.getConversationCwd(...) in the same listener).
+      const caseName = c => c.test?.type === 'TemplateLiteral' && c.test.quasis.length === 1 ? c.test.quasis[0].value.cooked : c.test?.type === 'Literal' ? c.test.value : null;
+      const readyCases = [];
+      walk(trees.initial, (node, ancestors) => {
+        if (node.type !== 'SwitchStatement' || node.discriminant.type !== 'MemberExpression' || node.discriminant.object.type !== 'Identifier' ||
+            node.discriminant.property.name !== 'method') return;
+        const ready = node.cases.find(c => caseName(c) === 'mcpServer/startupStatus/updated');
+        if (!ready?.consequent.length || !sources.initial.slice(ready.consequent[0].start, ready.consequent.at(-1).end).includes('toolsAndAuthOnly')) return;
+        const call = [...ancestors].reverse().find(a => a.type === 'CallExpression' && a.callee.type === 'MemberExpression' &&
+          a.callee.property.name === 'subscribe' && a.callee.object.type === 'Identifier');
+        if (!call) return;
+        const manager = call.callee.object.name;
+        if (!sources.initial.slice(node.start, node.end).includes(`${manager}.getConversationCwd(`)) return;
+        // gl(e.queryClient,{queryKey:[...dd,t,`toolsAndAuthOnly`],exact:!0},{cancelRefetch:!1}): the inventory refetch.
+        let inventory = null;
+        walk(ready, inner => {
+          const options = inner.type === 'CallExpression' && inner.arguments.length >= 2 && inner.arguments[1].type === 'ObjectExpression' ? inner.arguments[1] : null;
+          const key = options?.properties.find(p => p.type === 'Property' && p.key.name === 'queryKey')?.value;
+          if (key?.type === 'ArrayExpression' && key.elements.at(-1)?.type === 'TemplateLiteral' && key.elements.at(-1).quasis[0]?.value.cooked === 'toolsAndAuthOnly' &&
+              inner.arguments[0].type === 'MemberExpression' && inner.arguments[0].property.name === 'queryClient')
+            inventory ??= { client: sources.initial.slice(inner.arguments[0].start, inner.arguments[0].end), key: sources.initial.slice(key.start, key.end) };
+        });
+        if (!inventory) return;
+        readyCases.push({ ready, event: node.discriminant.object.name, manager, inventory });
+      });
+      // Per thread, the six servers report ready one by one, and each report scheduled
+      // another inventory refetch (each one restarting every MCP server). Collapse a
+      // thread's reports into one trailing refetch, once per thread, skipped when the
+      // host inventory was fetched in the last minute or the window has no
+      // conversation for the thread.
+      record('skipHiddenThreadRefetch', 'initial', readyCases, ({ ready, event, manager, inventory }) => ({ start: ready.consequent[0].start, end: ready.consequent[0].start,
+        text: `${marker}if(${event}.params?.threadId!=null){const ppThread=${event}.params.threadId,ppKnown=typeof ${manager}.getConversation!=="function"||${manager}.getConversation(ppThread)!=null,` +
+          `ppState=globalThis.__codexPPMcpReady??={done:new Set,timers:new Map};` +
+          `if(!ppKnown)break;if(${event}.params.status===\`ready\`){if(ppState.done.has(ppThread))break;clearTimeout(ppState.timers.get(ppThread));` +
+          `ppState.timers.set(ppThread,setTimeout(()=>{ppState.timers.delete(ppThread);ppState.done.size>500&&ppState.done.clear();ppState.done.add(ppThread);` +
+          // The host inventory is shared by every thread: a fetch in the last minute already covers this one.
+          `if((${inventory.client}.getQueryState(${inventory.key})?.dataUpdatedAt??0)>Date.now()-6e4)return;` +
+          `${ready.consequent.map(c => sources.initial.slice(c.start, c.end)).filter(t => !/^break;?$/.test(t)).join('')}},2e3));break}}` }));
+
       // Only in a module another edit recognised as ChatGPT's initial bundle.
       const recognised = Object.values(applied).includes('initial');
       if (firstStatement && recognised) {

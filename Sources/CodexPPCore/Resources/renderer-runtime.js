@@ -20,7 +20,7 @@
     const origin = performance.timeOrigin, stats = new Map(), slow = [], longTasks = [];
     try {
       new PerformanceObserver(list => {
-        for (const entry of list.getEntries()) if (longTasks.length < 2000) longTasks.push({ start: origin + entry.startTime, dur: entry.duration });
+        for (const entry of list.getEntries()) if (longTasks.length < 5000) longTasks.push({ start: origin + entry.startTime, dur: entry.duration });
       }).observe({ type: 'longtask', buffered: true });
     } catch {}
     // Animation-frame callbacks per requesting call site and per second: a
@@ -91,8 +91,10 @@
         }; } catch {}
         const now = Math.floor(performance.now() / 1000);
         const recentFrames = [...framesPerSecond].filter(([second]) => second >= now - 10).sort(([a], [b]) => a - b);
+        // Whole frame-rate timeline (seconds since page start), for long sessions such as a streamed turn.
+        const frameTimeline = [...framesPerSecond].sort(([a], [b]) => a - b).slice(-600);
         return { origin, stats: [...stats.values()], slow, longTasks, marks, gates, startup, resources, queries, animations, media,
-          frames: [...frames].sort((a, b) => b[1] - a[1]).slice(0, 15), recentFrames };
+          frames: [...frames].sort((a, b) => b[1] - a[1]).slice(0, 15), recentFrames, frameTimeline };
       }
     };
   }

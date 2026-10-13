@@ -136,6 +136,10 @@ Measured on ChatGPT build 20156 (patch v97), six alternating cold launches each,
 
 Summed RSS (7.9 GB vs 3.3 GB) overstates both, because shared pages count once per process. Every difference is significant (Mann–Whitney p ≈ 0.004).
 
+### Agent turns
+
+`scripts/process-sampler.py --out FILE --duration SECONDS` samples CPU (percent of one core) by process kind, every process ChatGPT and the agent spawn, and the memory footprint of the whole tree while a turn runs; the turn's own timeline is in `~/.codex/sessions/.../rollout-*.jsonl`. In a typical turn the model's generation is nearly all of the wall time. Two client costs stood out: the "Thinking" shimmer (a background-position animation that repaints the window every frame, about 17% of a core while the model thinks), and MCP churn. Each MCP inventory request (`mcpServerStatus/list`) starts every configured MCP server to list its tools, and each server of a new thread reporting ready used to trigger another one; Codex++ collapses those into one refetch per thread, skipped when the inventory is under a minute old.
+
 ### Idle cost: the blinking cursor
 
 Left alone in front, untouched, stock ChatGPT uses about 15–16% of a CPU core indefinitely (GPU process about 8%, renderer about 6.5%). Hiding the window or bringing another app forward drops it to about 3%. No CSS animation, `requestAnimationFrame` loop, video or canvas is running; the cost goes away when the composer's editor is hidden or the text-cursor blink is slowed. The cause is the focused composer's blinking caret: each blink, twice a second, makes Chromium produce a new frame of ChatGPT's translucent window, and those frames are expensive. Moving the editor onto its own compositor layer, hiding the caret with `caret-color` and forcing the opaque window surface did not help (the last removes about 2 points).
