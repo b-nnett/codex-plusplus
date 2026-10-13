@@ -115,7 +115,46 @@
 // deferDictationCues: the composer eagerly constructs an AudioContext and
 //   fetches and decodes three dictation sound cues at startup. The cue player
 //   creates them on first use, so the eager preload is dropped.
+
+// Compositor shimmer: ChatGPT's loading shimmer paints a gradient through the
+// text (background-clip:text) and steps its background-position, so every step
+// repaints the label and re-composites the window (about 17% of a core while a
+// turn is thinking). This draws the text once in the base colour and lays a
+// copy in the highlight colour over it, seen through a soft-edged window: the
+// window slides with transform and the copy slides back by the same amount, so
+// only the compositor moves layers. Same path, timing and colours as the
+// original. Labels that hold more than plain text keep the original shimmer.
+const compositorShimmer = String.raw`(()=>{try{
+if(typeof document==="undefined"||globalThis.__codexPPShimmer)return;globalThis.__codexPPShimmer=1;
+const ppSel=".loading-shimmer-pure-text,.loading-shimmer,.loading-shimmer-pure-text-inverted";
+const ppCss=":is(.loading-shimmer-pure-text,.loading-shimmer){--codexpp-base:var(--shimmer-text-secondary);--codexpp-hi:var(--shimmer-contrast);--codexpp-dur:var(--loading-shimmer-duration,var(--loading-shimmer-default-duration,2s));--codexpp-delay:0s;--codexpp-steps:48}"+
+".loading-shimmer-pure-text-inverted{--codexpp-base:var(--text-primary);--codexpp-hi:var(--text-quaternary);--codexpp-dur:5s;--codexpp-delay:.5s}"+
+"@keyframes codexpp-shimmer-mark{to{--codexpp-mark:1}}"+
+":is("+ppSel+")[data-codexpp-shimmer=on]{animation:codexpp-shimmer-mark 1ms 1!important;background:none!important;-webkit-text-fill-color:var(--codexpp-base)!important;position:relative}"+
+"@media (prefers-reduced-motion:no-preference){:root:not([data-reduced-motion=true]) :is("+ppSel+"):not([data-codexpp-shimmer]):not(.loading-shimmer:hover){animation-name:codexpp-shimmer-mark,loading-shimmer!important;animation-duration:1ms,var(--codexpp-dur)!important;animation-iteration-count:1,infinite!important}}"+
+".codexpp-shimmer{display:none}:is("+ppSel+")[data-codexpp-shimmer=on]>.codexpp-shimmer{display:block;position:absolute;inset:0;pointer-events:none;overflow:hidden;user-select:none}"+
+".codexpp-shimmer-window{position:absolute;top:0;bottom:0;left:0;width:50%;overflow:hidden;-webkit-mask-image:linear-gradient(to right,transparent 0%,#000 40%,#000 60%,transparent 100%);mask-image:linear-gradient(to right,transparent 0%,#000 40%,#000 60%,transparent 100%);"+
+"will-change:transform;transform:translateX(-100%);animation:codexpp-shimmer-window var(--codexpp-dur) steps(var(--codexpp-steps,48),end) var(--codexpp-delay) infinite}"+
+".loading-shimmer-pure-text-inverted .codexpp-shimmer-window,.loading-shimmer-pure-text-inverted .codexpp-shimmer-text{animation-timing-function:steps(120,end)}"+
+".codexpp-shimmer-text{position:absolute;top:0;left:0;width:200%;height:100%;box-sizing:border-box;white-space:inherit;-webkit-text-fill-color:var(--codexpp-hi);color:var(--codexpp-hi);"+
+"will-change:transform;transform:translateX(50%);animation:codexpp-shimmer-text var(--codexpp-dur) steps(var(--codexpp-steps,48),end) var(--codexpp-delay) infinite}"+
+"@keyframes codexpp-shimmer-window{from{transform:translateX(-100%)}to{transform:translateX(250%)}}@keyframes codexpp-shimmer-text{from{transform:translateX(50%)}to{transform:translateX(-125%)}}"+
+".loading-shimmer[data-codexpp-shimmer=on]:hover{-webkit-text-fill-color:var(--text-primary)!important}.loading-shimmer:hover>.codexpp-shimmer{display:none!important}"+
+"@media (prefers-reduced-motion:reduce){.codexpp-shimmer{display:none!important}}:root[data-reduced-motion=true] .codexpp-shimmer{display:none!important}"+
+"@media (prefers-reduced-motion:reduce){.motion-reduce\\:animate-none>.codexpp-shimmer{display:none!important}}";
+const ppStyle=document.createElement("style");ppStyle.textContent=ppCss;(document.head??document.documentElement).append(ppStyle);
+const ppText=el=>{let t="";for(const n of el.childNodes){if(n.nodeType===3)t+=n.data;else if(!(n.nodeType===1&&n.classList.contains("codexpp-shimmer")))return null}return t};
+const ppAttach=el=>{if(el.dataset.codexppShimmer)return;const text=ppText(el);if(text==null||!text.trim()){el.dataset.codexppShimmer="off";return}
+const overlay=document.createElement("span"),win=document.createElement("span"),copy=document.createElement("span");
+overlay.className="codexpp-shimmer";overlay.setAttribute("aria-hidden","true");win.className="codexpp-shimmer-window";copy.className="codexpp-shimmer-text";
+const cs=getComputedStyle(el);copy.style.padding=cs.padding;copy.textContent=text;win.append(copy);overlay.append(win);el.append(overlay);el.dataset.codexppShimmer="on";
+new MutationObserver(()=>{const next=ppText(el);if(next==null||!next.trim()){overlay.remove();el.dataset.codexppShimmer="off";return}if(next!==copy.textContent)copy.textContent=next;if(overlay.parentNode!==el)el.append(overlay)})
+.observe(el,{childList:true,characterData:true,subtree:true})};
+document.addEventListener("animationstart",e=>{if(e.animationName==="codexpp-shimmer-mark"&&e.target instanceof Element&&e.target.matches(ppSel))ppAttach(e.target)},true);
+}catch{}})();`;
+
 globalThis.CodexPPStartupAdapter = Object.freeze({
+  compositorShimmer,
   adapt(input) {
     const marker = '/*codexpp:startup*/';
     const parse = source => acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
@@ -409,7 +448,9 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `ppFrame=requestAnimationFrame(()=>ppRoot.setAttribute("data-codexpp-caret-blink",""))};` +
           `for(const ppEvent of["keydown","pointerdown","focusin"])addEventListener(ppEvent,ppWake,!0)}catch{}})();` });
         applied.caretBlinkTimeout = 'initial';
-      } else skipped.caretBlinkTimeout = firstStatement ? 'initial bundle not recognised' : 'module not found';
+        edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
+        applied.compositorShimmer = 'initial';
+      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = firstStatement ? 'initial bundle not recognised' : 'module not found';
       if (firstStatement && applied.chunkTimings) {
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `const ppKey="codexpp.startupChunks.v2:"+import.meta.url;let ppList=null;try{ppList=JSON.parse(localStorage.getItem(ppKey)??"null")}catch{}` +

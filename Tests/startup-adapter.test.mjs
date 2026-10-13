@@ -43,7 +43,7 @@ function sharedHook(source, cached) {
 
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
-  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
+  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
   assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
@@ -377,7 +377,7 @@ test('the text cursor blinks only after activity where caret-animation is suppor
     };
     sandbox.globalThis = sandbox;
     vm.runInNewContext(patched.replace(/export /g, ''), sandbox);
-    return {attributes, styles, listeners, frames};
+    return {attributes, styles: styles.filter(text => text.includes('caret')), listeners, frames};
   };
   const off = run(false);
   assert.deepEqual([off.styles.length, Object.keys(off.listeners).length], [0, 0], 'unsupported: the native blink is left alone');
@@ -433,4 +433,26 @@ test('MCP ready reports refetch the inventory once per conversation, never for h
   ready('second-thread', 'a');
   for (const f of timers.splice(0)) f?.();
   assert.equal(log.length, 3, 'an inventory fetched in the last minute covers a new thread');
+});
+
+test('the compositor shimmer moves layers instead of repainting the text', () => {
+  const runtime = context.CodexPPStartupAdapter.compositorShimmer;
+  assert.match(runtime, /@keyframes codexpp-shimmer-window\{from\{transform:translateX\(-100%\)\}to\{transform:translateX\(250%\)\}\}/, 'same path as background-position -100% to 250% of a half-width band');
+  assert.match(runtime, /@keyframes codexpp-shimmer-text\{from\{transform:translateX\(50%\)\}to\{transform:translateX\(-125%\)\}\}/, 'the copy counter-moves so glyphs stay aligned');
+  assert.doesNotMatch(runtime.replace(/loading-shimmer!important/g, ''), /background-position/, 'nothing animates a painted property');
+  assert.match(runtime, /prefers-reduced-motion:reduce/);
+  // A plain-text label gets the overlay; a label with elements keeps the original shimmer.
+  const listeners = {}, appended = [];
+  const make = (tag, children = []) => ({tagName: tag, nodeType: 1, childNodes: children, dataset: {}, classList: {contains: c => c === 'codexpp-shimmer' && tag === 'overlay'},
+    style: {}, setAttribute() {}, append(...nodes) { this.childNodes.push(...nodes); appended.push(...nodes); }, matches: () => true, remove() {}});
+  const sandbox = {Element: Object, MutationObserver: class { observe() {} }, getComputedStyle: () => ({padding: '0px'}),
+    document: {head: {append() {}}, createElement: () => ({...make('overlay'), className: ''}), addEventListener: (type, f) => { listeners[type] = f; }}};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(runtime, sandbox);
+  const plain = make('div', [{nodeType: 3, data: 'Thinking'}]);
+  listeners.animationstart({animationName: 'codexpp-shimmer-mark', target: plain});
+  assert.equal(plain.dataset.codexppShimmer, 'on');
+  const rich = make('div', [{nodeType: 1, classList: {contains: () => false}}]);
+  listeners.animationstart({animationName: 'codexpp-shimmer-mark', target: rich});
+  assert.equal(rich.dataset.codexppShimmer, 'off', 'rich content falls back to the original shimmer');
 });

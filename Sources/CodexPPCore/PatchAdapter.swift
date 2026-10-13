@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 106
+    public static let revision = 107
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
@@ -141,6 +141,19 @@ public struct PatchAdapter: Codable, Sendable {
                 const ppCss = ppExperiments.css;
                 ppElectron.app.on('web-contents-created', (_event, contents) => {
                   contents.on('did-finish-load', () => { if (contents.getURL().startsWith('app://')) contents.insertCSS(ppCss).catch(() => {}); });
+                });
+              }
+              // A fixed "Thinking" label using the app's own shimmer classes, for A/B
+              // tests of the loading shimmer's cost: "original" or "compositor".
+              if (ppExperiments.demoShimmer === 'original' || ppExperiments.demoShimmer === 'compositor') {
+                const ppMode = ppExperiments.demoShimmer;
+                ppElectron.app.on('web-contents-created', (_event, contents) => {
+                  contents.on('did-finish-load', () => {
+                    if (!contents.getURL().startsWith('app://')) return;
+                    contents.executeJavaScript(`(()=>{const e=document.createElement('div');e.className='loading-shimmer-pure-text loading-shimmer-working';` +
+                      `${ppMode === 'original' ? "e.dataset.codexppShimmer='off';" : ''}e.textContent='Thinking';` +
+                      `Object.assign(e.style,{position:'fixed',left:'50%',top:'40%',zIndex:99,fontSize:'14px'});document.body.append(e)})()`, true).catch(() => {});
+                  });
                 });
               }
               if (ppExperiments.codeCache === true) {

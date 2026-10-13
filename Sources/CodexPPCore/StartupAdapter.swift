@@ -116,7 +116,7 @@ public struct StartupStatus: Equatable, Sendable {
         "startupRevealUnthrottled": "Immediate first render", "deferDictationCues": "Deferred dictation sounds",
         "learnedStartupPreload": "Learned chunk preload", "entryPreload": "Entry chunk preload",
         "shellEnvironmentCacheFirst": "Cached shell environment", "authStorageGateCacheFirst": "Cached auth storage flag",
-        "deferDockIcon": "Deferred Dock icon", "caretBlinkTimeout": "Idle text cursor", "lazyPageWindowPrewarm": "On-demand Page window",
+        "deferDockIcon": "Deferred Dock icon", "caretBlinkTimeout": "Idle text cursor", "compositorShimmer": "Compositor loading shimmer", "lazyPageWindowPrewarm": "On-demand Page window",
         "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window", "lazyCheckoutPricingPrewarm": "On-demand upgrade page", "lazyCheckoutCreditPrewarm": "On-demand credit checkout", "skipHiddenThreadRefetch": "No MCP refetch for hidden threads",
     ]
     public let active: [String]
