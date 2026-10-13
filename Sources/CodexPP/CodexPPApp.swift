@@ -170,6 +170,17 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if model.settings.extensionsPaused { add("Extensions paused", to: extensions, enabled: false) }
         extensions.addItem(.separator())
         add("Open in Finder", to: extensions, action: #selector(openExtensionFolder))
+        if let startup = model.startupStatus {
+            let total = startup.active.count + startup.missing.count
+            let speedups = submenu(startup.missing.isEmpty ? "Startup Speed-ups: All \(total) Active" : "Startup Speed-ups: \(startup.active.count) of \(total) Active", in: menu)
+            if !startup.missing.isEmpty {
+                menu.items.last?.image = warningIcon()
+                add("Not matched in this ChatGPT build:", to: speedups, enabled: false)
+                for item in startup.missing { add(item.name, to: speedups, enabled: false).toolTip = item.reason }
+                speedups.addItem(.separator())
+            }
+            for name in startup.active { add(name, to: speedups, enabled: false).state = .on }
+        }
         menu.addItem(.separator())
         add(model.settings.extensionsPaused ? "Restart ChatGPT with Extensions" : "Restart ChatGPT without Extensions", to: menu, action: #selector(restart), enabled: !model.busy)
         if model.hasPatchedApp {

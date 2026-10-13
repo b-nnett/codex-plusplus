@@ -64,6 +64,8 @@ final class HelperModel: ObservableObject {
             message = "Could not read the helper settings. They have been left untouched. \(error.localizedDescription)"
         }
     }
+    /// Startup speed-ups that matched the patched build, from its discovery report.
+    var startupStatus: StartupStatus? { hasPatchedApp ? StartupStatus.read(app: URL(fileURLWithPath: settings.appPath).resolvingSymlinksInPath()) : nil }
     var appName: String { URL(fileURLWithPath: settings.appPath).deletingPathExtension().lastPathComponent }
     var extensionErrorStatus: String? {
         guard !runtimeErrors.isEmpty else { return nil }

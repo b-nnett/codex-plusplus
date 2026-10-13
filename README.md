@@ -111,16 +111,36 @@ open 'dist/Codex++ Preview.app'
 python3 scripts/bench-startup.py --runs 15 --out /tmp/startup.json
 ```
 
-`--record DIR` films each measured launch (Screen Recording permission required); `scripts/launch-video.py` turns the recordings into clips cropped to the ChatGPT window, with a timer from the click and an "interactive" stamp at ChatGPT's own `app_start`, plus a side-by-side of each variant's median launch. `patched-traced` launches create `Diagnostics/trace.enable` (optionally holding `CODEXPP_TRACE_<PROBE>=0|1` lines) and write `Diagnostics/startup-trace-<pid>.json` with Codex++ spans, main-thread stalls, vendor IPC timings, renderer extension costs, loading-gate timings and a renderer CPU profile; the main-process profiler is opt-in (`CODEXPP_TRACE_MAIN_PROFILE=1`) because it can stall the app. `scripts/trace-report.py` ranks the worst offenders before `app_start`, and `scripts/startup-critical-path.py` rebuilds any launch's request timeline from ChatGPT's own logs.
+`--steady 25` also samples total CPU and resident memory (summed RSS) of every ChatGPT process 25 s after launch, after the background windows and the first wave of requests have settled. `--idle 120:240` reports the CPU the untouched app uses between those two points (percent of one core, by process kind), which is what an open app costs a laptop battery.
+
+`--record DIR` films each measured launch (Screen Recording permission required); `scripts/launch-video.py` turns the recordings into clips cropped to the ChatGPT window, with a timer from the click and an "interactive" stamp at ChatGPT's own `app_start`, plus a side-by-side of each variant's median launch. `patched-traced` launches create `Diagnostics/trace.enable` (optionally holding `CODEXPP_TRACE_<PROBE>=0|1` lines) and write `Diagnostics/startup-trace-<pid>.json` with Codex++ spans, main-thread stalls, vendor IPC timings, renderer extension costs, loading-gate timings and a renderer CPU profile; the main-process profiler is opt-in (`CODEXPP_TRACE_MAIN_PROFILE=1`) because it can stall the app. `scripts/trace-report.py` ranks the worst offenders before `app_start` and sums the visible window's long tasks in the 5 s after it (jank once interactive), and `scripts/startup-critical-path.py` rebuilds any launch's request timeline from ChatGPT's own logs.
 
 ### Startup fast path
 
-An optional AST adapter (`startup-adapter.js`) shortens the stock startup path; `Contents/Resources/codexpp-startup-discovery.json` lists which edits matched. For ChatGPT sign-ins the app normally fetches a Statsig bootstrap payload from OpenAI before rendering anything but a spinner (about a second on a good network, many seconds on a poor one). Codex++ keeps the last payload for the same identity (Statsig key, app version, device, user, account, email) in IndexedDB, builds the client from it immediately, and applies the fresh payload when the request completes. It also ends Statsig's async loading state once cached values are live and drops the eager dictation-cue `AudioContext` preload. A first launch, another account or app version, or an unrecognised build starts exactly as unpatched.
+An optional AST adapter (`startup-adapter.js`) shortens the stock startup path; `Contents/Resources/codexpp-startup-discovery.json` lists which edits matched. For ChatGPT sign-ins the app normally fetches a Statsig bootstrap payload from OpenAI before rendering anything but a spinner (about a second on a good network, many seconds on a poor one). Codex++ keeps the last payload for the same identity (Statsig key, app version, device, user, account, email) in IndexedDB, builds the client from it immediately, and applies the fresh payload when the request completes. It also ends Statsig's async loading state once cached values are live and drops the eager dictation-cue `AudioContext` preload. ChatGPT also boots hidden copies of the app 3–13 s after launch so that a new Page window, the avatar overlay and the hotkey window open instantly, plus an empty detached-window shell. Each copy costs 0.5–1 GB and 1–3 s of CPU and re-runs about 100 startup requests. Codex++ skips those prewarms, so each window is created the first time its feature opens (about a second slower that once). Measured 25 s after launch, this halves CPU (44 s → 22.5 s) and cuts resident memory by 45% (8.0 GB → 4.4 GB). A first launch, another account or app version, or an unrecognised build starts exactly as unpatched.
 
 ```sh
 python3 scripts/bench-startup.py --variants original,patched --runs 5 --record dist/launches --out dist/launches/bench.json
 python3 scripts/launch-video.py dist/launches/bench.json
 ```
+
+Measured on ChatGPT build 20156 (patch v85), six alternating cold launches each, `bench-startup.py --variants original,patched --runs 6 --steady 25 --idle 45:105`:
+
+| | Stock | Codex++ | Change |
+|---|---|---|---|
+| Click to interactive (home and sidebar ready) | 4.60 s | 2.31 s | −50% |
+| CPU used in the first 25 s | 46.1 s | 21.1 s | −54% |
+| Resident memory at 25 s (summed RSS) | 8.0 GB | 4.1 GB | −49% |
+| Processes at 25 s | 29 | 23 | −6 |
+| Idle CPU, focused and untouched | 18.2% of a core | 4.2% | −77% |
+
+Every difference is significant (Mann–Whitney p ≈ 0.004).
+
+### Idle cost: the blinking cursor
+
+Left alone in front, untouched, stock ChatGPT uses about 15–16% of a CPU core indefinitely (GPU process about 8%, renderer about 6.5%). Hiding the window or bringing another app forward drops it to about 3%. No CSS animation, `requestAnimationFrame` loop, video or canvas is running; the cost goes away when the composer's editor is hidden or the text-cursor blink is slowed. The cause is the focused composer's blinking caret: each blink, twice a second, makes Chromium produce a new frame of ChatGPT's translucent window, and those frames are expensive. Moving the editor onto its own compositor layer, hiding the caret with `caret-color` and forcing the opaque window surface did not help (the last removes about 2 points).
+
+Codex++ takes the blink over where Chromium supports `caret-animation: manual` (`caretBlinkTimeout`): the caret blinks for about 5 s after typing, a click or focus, then stays steady, the same idea as GTK's cursor blink timeout. With Reduce Motion it never blinks. An untouched, focused window then idles at about 3–4% of a core. `bench-startup.py --idle 45:105` measures it; idle samples must keep ChatGPT frontmost, because an unfocused window does not blink.
 
 The default suite includes a simulated Appshot contract test. It pins the MCP initialization shape, signed-runtime environment, exact elicitation scope, payload limits, renderer update sequence, and fail-closed behavior for changed server identities or response shapes. During review of a new ChatGPT build, run the same bridge against its bundled signed runtime and an open test app:
 

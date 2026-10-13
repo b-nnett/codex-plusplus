@@ -143,7 +143,7 @@
     contents.on('render-process-gone', (_e, details) => note('render-process-gone', {reason: details?.reason, exitCode: details?.exitCode}));
     contents.on('did-fail-load', (_e, code, description, url, isMainFrame) => note('did-fail-load', {code, description, isMainFrame, url: String(url).slice(0, 80)}));
     contents.on('unresponsive', () => note('unresponsive', {}));
-    contents.on('console-message', (_e, level, message) => { if (level >= 3 && failures.length < 200) failures.push({name: 'console-error', at: now(), webContentsId: contents.id, message: String(message).slice(0, 300)}); });
+    contents.on('console-message', (_e, level, message, line, sourceId) => { if (level >= 3 && failures.length < 200) failures.push({name: 'console-error', at: now(), webContentsId: contents.id, message: String(message).slice(0, 300), source: `${String(sourceId ?? '').slice(0, 200)}:${line ?? ''}`}); });
   });
 
   // Renderer CPU profiles of app windows through the in-process debugger API.

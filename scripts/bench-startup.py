@@ -49,13 +49,13 @@ def cpu_seconds(text):
     return total + (int(days) * 86400 if days else 0)
 
 
-def processes(prefixes):
-    out = subprocess.run(["ps", "-axo", "pid=,time=,command="], capture_output=True, text=True).stdout
+def processes(prefixes, rss=False):
+    out = subprocess.run(["ps", "-axo", "pid=,time=,rss=,command="], capture_output=True, text=True).stdout
     found = []
     for line in out.splitlines():
-        pid, cpu, cmd = line.split(None, 2)
+        pid, cpu, kb, cmd = line.split(None, 3)
         if any(cmd.startswith(p + "/") for p in prefixes):
-            found.append((int(pid), cpu_seconds(cpu), cmd))
+            found.append((int(pid), cpu_seconds(cpu), cmd, int(kb) / 1024) if rss else (int(pid), cpu_seconds(cpu), cmd))
     return found
 
 
@@ -239,8 +239,43 @@ def measure(bundle, label, args, env=(), recording=None):
                            "window": window_bounds(result["pid"]) if result["pid"] else None}
         time.sleep(2)
         recorder.stop()
+    if args.steady:
+        # Steady state: total CPU and resident memory (summed RSS, so shared
+        # pages count once per process) a fixed time after launch.
+        time.sleep(max(0, t0 + args.steady - time.time()))
+        procs = processes([bundle], rss=True)
+        result["steady_cpu_s"] = round(sum(p[1] for p in procs), 2)
+        result["steady_rss_mb"] = round(sum(p[3] for p in procs))
+        result["steady_processes"] = len(procs)
+    if args.idle:
+        # Idle cost: CPU used between two points after launch, with nobody
+        # touching the app, as a percentage of one core, per process kind.
+        start, end = args.idle
+        time.sleep(max(0, t0 + start - time.time()))
+        before = {p[0]: (p[1], p[2]) for p in processes([bundle])}
+        time.sleep(max(0, t0 + end - time.time()))
+        after = {p[0]: (p[1], p[2]) for p in processes([bundle])}
+        kinds = {}
+        for pid, (cpu, cmd) in after.items():
+            kind = process_kind(cmd)
+            kinds[kind] = kinds.get(kind, 0) + cpu - before.get(pid, (0, cmd))[0]
+        result["idle_cpu_pct"] = round(sum(kinds.values()) / (end - start) * 100, 2)
+        result["idle_by_kind"] = {k: round(v / (end - start) * 100, 2) for k, v in sorted(kinds.items(), key=lambda kv: -kv[1])}
     time.sleep(args.linger)
     return result
+
+
+def process_kind(cmd):
+    exe = cmd.split(" --")[0]
+    if exe.endswith("/Contents/MacOS/ChatGPT"):
+        return "main"
+    for flag in ("--type=renderer", "--type=gpu-process"):
+        if flag in cmd:
+            return flag.split("=")[1]
+    util = re.search(r"--utility-sub-type=([\w.]+)", cmd)
+    if util:
+        return "utility " + util.group(1).split(".")[0]
+    return os.path.basename(exe.split(" ")[0]) or exe[:40]
 
 
 METRICS = [("wall_tti_ms", lambda r: r["wall_tti_ms"]),
@@ -248,6 +283,10 @@ METRICS = [("wall_tti_ms", lambda r: r["wall_tti_ms"]),
            ("network_phase_ms", lambda r: r["network_phase_ms"]),
            ("app_cpu_s @app_start", lambda r: r["app_cpu_s"]),
            ("helper_cpu_s", lambda r: r["helper_cpu_s"]),
+           ("steady_cpu_s", lambda r: r.get("steady_cpu_s")),
+           ("steady_rss_mb", lambda r: r.get("steady_rss_mb")),
+           ("steady_processes", lambda r: r.get("steady_processes")),
+           ("idle_cpu_pct", lambda r: r.get("idle_cpu_pct")),
            ("app_processes", lambda r: r["app_processes"]),
            ("process_to_preload_ms", lambda r: r["process_to_preload_ms"]),
            ("ready_to_show_ms", lambda r: r["ready_to_show_ms"]),
@@ -277,7 +316,7 @@ def summarize(results, variants):
         print(f"{name:24} {cells}{deltas}")
     print()
     for v in others:
-        for metric in ("wall_tti_ms", "local_ms (preload+rr)", "network_phase_ms", "app_cpu_s @app_start"):
+        for metric in ("wall_tti_ms", "local_ms (preload+rr)", "network_phase_ms", "app_cpu_s @app_start", "steady_cpu_s", "steady_rss_mb", "idle_cpu_pct"):
             if metric in summary:
                 summary.setdefault("tests", {})[f"{v} vs {base}: {metric}"] = mann_whitney(summary[metric][base]["values"], summary[metric][v]["values"], f"{v} vs {base}: {metric}")
     errors = [r for r in results if "error" in r]
@@ -392,6 +431,8 @@ def main():
     ap.add_argument("--runs", type=int, default=10, help="measured runs per variant")
     ap.add_argument("--warmup", type=int, default=1, help="discarded runs per variant")
     ap.add_argument("--settle", type=float, default=8, help="idle seconds before each launch")
+    ap.add_argument("--idle", type=lambda v: tuple(float(x) for x in v.split(":")), help="START:END seconds after launch; report CPU used in between (percent of one core)")
+    ap.add_argument("--steady", type=float, default=0, help="also sample total CPU and memory this many seconds after launch")
     ap.add_argument("--linger", type=float, default=4, help="seconds to keep the app open after app_start")
     ap.add_argument("--timeout", type=float, default=90)
     ap.add_argument("--helper", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "dist", "Codex++.app"))
@@ -464,7 +505,7 @@ def main():
             print(f"[{n:2}/{len(order)}] {variant:14} discarded: window was backgrounded for {r['background_ms']:.0f} ms; retrying", flush=True)
             r["error"] = "backgrounded"
         tag = "warmup" if warm else "run"
-        detail = r.get("error") or f"wall TTI {r['wall_tti_ms']:.0f} ms, local {r['local_ms']:.0f}, network {r['network_phase_ms']:.0f}, cpu {r['app_cpu_s']:.1f}s (+helper {r['helper_cpu_s']:.2f}s)"
+        detail = r.get("error") or f"wall TTI {r['wall_tti_ms']:.0f} ms, local {r['local_ms']:.0f}, network {r['network_phase_ms']:.0f}, cpu {r['app_cpu_s']:.1f}s (+helper {r['helper_cpu_s']:.2f}s)" + (f", @steady cpu {r['steady_cpu_s']:.1f}s rss {r['steady_rss_mb']} MB x{r['steady_processes']}" if r.get("steady_cpu_s") is not None else "") + (f", idle {r['idle_cpu_pct']:.1f}% {dict(list(r['idle_by_kind'].items())[:4])}" if r.get("idle_cpu_pct") is not None else "")
         print(f"[{n:2}/{len(order)}] {tag:6} {variant:14} {detail}", flush=True)
         if variant.startswith("patched") and r.get("codexpp_boot_after_launch") is False:
             print("        warning: Codex++ boot.json was not refreshed by this launch", flush=True)

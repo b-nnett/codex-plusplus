@@ -37,6 +37,11 @@
 //   and platform, and save the fresh answer for the next launch (only answers
 //   recognised from the network are saved). No saved answer means the
 //   original wait.
+// caretBlinkTimeout: Chromium's own text-cursor blink repaints ChatGPT's
+//   translucent window twice a second, about 12% of a CPU core whenever the app
+//   is focused, even untouched. Where CSS caret-animation is supported, take
+//   the blink over: blink for 5 s after typing, a click or focus, then hold the
+//   cursor steady (always steady with Reduce Motion), like GTK's blink timeout.
 // learnedStartupPreload: when the initial bundle starts evaluating, add
 //   <link rel=modulepreload> for the chunks the previous launch of this build
 //   requested in its first 1.5 s (at most 40; fetched and compiled, not run),
@@ -45,6 +50,16 @@
 //   preference synchronously (image decode plus app.dock.setIcon, about 50 ms)
 //   before the first window exists. Apply it 3 s later instead; theme-change
 //   updates are unchanged, and the default preference looks the same.
+// lazyPageWindowPrewarm, lazyAvatarOverlayPrewarm, lazyHotkeyWindowPrewarm,
+//   lazyDetachedWindowPrewarm (main process): ChatGPT boots hidden copies of
+//   the app for new Page windows, the avatar overlay and the hotkey window 3-13 s
+//   after launch (each 0.5-1 GB and 1-3 s of CPU, plus ~100 app-server
+//   requests), and a hidden detached-window shell. Skip the prewarm; each
+//   feature creates its window when first opened instead.
+// queryTimings (diagnostic): TanStack QueryCache.build stamps each new query
+//   with its creation time and registers the cache in
+//   globalThis.__codexPPQueryCaches, so traced launches can list when each
+//   query was created and when its data arrived.
 // appGateReasons (diagnostic): the component that holds the window until auth,
 //   app info, platform and the query client are loaded records which of its
 //   four flags were still set on each blocking render, in
@@ -170,6 +185,23 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           sources.shared.slice(fn.end, node.end - 1).replace(/^,/, '') +
           `,...(()=>{try{const ${store},ppStored=localStorage.getItem(ppSettingsKey);return ppStored==null?{}:{initialData:JSON.parse(ppStored),initialDataUpdatedAt:0}}catch{return{}}})()` };
       });
+
+      // build(client, options, state) { ... a || (a = new Query({...}), this.add(a)), a }
+      const builds = [];
+      walk(trees.shared, node => {
+        if (node.type !== 'MethodDefinition' || node.key.name !== 'build' || node.value.params.length !== 3) return;
+        const text = sources.shared.slice(node.start, node.end);
+        if (!text.includes('defaultQueryOptions(') || !text.includes('getQueryDefaults(')) return;
+        walk(node.value.body, inner => {
+          if (inner.type === 'SequenceExpression' && inner.expressions.length === 2 && inner.expressions[0].type === 'AssignmentExpression' &&
+              inner.expressions[0].right.type === 'NewExpression' && inner.expressions[1].type === 'CallExpression' &&
+              inner.expressions[1].callee.type === 'MemberExpression' && inner.expressions[1].callee.property.name === 'add') {
+            builds.push({ assign: inner.expressions[0], query: inner.expressions[0].left.name });
+          }
+        });
+      });
+      record('queryTimings', 'shared', builds, ({ assign, query }) => ({ start: assign.end, end: assign.end,
+        text: `,${marker}${query}.__codexPPCreated=performance.now(),(globalThis.__codexPPQueryCaches??=new Set).add(this)` }));
 
       // Vite's __vitePreload(importThunk, deps, importerUrl): it links deps
       // with <link rel=modulepreload> (csp-nonce aware) before importing.
@@ -312,6 +344,21 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
       // First statement of the initial bundle: learned preload of startup chunks.
       const firstStatement = trees.initial.body.find(statement => statement.type !== 'ImportDeclaration');
+      // Only in a module another edit recognised as ChatGPT's initial bundle.
+      const recognised = Object.values(applied).includes('initial');
+      if (firstStatement && recognised) {
+        const fields = ':is([contenteditable],textarea,input)';
+        const css = `${fields}{caret-animation:manual}@media (prefers-reduced-motion:no-preference){:root[data-codexpp-caret-blink] ${fields}:focus{` +
+          `animation:codexpp-caret-blink 1.06s step-end 5}}@keyframes codexpp-caret-blink{50%{caret-color:transparent}}`;
+        edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
+          `if(typeof document==="undefined"||!globalThis.CSS?.supports?.("caret-animation","manual"))return;` +
+          `const ppStyle=document.createElement("style");ppStyle.textContent=${JSON.stringify(css)};(document.head??document.documentElement).append(ppStyle);` +
+          // Restart the blink on activity: drop the attribute, set it again next frame.
+          `const ppRoot=document.documentElement;let ppFrame=0;const ppWake=()=>{ppRoot.removeAttribute("data-codexpp-caret-blink");cancelAnimationFrame(ppFrame);` +
+          `ppFrame=requestAnimationFrame(()=>ppRoot.setAttribute("data-codexpp-caret-blink",""))};` +
+          `for(const ppEvent of["keydown","pointerdown","focusin"])addEventListener(ppEvent,ppWake,!0)}catch{}})();` });
+        applied.caretBlinkTimeout = 'initial';
+      } else skipped.caretBlinkTimeout = firstStatement ? 'initial bundle not recognised' : 'module not found';
       if (firstStatement && applied.chunkTimings) {
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `const ppKey="codexpp.startupChunks.v2:"+import.meta.url;let ppList=null;try{ppList=JSON.parse(localStorage.getItem(ppKey)??"null")}catch{}` +
@@ -397,9 +444,40 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
             src.slice(node.start, node.end).includes('nativeTheme')) docks.push({ call });
       });
       record('deferDockIcon', 'main', docks, ({ call }) => ({ start: call.start, end: call.end, text: `${marker}setTimeout(${call.callee.name},3e3)` }));
+
+      // Hidden prewarmed windows: each method only prepares a window that the
+      // feature's own open path creates on demand, so returning early makes it lazy.
+      const prewarms = { lazyPageWindowPrewarm: [], lazyAvatarOverlayPrewarm: [], lazyHotkeyWindowPrewarm: [], lazyDetachedWindowPrewarm: [] };
+      walk(trees.main, node => {
+        if (node.type !== 'MethodDefinition' || node.key.type !== 'Identifier' || node.value.body.body.length === 0) return;
+        const fn = node.value, text = src.slice(fn.body.start, fn.body.end);
+        // fill(){this.enabled&&...&&this.slot.prewarm().catch(e=>{...`Could not prewarm Page window`...})}
+        if (node.key.name === 'fill' && fn.params.length === 0 && text.includes('.slot.prewarm()') && text.includes('Could not prewarm Page window'))
+          prewarms.lazyPageWindowPrewarm.push(fn);
+        // async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null||...)return;...await this.ensureWindow(t)...}
+        if (node.key.name === 'prewarm' && fn.async && fn.params.length === 1 && text.includes('this.openingWindowPromise') && text.includes('this.ensureWindow('))
+          prewarms.lazyAvatarOverlayPrewarm.push(fn);
+        // async prewarm(){...await this.ensureHomeWindow(),...&&await this.ensureThreadWindow()}
+        if (node.key.name === 'prewarm' && fn.async && fn.params.length === 0 && text.includes('this.ensureHomeWindow()') && text.includes('this.ensureThreadWindow()'))
+          prewarms.lazyHotkeyWindowPrewarm.push(fn);
+        // scheduleFill(){...this.fillTimer=setTimeout(()=>{...this.slot.prewarm().catch(()=>{})},2e3)}
+        if (node.key.name === 'scheduleFill' && fn.params.length === 0 && text.includes('this.fillTimer') && text.includes('this.slot.prewarm()'))
+          prewarms.lazyDetachedWindowPrewarm.push(fn);
+      });
+      // shouldUseOpaqueWindowSurface(appearance,bounds,focused){return this.shouldAlwaysUseOpaqueWindowSurface(e)||...}
+      // Experiment hook only: Diagnostics/experiments.json {"opaqueWindows":true} forces the opaque surface.
+      const surfaces = [];
+      walk(trees.main, node => {
+        if (node.type === 'MethodDefinition' && node.key.type === 'Identifier' && node.key.name === 'shouldUseOpaqueWindowSurface' &&
+            node.value.params.length === 3 && src.slice(node.value.body.start, node.value.body.end).includes('this.shouldAlwaysUseOpaqueWindowSurface(')) surfaces.push(node.value);
+      });
+      record('opaqueSurfaceExperiment', 'main', surfaces, fn => ({ start: fn.body.start + 1, end: fn.body.start + 1, text: `${marker}if(globalThis.__codexPPOpaqueWindows===true)return!0;` }));
+      for (const [name, matches] of Object.entries(prewarms))
+        record(name, 'main', matches, fn => ({ start: fn.body.start + 1, end: fn.body.start + 1, text: `${marker}return;` }));
     } else {
       skipped.authStorageGateCacheFirst = 'module not found';
       skipped.deferDockIcon = 'module not found';
+      skipped.opaqueSurfaceExperiment = skipped.lazyPageWindowPrewarm = skipped.lazyAvatarOverlayPrewarm = skipped.lazyHotkeyWindowPrewarm = skipped.lazyDetachedWindowPrewarm = 'module not found';
     }
 
     if (trees.requirements) {

@@ -23,6 +23,21 @@
         for (const entry of list.getEntries()) if (longTasks.length < 2000) longTasks.push({ start: origin + entry.startTime, dur: entry.duration });
       }).observe({ type: 'longtask', buffered: true });
     } catch {}
+    // Animation-frame callbacks per requesting call site and per second: a
+    // loop that keeps scheduling frames keeps the GPU busy while idle.
+    const frames = new Map(), framesPerSecond = new Map();
+    try {
+      const request = window.requestAnimationFrame.bind(window);
+      window.requestAnimationFrame = function codexPPTracedFrame(callback) {
+        const site = (new Error().stack ?? '').split('\n').slice(2, 4).map(line => line.trim().replace(/^at /, '').slice(0, 140)).join(' < ');
+        return request(time => {
+          const second = Math.floor(performance.now() / 1000);
+          if (frames.size < 200 || frames.has(site)) frames.set(site, (frames.get(site) ?? 0) + 1);
+          framesPerSecond.set(second, (framesPerSecond.get(second) ?? 0) + 1);
+          return callback(time);
+        });
+      };
+    } catch {}
     tracer = {
       record(name, start, end) {
         const dur = end - start, stat = stats.get(name) || { name, count: 0, totalMs: 0, maxMs: 0, firstStart: origin + start };
@@ -41,7 +56,35 @@
           try { const url = new URL(entry.name); name = url.protocol === 'app:' ? url.pathname : `${url.protocol}//${url.host}`; } catch {}
           return { name, type: entry.initiatorType, start: entry.startTime, end: entry.responseEnd, size: entry.encodedBodySize || 0 };
         });
-        return { origin, stats: [...stats.values()], slow, longTasks, marks, gates, startup, resources };
+        // Query waterfall from the startup adapter's QueryCache stamps (keys are app identifiers).
+        const queries = [];
+        for (const cache of globalThis.__codexPPQueryCaches ?? []) {
+          for (const query of cache.getAll?.() ?? []) {
+            if (queries.length >= 400) break;
+            queries.push({ key: JSON.stringify(query.queryKey).slice(0, 120), created: query.__codexPPCreated ?? null,
+              updated: query.state?.dataUpdatedAt ? query.state.dataUpdatedAt - origin : null, status: query.state?.status, fetchStatus: query.state?.fetchStatus });
+          }
+        }
+        // Animations still running when the trace is collected (idle GPU cost): name and element only.
+        const describe = el => el ? `${el.tagName?.toLowerCase() ?? ''}${el.id ? '#' + el.id : ''}${typeof el.className === 'string' && el.className ? '.' + el.className.trim().split(/\s+/).slice(0, 4).join('.') : ''}`.slice(0, 160) : null;
+        const animations = (document.getAnimations?.() ?? []).filter(animation => animation.playState === 'running').slice(0, 50).map(animation => ({
+          name: animation.animationName ?? animation.transitionProperty ?? animation.constructor?.name ?? null,
+          infinite: animation.effect?.getTiming?.().iterations === Infinity,
+          target: describe(animation.effect?.target),
+          visible: (() => { const r = animation.effect?.target?.getBoundingClientRect?.(); return r ? r.width > 0 && r.height > 0 : null; })(),
+        }));
+        let media = null;
+        try { media = {
+          playingVideos: [...document.querySelectorAll('video')].filter(video => !video.paused).map(video => describe(video)),
+          canvases: document.querySelectorAll('canvas').length,
+          animatedImages: [...document.images].filter(image => /\.(gif|webp|apng)(\?|$)/i.test(image.currentSrc)).map(image => describe(image)).slice(0, 20),
+          visibility: document.visibilityState,
+          jsHeapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
+        }; } catch {}
+        const now = Math.floor(performance.now() / 1000);
+        const recentFrames = [...framesPerSecond].filter(([second]) => second >= now - 10).sort(([a], [b]) => a - b);
+        return { origin, stats: [...stats.values()], slow, longTasks, marks, gates, startup, resources, queries, animations, media,
+          frames: [...frames].sort((a, b) => b[1] - a[1]).slice(0, 15), recentFrames };
       }
     };
   }

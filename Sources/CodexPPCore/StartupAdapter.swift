@@ -84,7 +84,39 @@ public enum StartupAdapter {
     }
 }
 
-struct StartupDiscoveryReport: Encodable {
+struct StartupDiscoveryReport: Codable {
     let applied: [String: String]
     let skipped: [String: String]
+}
+
+/// Which startup speed-ups matched the installed ChatGPT build, read from the
+/// discovery report written at patch time. Diagnostic edits are not counted.
+public struct StartupStatus: Equatable, Sendable {
+    public static let reportPath = "Contents/Resources/codexpp-startup-discovery.json"
+    static let diagnostics: Set<String> = ["appGateReasons", "chunkTimings", "loadingGateTimings", "opaqueSurfaceExperiment", "policyPhaseTimings", "queryTimings"]
+    static let labels: [String: String] = [
+        "statsigCacheFirst": "Cached feature flags", "statsigUserCacheFirst": "Cached feature flags for the signed-in user",
+        "statsigBootstrapCacheFirst": "Cached sign-in bootstrap", "settingsCacheFirst": "Cached settings",
+        "startupRevealUnthrottled": "Immediate first render", "deferDictationCues": "Deferred dictation sounds",
+        "learnedStartupPreload": "Learned chunk preload", "entryPreload": "Entry chunk preload",
+        "shellEnvironmentCacheFirst": "Cached shell environment", "authStorageGateCacheFirst": "Cached auth storage flag",
+        "deferDockIcon": "Deferred Dock icon", "caretBlinkTimeout": "Idle text cursor", "lazyPageWindowPrewarm": "On-demand Page window",
+        "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window",
+    ]
+    public let active: [String]
+    /// Speed-ups that did not match this build, with the adapter's reason.
+    public let missing: [(name: String, reason: String)]
+
+    public static func read(app: URL) -> StartupStatus? {
+        guard let data = try? Data(contentsOf: app.appendingPathComponent(reportPath)),
+              let report = try? JSONDecoder().decode(StartupDiscoveryReport.self, from: data) else { return nil }
+        let active = report.applied.keys.filter { !diagnostics.contains($0) }.map(label).sorted()
+        let missing = report.skipped.filter { !diagnostics.contains($0.key) }.map { (name: label($0.key), reason: $0.value) }.sorted { $0.name < $1.name }
+        return StartupStatus(active: active, missing: missing)
+    }
+    static func label(_ key: String) -> String { labels[key] ?? key }
+
+    public static func == (a: StartupStatus, b: StartupStatus) -> Bool {
+        a.active == b.active && a.missing.map(\.name) == b.missing.map(\.name) && a.missing.map(\.reason) == b.missing.map(\.reason)
+    }
 }

@@ -43,8 +43,8 @@ function sharedHook(source, cached) {
 
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
-  assert.deepEqual(Object.keys(result.applied).sort(), ['deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'learnedStartupPreload', 'policyPhaseTimings', 'settingsCacheFirst', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -337,4 +337,56 @@ test('the auth storage rollout flag starts from the last network answer', async 
   const third = await run('offline', 30);
   assert.deepEqual(third.result, [], 'the flag change applies on the next launch');
   assert.match(files.get('/data/codexpp-auth-storage-gate.json'), /"overrides":\[\]/, 'a network failure never overwrites a confirmed answer');
+});
+
+test('hidden window prewarms are skipped and each window opens on demand', async () => {
+  const main = 'class PageWarm{enabled=!0;made=0;slot={prewarm:async()=>{this.made++}};fill(){this.enabled&&this.slot.prewarm().catch(e=>{log(`Could not prewarm Page window`,e)})}' +
+      'async openNewPage(){this.made++;this.fill();return!0}}' +
+    'class Overlay{window=null;openingWindowPromise=null;made=0;async ensureWindow(){return this.window??=(this.made++,{})}' +
+      'async prewarm(e){if(this.window!=null||this.openingWindowPromise!=null)return;await this.ensureWindow(e)}async open(){return this.ensureWindow()}}' +
+    'class Detached{fillTimer=null;made=0;slot={prewarm:async()=>{this.made++}};scheduleFill(){this.fillTimer=setTimeout(()=>{this.slot.prewarm().catch(()=>{})},1)}' +
+      'takeReady(){return null}async open(){this.takeReady()??this.made++}}' +
+    'class Hotkey{made=0;async ensureHomeWindow(){this.made++}async ensureThreadWindow(){this.made++}' +
+      'async prewarm(){await this.ensureHomeWindow(),await this.ensureThreadWindow()}async showHome(){await this.ensureHomeWindow()}}' +
+    'globalThis.made=[PageWarm,Overlay,Hotkey,Detached];';
+  const {main: patched, applied} = adapt({main});
+  assert.deepEqual([applied.lazyPageWindowPrewarm, applied.lazyAvatarOverlayPrewarm, applied.lazyHotkeyWindowPrewarm, applied.lazyDetachedWindowPrewarm], ['main', 'main', 'main', 'main']);
+  const sandbox = {log() {}};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(patched, sandbox);
+  const [page, overlay, hotkey, detached] = sandbox.made.map(Class => new Class());
+  page.fill(); await overlay.prewarm({}); await hotkey.prewarm(); detached.scheduleFill(); await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual([page.made, overlay.made, hotkey.made, detached.made], [0, 0, 0, 0], 'nothing is created ahead of use');
+  await page.openNewPage(); await overlay.open(); await hotkey.showHome(); await detached.open();
+  assert.deepEqual([page.made, overlay.made, hotkey.made, detached.made], [1, 1, 1, 1], 'each feature still opens its window');
+  assert.throws(() => adapt({main: patched}), /already applied/);
+});
+
+test('the text cursor blinks only after activity where caret-animation is supported', () => {
+  const run = supported => {
+    const {initial: patched, applied} = adapt({initial});
+    assert.equal(applied.caretBlinkTimeout, 'initial');
+    const attributes = new Set(), styles = [], listeners = {}, frames = [];
+    const root = {setAttribute: name => attributes.add(name), removeAttribute: name => attributes.delete(name)};
+    const sandbox = {
+      CSS: {supports: (property, value) => supported && property === 'caret-animation' && value === 'manual'},
+      document: {documentElement: root, head: {append: node => styles.push(node.textContent)}, createElement: () => ({})},
+      addEventListener: (type, listener, capture) => { assert.equal(capture, true); listeners[type] = listener; },
+      requestAnimationFrame: callback => frames.push(callback), cancelAnimationFrame() {},
+      window: {setTimeout() {}},
+    };
+    sandbox.globalThis = sandbox;
+    vm.runInNewContext(patched.replace(/export /g, ''), sandbox);
+    return {attributes, styles, listeners, frames};
+  };
+  const off = run(false);
+  assert.deepEqual([off.styles.length, Object.keys(off.listeners).length], [0, 0], 'unsupported: the native blink is left alone');
+  const on = run(true);
+  assert.match(on.styles[0], /caret-animation:manual/);
+  assert.match(on.styles[0], /prefers-reduced-motion:no-preference/);
+  assert.deepEqual(Object.keys(on.listeners).sort(), ['focusin', 'keydown', 'pointerdown']);
+  assert.equal(on.attributes.size, 0, 'idle: steady cursor, no animation');
+  on.listeners.keydown();
+  on.frames.shift()();
+  assert.ok(on.attributes.has('data-codexpp-caret-blink'), 'typing restarts the blink');
 });

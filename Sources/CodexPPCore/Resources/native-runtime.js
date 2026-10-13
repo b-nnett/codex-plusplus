@@ -11,6 +11,7 @@
   const diagnosticsFile = path.join(diagnosticsDirectory, 'runtime.json');
   let disposed = false;
   let timer = null;
+  const watchers = [];
 
   function trustedFrame(frame) {
     try {
@@ -338,9 +339,22 @@
   trace.collector(() => Promise.all(appContents().map(contents => withTimeout(
     contents.executeJavaScript('globalThis.__codexPP?.trace?.()??null', true), 'An app window'
   ).then(report => report && {webContentsId:contents.id, page:new URL(contents.mainFrame.url).pathname,
+    route:(({search, hash}) => (search + hash).slice(0, 160))(new URL(contents.mainFrame.url)),
     visible:electron.BrowserWindow.fromWebContents(contents)?.isVisible?.() ?? null, ...report}, () => null)))
     .then(reports => reports.filter(Boolean)));
-  timer = setInterval(() => void poll(), 1000);
+  // Settings and extension edits poll at once through file watches, and a
+  // window load polls on its own; the heartbeat keeps the helper's diagnostics
+  // fresh (it treats ten seconds as disconnected) and catches a missed event.
+  // A one-second poll ran two scripts in every window forever, even idle.
+  for (const [target, options] of [[support, {}], [extensionsDirectory, {recursive:true}]]) {
+    try {
+      const watcher = fs.watch(target, options, () => void poll());
+      watcher.on?.('error', () => {});
+      watcher.unref?.();
+      watchers.push(watcher);
+    } catch {}
+  }
+  timer = setInterval(() => void poll(), 4000);
   timer.unref?.();
   void electron.app.whenReady().then(poll);
 
@@ -351,6 +365,7 @@
     dispose() {
       disposed = true;
       if (timer) clearInterval(timer);
+      for (const watcher of watchers.splice(0)) { try { watcher.close(); } catch {} }
       electron.app.removeListener('web-contents-created', created);
       for (const contents of appContents()) void contents.executeJavaScript('globalThis.__codexPP?.sync([]);globalThis.__codexPPBridge?.stop?.()', true).catch(() => {});
     }

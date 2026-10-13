@@ -11,8 +11,8 @@ final class StartupAdapterTests: XCTestCase {
     /// The JavaScriptCore fallback must agree with the Node adapter.
     func testInProcessFallbackAppliesAllFourEdits() throws {
         let output = try StartupAdapter.adaptInProcess(input: ["shared": shared, "initial": initial])
-        XCTAssertEqual(output.applied, ["statsigCacheFirst": "shared", "statsigUserCacheFirst": "initial", "deferDictationCues": "initial", "loadingGateTimings": "initial"])
-        XCTAssertEqual(output.skipped.keys.sorted(), ["appGateReasons", "authStorageGateCacheFirst", "chunkTimings", "deferDockIcon", "learnedStartupPreload", "policyPhaseTimings", "settingsCacheFirst", "startupRevealUnthrottled", "statsigBootstrapCacheFirst"])
+        XCTAssertEqual(output.applied, ["statsigCacheFirst": "shared", "statsigUserCacheFirst": "initial", "deferDictationCues": "initial", "loadingGateTimings": "initial", "caretBlinkTimeout": "initial"])
+        XCTAssertEqual(output.skipped.keys.sorted(), ["appGateReasons", "authStorageGateCacheFirst", "chunkTimings", "deferDockIcon", "lazyAvatarOverlayPrewarm", "lazyDetachedWindowPrewarm", "lazyHotkeyWindowPrewarm", "lazyPageWindowPrewarm", "learnedStartupPreload", "opaqueSurfaceExperiment", "policyPhaseTimings", "queryTimings", "settingsCacheFirst", "startupRevealUnthrottled", "statsigBootstrapCacheFirst"])
         XCTAssertTrue(output.shared?.contains("values_updated") == true)
         XCTAssertFalse(output.initial?.contains("window.setTimeout(()=>{try{Qpl()}") ?? true)
         XCTAssertThrowsError(try StartupAdapter.adaptInProcess(input: ["shared": output.shared!, "initial": initial]))
@@ -24,5 +24,19 @@ final class StartupAdapterTests: XCTestCase {
         XCTAssertNil(output.shared)
         XCTAssertNil(output.initial)
         XCTAssertEqual(output.skipped["statsigCacheFirst"], "expected one match, found 0")
+    }
+
+    func testStartupStatusCountsSpeedupsAndListsMisses() throws {
+        let app = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: app) }
+        XCTAssertNil(StartupStatus.read(app: app))
+        let report = app.appendingPathComponent(StartupStatus.reportPath)
+        try FileManager.default.createDirectory(at: report.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(StartupDiscoveryReport(applied: ["deferDockIcon": "main", "queryTimings": "shared"],
+                                                        skipped: ["settingsCacheFirst": "expected one match, found 0", "chunkTimings": "module not found"])).write(to: report)
+        let status = try XCTUnwrap(StartupStatus.read(app: app))
+        XCTAssertEqual(status.active, ["Deferred Dock icon"], "diagnostic edits are not counted")
+        XCTAssertEqual(status.missing.map(\.name), ["Cached settings"])
+        XCTAssertEqual(status.missing.first?.reason, "expected one match, found 0")
     }
 }

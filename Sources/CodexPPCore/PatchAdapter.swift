@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 71
+    public static let revision = 86
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
@@ -134,6 +134,14 @@ public struct PatchAdapter: Codable, Sendable {
               if (typeof ppExperiments.jsFlags === 'string' && /^(--[a-z0-9-]+(=[\\w.]+)?\\s*)+$/.test(ppExperiments.jsFlags.trim())) {
                 const ppFlags = [ppElectron.app.commandLine.getSwitchValue('js-flags'), ppExperiments.jsFlags.trim()].filter(Boolean).join(' ');
                 ppElectron.app.commandLine.appendSwitch('js-flags', ppFlags);
+              }
+              if (ppExperiments.opaqueWindows === true) globalThis.__codexPPOpaqueWindows = true;
+              // Experimental stylesheet for app windows (A/B tests of rendering costs).
+              if (typeof ppExperiments.css === 'string' && ppExperiments.css.length <= 4096) {
+                const ppCss = ppExperiments.css;
+                ppElectron.app.on('web-contents-created', (_event, contents) => {
+                  contents.on('did-finish-load', () => { if (contents.getURL().startsWith('app://')) contents.insertCSS(ppCss).catch(() => {}); });
+                });
               }
               if (ppExperiments.codeCache === true) {
                 const ppRegisterSchemes = ppElectron.protocol.registerSchemesAsPrivileged.bind(ppElectron.protocol);

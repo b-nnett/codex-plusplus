@@ -91,6 +91,9 @@ def attribute(blocks, spans):
     return out
 
 
+JANK_WINDOW_MS = 5000
+
+
 def analyze(trace):
     end = app_start_epoch_ms(trace["pid"])
     start = trace["processStart"]
@@ -160,6 +163,11 @@ def analyze(trace):
             row[0] += stat["count"]; row[1] += stat["totalMs"]; row[2] = max(row[2], stat["maxMs"])
     result["long_tasks"] = attribute(tasks, slow)
     result["long_task_total"] = sum(t["dur"] for t in tasks)
+    # Jank once interactive: the visible window's long tasks in the 5 s after
+    # app_start, when the user starts typing and scrolling.
+    after = [t for r in trace.get("renderers", []) if r.get("visible") and r.get("page") == "/index.html"
+             for t in r.get("longTasks", []) if end and end <= t["start"] < end + JANK_WINDOW_MS]
+    result["jank"] = {"total": sum(t["dur"] for t in after), "worst": max((t["dur"] for t in after), default=0.0), "count": len(after)} if end else None
     return result
 
 
@@ -219,6 +227,10 @@ def main():
 
     task_names = {name for r in runs for name in r["long_tasks"]}
     task_rows = sorted(((med([r["long_tasks"].get(name, 0.0) for r in runs]), name, 0, max(r["long_tasks"].get(name, 0.0) for r in runs)) for name in task_names), reverse=True)
+    jank = [r["jank"] for r in runs if r.get("jank")]
+    if jank:
+        print(f"== Jank in the {JANK_WINDOW_MS // 1000} s after app_start (visible window): median {med([j['total'] for j in jank]):.0f} ms blocked "
+              f"in {med([j['count'] for j in jank]):.0f} long task(s), worst task {max(j['worst'] for j in jank):.0f} ms\n")
     print(f"== Renderer long tasks before app_start (main window): median total {med([r['long_task_total'] for r in runs]):.1f} ms per launch")
     for value, name, _, worst in task_rows[:args.top]:
         print(f"   {value:12.1f} {worst:9.1f}          {name}")

@@ -153,3 +153,24 @@ test('overlapping polls coalesce and a hung window does not queue more calls', a
     f.runtime.dispose();
   } finally { f.cleanup(); }
 });
+
+test('a settings change reaches windows at once instead of waiting for the heartbeat', async () => {
+  const f = fixture();
+  try {
+    await f.runtime.poll();
+    assert.equal(f.renderer.executions, 1);
+    assert.match(source, /setInterval\(\(\) => void poll\(\), 4000\)/, 'the idle heartbeat is slow');
+    const file = path.join(f.support, 'settings.json');
+    const value = JSON.parse(fs.readFileSync(file));
+    // Replaced atomically, the way the helper writes it.
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({...value, extensionsPaused:true}));
+    fs.renameSync(`${file}.tmp`, file);
+    let diagnostic = null;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      diagnostic = JSON.parse(fs.readFileSync(path.join(f.support, 'Diagnostics', 'runtime.json')));
+      if (diagnostic.activeExtensions.length === 0) break;
+    }
+    assert.deepEqual(diagnostic.activeExtensions, [], 'paused within about a second, not four');
+  } finally { f.cleanup(); }
+});
