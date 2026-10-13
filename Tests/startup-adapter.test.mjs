@@ -44,7 +44,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -389,4 +389,17 @@ test('the text cursor blinks only after activity where caret-animation is suppor
   on.listeners.keydown();
   on.frames.shift()();
   assert.ok(on.attributes.has('data-codexpp-caret-blink'), 'typing restarts the blink');
+});
+
+test('checkout pages are rendered for their route, not prewarmed at launch', () => {
+  const checkout = 'export function le(route,gate,ge){let j=gate&&cfg.get(`use_embedded_checkout`,!1)?ge({url:1}):null;return route??j}' +
+    'export function W(S,gate){if(!S&&(!gate||!cfg.get(`use_embedded_credit_checkout`,!1)))return null;return `webview`}';
+  const {checkout: patched, applied} = adapt({checkout});
+  assert.deepEqual([applied.lazyCheckoutPricingPrewarm, applied.lazyCheckoutCreditPrewarm], ['checkout', 'checkout']);
+  const sandbox = {cfg: {get: () => true}};
+  vm.runInNewContext(patched.replace(/export /g, '') + ';this.le=le;this.W=W;', sandbox);
+  assert.equal(sandbox.le(null, true, () => 'prewarm'), null, 'no pricing prewarm');
+  assert.equal(sandbox.le('?url=pricing', true, () => 'prewarm'), '?url=pricing', 'the route still presents');
+  assert.equal(sandbox.W(false, true), null, 'no credit prewarm');
+  assert.equal(sandbox.W(true, true), 'webview', 'the credit route still renders');
 });

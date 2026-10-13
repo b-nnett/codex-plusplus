@@ -148,7 +148,10 @@
 
   // Renderer CPU profiles of app windows through the in-process debugger API.
   const rendererProfiles = [];
-  if (probe('RENDERER_PROFILE')) electron?.app?.on?.('web-contents-created', (_event, contents) => {
+  // Opt-in sampling heap profile (CODEXPP_TRACE_HEAP_PROFILE=1): which code
+  // allocated the memory still live when the trace ends, without a snapshot.
+  const heapProfile = optIn('HEAP_PROFILE');
+  if (probe('RENDERER_PROFILE') || heapProfile) electron?.app?.on?.('web-contents-created', (_event, contents) => {
     try {
       if (contents.getType?.() !== 'window' || !contents.debugger || contents.debugger.isAttached()) return;
       contents.debugger.attach('1.3');
@@ -156,26 +159,41 @@
       rendererProfiles.push(entry);
       // A debugger attached before the page starts holds the renderer until
       // Runtime.runIfWaitingForDebugger; release it once profiling has begun.
-      contents.debugger.sendCommand('Profiler.enable')
+      const cpu = probe('RENDERER_PROFILE');
+      entry.cpu = cpu;
+      (cpu ? contents.debugger.sendCommand('Profiler.enable')
         .then(() => contents.debugger.sendCommand('Profiler.setSamplingInterval', {interval: 500}))
-        .then(() => contents.debugger.sendCommand('Profiler.start'))
-        .then(() => { entry.started = now(); }, () => {})
+        .then(() => contents.debugger.sendCommand('Profiler.start')) : Promise.resolve())
+        .then(() => heapProfile && contents.debugger.sendCommand('HeapProfiler.enable')
+          .then(() => contents.debugger.sendCommand('HeapProfiler.startSampling', {samplingInterval: 65536})))
+        .then(() => { entry.started = now(); }, error => { if (failures.length < 200) failures.push({name: 'renderer-profile-start', at: now(), webContentsId: contents.id, message: String(error?.message ?? error).slice(0, 300)}); })
         .finally(() => contents.debugger.sendCommand('Runtime.runIfWaitingForDebugger').catch(() => {}));
     } catch (error) { console.error('[Codex++] trace renderer profile:', error); }
   });
 
   async function stopRendererProfiles() {
-    for (const {contents, started} of rendererProfiles.splice(0)) {
+    for (const {contents, started, cpu} of rendererProfiles.splice(0)) {
       try {
         if (contents.isDestroyed()) continue;
         const url = new URL(contents.mainFrame.url);
         if (url.protocol === 'app:' && url.host === '-' && started) {
-          const {profile} = await contents.debugger.sendCommand('Profiler.stop');
-          const file = writeFile(`startup-renderer-${process.pid}-${contents.id}.cpuprofile`, profile);
-          profiles.push({kind: 'renderer', page: url.pathname, webContentsId: contents.id, file, epochStart: started});
+          if (cpu) {
+            const {profile} = await contents.debugger.sendCommand('Profiler.stop');
+            const file = writeFile(`startup-renderer-${process.pid}-${contents.id}.cpuprofile`, profile);
+            profiles.push({kind: 'renderer', page: url.pathname, webContentsId: contents.id, file, epochStart: started});
+          }
+          if (heapProfile) {
+            const {profile} = await Promise.race([contents.debugger.sendCommand('HeapProfiler.getSamplingProfile'),
+              new Promise((_, reject) => { const timer = setTimeout(() => reject(new Error('heap profile timed out')), 60000); timer.unref?.(); })]);
+            const file = writeFile(`startup-renderer-${process.pid}-${contents.id}.heapprofile`, profile);
+            profiles.push({kind: 'renderer-heap', page: url.pathname, webContentsId: contents.id, file, epochStart: started});
+          }
         }
         contents.debugger.detach();
-      } catch (error) { console.error('[Codex++] trace renderer profile:', error); }
+      } catch (error) {
+        console.error('[Codex++] trace renderer profile:', error);
+        if (failures.length < 200) failures.push({name: 'renderer-profile-stop', at: now(), webContentsId: contents.id, message: String(error?.message ?? error).slice(0, 300)});
+      }
     }
   }
 
@@ -225,7 +243,14 @@
       written: now(), cpu: process.cpuUsage(), droppedEvents: dropped, loopDelay: delay,
       complete, profileSeconds, profiles, failures, events, stalls, renderers,
       // Vendor startup phase marks recorded by the startup adapter (performance.now()).
-      vendorMain: globalThis.__codexPPStartupMain ?? null
+      vendorMain: globalThis.__codexPPStartupMain ?? null,
+      // Every web contents (windows, webview guests, ...) by process, to map memory to owners.
+      webContents: (() => { try {
+        return electron.webContents.getAllWebContents().slice(0, 60).map(contents => {
+          let url = null; try { const parsed = new URL(contents.getURL()); url = parsed.origin + parsed.pathname.slice(0, 80); } catch {}
+          return {id: contents.id, type: contents.getType?.() ?? null, url, pid: contents.getOSProcessId?.() ?? null, host: contents.hostWebContents?.id ?? null};
+        });
+      } catch { return null; } })()
     };
   }
 

@@ -338,9 +338,11 @@
   // Traced launches pull each window's extension timing report.
   trace.collector(() => Promise.all(appContents().map(contents => withTimeout(
     contents.executeJavaScript('globalThis.__codexPP?.trace?.()??null', true), 'An app window'
-  ).then(report => report && {webContentsId:contents.id, page:new URL(contents.mainFrame.url).pathname,
+  ).then(report => report && {webContentsId:contents.id, ...report, page:new URL(contents.mainFrame.url).pathname,
     route:(({search, hash}) => (search + hash).slice(0, 160))(new URL(contents.mainFrame.url)),
-    visible:electron.BrowserWindow.fromWebContents(contents)?.isVisible?.() ?? null, ...report}, () => null)))
+    pid:contents.getOSProcessId?.() ?? null,
+    subframes:(() => { try { return contents.mainFrame.framesInSubtree.slice(0, 30).map(frame => ({origin:(() => { try { const url = new URL(frame.url); return url.origin + url.pathname.slice(0, 80); } catch { return null; } })(), pid:frame.osProcessId})); } catch { return []; } })(),
+    visible:electron.BrowserWindow.fromWebContents(contents)?.isVisible?.() ?? null}, () => null)))
     .then(reports => reports.filter(Boolean)));
   // Settings and extension edits poll at once through file watches, and a
   // window load polls on its own; the heartbeat keeps the helper's diagnostics

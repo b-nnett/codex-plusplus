@@ -127,7 +127,7 @@ def analyze(trace):
             row = result["vendor_ipc"][e["name"][4:]]
             row[0] += 1; row[1] += e["dur"]; row[2] = max(row[2], e["dur"])
     for profile in trace.get("profiles", []):
-        if profile["kind"] == "renderer" and profile.get("page") != "/index.html":
+        if profile["kind"] not in ("main", "renderer") or profile["kind"] == "renderer" and profile.get("page") != "/index.html":
             continue
         if os.path.exists(profile["file"]):
             key = "main" if profile["kind"] == "main" else "renderer"

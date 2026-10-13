@@ -11,7 +11,7 @@ public enum StartupAdapter {
         public let applied: [String: String]
         public let skipped: [String: String]
     }
-    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String? }
+    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let checkout: String? }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
         do {
@@ -29,6 +29,20 @@ public enum StartupAdapter {
             let shared = try module("app-shared-"), initial = try module("app-initial-")
             let requirements = try module("startup-requirements-", in: ".vite/build")
             let main = try module("main-", in: ".vite/build")
+            // The checkout webview hosts live in one of several webview-page-* chunks.
+            let checkout: (String, String)? = try {
+                let paths = try archive.packedFiles(in: "webview/assets").filter {
+                    let name = URL(fileURLWithPath: $0).lastPathComponent
+                    return name.hasPrefix("webview-page-") && name.hasSuffix(".js")
+                }
+                let matches = try paths.compactMap { path -> (String, String)? in
+                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
+                    guard data.count <= 8 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
+                          source.contains("CheckoutPricingWebviewHost") else { return nil }
+                    return (path, source)
+                }
+                return matches.count == 1 ? matches[0] : nil
+            }()
             // index.html and its entry module, for the entry preload hints.
             let htmlPath = "webview/index.html"
             let htmlData = try replacements.first(where: { $0.0 == htmlPath })?.1 ?? archive.data(at: htmlPath)
@@ -45,6 +59,7 @@ public enum StartupAdapter {
             if let initial { input["initial"] = initial.1 }
             if let requirements { input["requirements"] = requirements.1 }
             if let main { input["main"] = main.1 }
+            if let checkout { input["checkout"] = checkout.1 }
             if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
             let output = try adapt(input: input, archive: archive)
             var result: [(String, Data)] = []
@@ -53,6 +68,7 @@ public enum StartupAdapter {
             if let source = output.requirements, let requirements { result.append((requirements.0, Data(source.utf8))) }
             if let source = output.html { result.append((htmlPath, Data(source.utf8))) }
             if let source = output.main, let main { result.append((main.0, Data(source.utf8))) }
+            if let source = output.checkout, let checkout { result.append((checkout.0, Data(source.utf8))) }
             return Result(replacements: result, applied: output.applied, skipped: output.skipped)
         } catch {
             return nil
@@ -101,7 +117,7 @@ public struct StartupStatus: Equatable, Sendable {
         "learnedStartupPreload": "Learned chunk preload", "entryPreload": "Entry chunk preload",
         "shellEnvironmentCacheFirst": "Cached shell environment", "authStorageGateCacheFirst": "Cached auth storage flag",
         "deferDockIcon": "Deferred Dock icon", "caretBlinkTimeout": "Idle text cursor", "lazyPageWindowPrewarm": "On-demand Page window",
-        "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window",
+        "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window", "lazyCheckoutPricingPrewarm": "On-demand upgrade page", "lazyCheckoutCreditPrewarm": "On-demand credit checkout",
     ]
     public let active: [String]
     /// Speed-ups that did not match this build, with the adapter's reason.

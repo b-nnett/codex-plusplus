@@ -42,6 +42,10 @@
 //   is focused, even untouched. Where CSS caret-animation is supported, take
 //   the blink over: blink for 5 s after typing, a click or focus, then hold the
 //   cursor steady (always steady with Reduce Motion), like GTK's blink timeout.
+// lazyCheckoutPricingPrewarm, lazyCheckoutCreditPrewarm: personal ChatGPT
+//   accounts boot a hidden, signed-in chatgpt.com checkout page at launch so an
+//   upgrade or credit purchase opens instantly (about 250 MB plus the web app's
+//   own requests). Render it only when a /checkout/web route is opened.
 // learnedStartupPreload: when the initial bundle starts evaluating, add
 //   <link rel=modulepreload> for the chunks the previous launch of this build
 //   requested in its first 1.5 s (at most 40; fetched and compiled, not run),
@@ -121,9 +125,9 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     const member = (node, name) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
-    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [] };
-    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main };
-    if ([sources.shared, sources.initial, sources.requirements, sources.main].some(source => typeof source === 'string' && source.includes(marker))) {
+    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], checkout: [] };
+    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, checkout: input.checkout };
+    if ([sources.shared, sources.initial, sources.requirements, sources.main, sources.checkout].some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
     }
     const trees = {};
@@ -560,6 +564,21 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         } else skipped.entryPreload = 'nothing to preload';
       }
     }
+
+    // Checkout webview hosts (the webview-page chunk exporting CheckoutPricingWebviewHost).
+    // Pricing: j=...&&get(`use_embedded_checkout`,!1)?ge({currentPlan,url}):null is the
+    // prewarm target; the /checkout/web route still presents through its own search.
+    const pricing = [], credit = [];
+    if (trees.checkout) walk(trees.checkout, node => {
+      if (node.type === 'ConditionalExpression' && node.alternate.type === 'Literal' && node.alternate.value === null &&
+          sources.checkout.slice(node.test.start, node.test.end).includes('`use_embedded_checkout`')) pricing.push(node);
+      // Credit: if(...,!S&&(ne()||...||!...get(`use_embedded_credit_checkout`,!1)))return null; renders a prewarm otherwise.
+      if (node.type === 'LogicalExpression' && node.operator === '&&' && node.left.type === 'UnaryExpression' && node.left.operator === '!' &&
+          node.right.type === 'LogicalExpression' && node.right.operator === '||' &&
+          sources.checkout.slice(node.right.start, node.right.end).includes('`use_embedded_credit_checkout`')) credit.push(node);
+    });
+    record('lazyCheckoutPricingPrewarm', 'checkout', pricing, node => ({ start: node.test.start, end: node.test.start, text: `${marker}!1&&` }));
+    record('lazyCheckoutCreditPrewarm', 'checkout', credit, node => ({ start: node.right.start, end: node.right.start, text: `${marker}!0||` }));
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;

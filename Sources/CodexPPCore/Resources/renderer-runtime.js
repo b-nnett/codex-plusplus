@@ -61,7 +61,8 @@
         for (const cache of globalThis.__codexPPQueryCaches ?? []) {
           for (const query of cache.getAll?.() ?? []) {
             if (queries.length >= 400) break;
-            queries.push({ key: JSON.stringify(query.queryKey).slice(0, 120), created: query.__codexPPCreated ?? null,
+            let bytes = null; try { bytes = JSON.stringify(query.state?.data ?? null)?.length ?? 0; } catch {}
+            queries.push({ key: JSON.stringify(query.queryKey).slice(0, 120), created: query.__codexPPCreated ?? null, bytes,
               updated: query.state?.dataUpdatedAt ? query.state.dataUpdatedAt - origin : null, status: query.state?.status, fetchStatus: query.state?.fetchStatus });
           }
         }
@@ -80,6 +81,13 @@
           animatedImages: [...document.images].filter(image => /\.(gif|webp|apng)(\?|$)/i.test(image.currentSrc)).map(image => describe(image)).slice(0, 20),
           visibility: document.visibilityState,
           jsHeapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
+          iframes: [...document.querySelectorAll('iframe,webview')].slice(0, 20).map(frame => {
+            let origin = null; try { origin = new URL(frame.src).origin; } catch {}
+            const parents = []; for (let node = frame.parentElement; node && parents.length < 4; node = node.parentElement) parents.push(describe(node));
+            return { tag: frame.tagName.toLowerCase(), origin, title: frame.title?.slice(0, 80) || null, name: frame.name?.slice(0, 60) || null,
+              className: typeof frame.className === 'string' ? frame.className.slice(0, 120) : null, sandbox: frame.getAttribute('sandbox'),
+              hidden: frame.hidden || frame.getAttribute('aria-hidden') === 'true' || frame.getBoundingClientRect().width === 0, parents };
+          }),
         }; } catch {}
         const now = Math.floor(performance.now() / 1000);
         const recentFrames = [...framesPerSecond].filter(([second]) => second >= now - 10).sort(([a], [b]) => a - b);

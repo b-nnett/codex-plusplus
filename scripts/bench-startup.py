@@ -9,7 +9,7 @@ measurement is identical for both bundles.
 "Cold" here means no ChatGPT process is running. The OS file cache stays warm
 unless --purge is given (requires a cached `sudo` credential: run `sudo -v`).
 """
-import argparse, glob, json, math, os, re, statistics, subprocess, sys, time
+import argparse, glob, json, math, os, re, statistics, subprocess, sys, tempfile, time
 from datetime import datetime, timezone
 
 BUNDLE_ID = "com.openai.codex"
@@ -247,6 +247,9 @@ def measure(bundle, label, args, env=(), recording=None):
         result["steady_cpu_s"] = round(sum(p[1] for p in procs), 2)
         result["steady_rss_mb"] = round(sum(p[3] for p in procs))
         result["steady_processes"] = len(procs)
+        # Summed RSS counts shared pages once per process; macOS's footprint
+        # (dirty, compressed and swapped memory each process owns) does not.
+        result["steady_footprint_mb"] = footprint_mb([p[0] for p in procs])
     if args.idle:
         # Idle cost: CPU used between two points after launch, with nobody
         # touching the app, as a percentage of one core, per process kind.
@@ -263,6 +266,20 @@ def measure(bundle, label, args, env=(), recording=None):
         result["idle_by_kind"] = {k: round(v / (end - start) * 100, 2) for k, v in sorted(kinds.items(), key=lambda kv: -kv[1])}
     time.sleep(args.linger)
     return result
+
+
+def footprint_mb(pids):
+    if not pids:
+        return None
+    with tempfile.TemporaryDirectory() as directory:
+        out = os.path.join(directory, "footprint.json")
+        args = [arg for pid in pids for arg in ("-p", str(pid))]
+        if subprocess.run(["footprint", *args, "-j", out], capture_output=True).returncode != 0:
+            return None
+        try:
+            return round(json.load(open(out))["total footprint"] / 1048576)
+        except (OSError, ValueError, KeyError):
+            return None
 
 
 def process_kind(cmd):
@@ -286,6 +303,7 @@ METRICS = [("wall_tti_ms", lambda r: r["wall_tti_ms"]),
            ("steady_cpu_s", lambda r: r.get("steady_cpu_s")),
            ("steady_rss_mb", lambda r: r.get("steady_rss_mb")),
            ("steady_processes", lambda r: r.get("steady_processes")),
+           ("steady_footprint_mb", lambda r: r.get("steady_footprint_mb")),
            ("idle_cpu_pct", lambda r: r.get("idle_cpu_pct")),
            ("app_processes", lambda r: r["app_processes"]),
            ("process_to_preload_ms", lambda r: r["process_to_preload_ms"]),
@@ -316,7 +334,7 @@ def summarize(results, variants):
         print(f"{name:24} {cells}{deltas}")
     print()
     for v in others:
-        for metric in ("wall_tti_ms", "local_ms (preload+rr)", "network_phase_ms", "app_cpu_s @app_start", "steady_cpu_s", "steady_rss_mb", "idle_cpu_pct"):
+        for metric in ("wall_tti_ms", "local_ms (preload+rr)", "network_phase_ms", "app_cpu_s @app_start", "steady_cpu_s", "steady_rss_mb", "steady_footprint_mb", "idle_cpu_pct"):
             if metric in summary:
                 summary.setdefault("tests", {})[f"{v} vs {base}: {metric}"] = mann_whitney(summary[metric][base]["values"], summary[metric][v]["values"], f"{v} vs {base}: {metric}")
     errors = [r for r in results if "error" in r]
@@ -505,7 +523,7 @@ def main():
             print(f"[{n:2}/{len(order)}] {variant:14} discarded: window was backgrounded for {r['background_ms']:.0f} ms; retrying", flush=True)
             r["error"] = "backgrounded"
         tag = "warmup" if warm else "run"
-        detail = r.get("error") or f"wall TTI {r['wall_tti_ms']:.0f} ms, local {r['local_ms']:.0f}, network {r['network_phase_ms']:.0f}, cpu {r['app_cpu_s']:.1f}s (+helper {r['helper_cpu_s']:.2f}s)" + (f", @steady cpu {r['steady_cpu_s']:.1f}s rss {r['steady_rss_mb']} MB x{r['steady_processes']}" if r.get("steady_cpu_s") is not None else "") + (f", idle {r['idle_cpu_pct']:.1f}% {dict(list(r['idle_by_kind'].items())[:4])}" if r.get("idle_cpu_pct") is not None else "")
+        detail = r.get("error") or f"wall TTI {r['wall_tti_ms']:.0f} ms, local {r['local_ms']:.0f}, network {r['network_phase_ms']:.0f}, cpu {r['app_cpu_s']:.1f}s (+helper {r['helper_cpu_s']:.2f}s)" + (f", @steady cpu {r['steady_cpu_s']:.1f}s rss {r['steady_rss_mb']} MB footprint {r.get('steady_footprint_mb')} MB x{r['steady_processes']}" if r.get("steady_cpu_s") is not None else "") + (f", idle {r['idle_cpu_pct']:.1f}% {dict(list(r['idle_by_kind'].items())[:4])}" if r.get("idle_cpu_pct") is not None else "")
         print(f"[{n:2}/{len(order)}] {tag:6} {variant:14} {detail}", flush=True)
         if variant.startswith("patched") and r.get("codexpp_boot_after_launch") is False:
             print("        warning: Codex++ boot.json was not refreshed by this launch", flush=True)
