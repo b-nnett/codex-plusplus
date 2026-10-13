@@ -113,7 +113,7 @@ python3 scripts/bench-startup.py --runs 15 --out /tmp/startup.json
 
 `--steady 25` also samples total CPU and resident memory (summed RSS) of every ChatGPT process 25 s after launch, after the background windows and the first wave of requests have settled. `--idle 120:240` reports the CPU the untouched app uses between those two points (percent of one core, by process kind), which is what an open app costs a laptop battery.
 
-`--record DIR` films each measured launch (Screen Recording permission required); `scripts/launch-video.py` turns the recordings into clips cropped to the ChatGPT window, with a timer from the click and an "interactive" stamp at ChatGPT's own `app_start`, plus a side-by-side of each variant's median launch. `patched-traced` launches create `Diagnostics/trace.enable` (optionally holding `CODEXPP_TRACE_<PROBE>=0|1` lines) and write `Diagnostics/startup-trace-<pid>.json` with Codex++ spans, main-thread stalls, vendor IPC timings, renderer extension costs, loading-gate timings and a renderer CPU profile; the main-process profiler is opt-in (`CODEXPP_TRACE_MAIN_PROFILE=1`) because it can stall the app. `scripts/trace-report.py` ranks the worst offenders before `app_start` and sums the visible window's long tasks in the 5 s after it (jank once interactive), and `scripts/startup-critical-path.py` rebuilds any launch's request timeline from ChatGPT's own logs.
+`--record DIR` films each measured launch (Screen Recording permission required); `scripts/launch-video.py` turns the recordings into clips cropped to the ChatGPT window, with a timer from the click and an "interactive" stamp at ChatGPT's own `app_start`, plus a side-by-side of each variant's median launch. `patched-traced` launches create `Diagnostics/trace.enable` (optionally holding `CODEXPP_TRACE_<PROBE>=0|1` lines) and write `Diagnostics/startup-trace-<pid>.json` with Codex++ spans, main-thread stalls, vendor IPC timings, renderer extension costs, loading-gate timings and a renderer CPU profile; the main-process profiler is opt-in (`CODEXPP_TRACE_MAIN_PROFILE=1`) because it can stall the app. `CODEXPP_TRACE_HEAP_SNAPSHOT=1` adds a heap snapshot of the visible window, which `node scripts/heap-summary.mjs FILE` summarizes by type, constructor and largest objects. `scripts/trace-report.py` ranks the worst offenders before `app_start` and sums the visible window's long tasks in the 5 s after it (jank once interactive), and `scripts/startup-critical-path.py` rebuilds any launch's request timeline from ChatGPT's own logs.
 
 ### Startup fast path
 
@@ -124,17 +124,17 @@ python3 scripts/bench-startup.py --variants original,patched --runs 5 --record d
 python3 scripts/launch-video.py dist/launches/bench.json
 ```
 
-Measured on ChatGPT build 20156 (patch v85), six alternating cold launches each, `bench-startup.py --variants original,patched --runs 6 --steady 25 --idle 45:105`:
+Measured on ChatGPT build 20156 (patch v97), six alternating cold launches each, `bench-startup.py --variants original,patched --runs 6 --steady 25 --idle 45:105`:
 
 | | Stock | Codex++ | Change |
 |---|---|---|---|
-| Click to interactive (home and sidebar ready) | 4.60 s | 2.31 s | −50% |
-| CPU used in the first 25 s | 46.1 s | 21.1 s | −54% |
-| Resident memory at 25 s (summed RSS) | 8.0 GB | 4.1 GB | −49% |
-| Processes at 25 s | 29 | 23 | −6 |
-| Idle CPU, focused and untouched | 18.2% of a core | 4.2% | −77% |
+| Click to interactive (home and sidebar ready) | 4.39 s | 2.45 s | −44% |
+| CPU used in the first 25 s | 41.2 s | 14.2 s | −66% |
+| Memory footprint at 25 s (macOS `footprint`) | 4.84 GB | 1.86 GB | −62% |
+| Processes at 25 s | 29 | 21 | −8 |
+| Idle CPU, focused and untouched | 16.8% of a core | 3.8% | −78% |
 
-Every difference is significant (Mann–Whitney p ≈ 0.004).
+Summed RSS (7.9 GB vs 3.3 GB) overstates both, because shared pages count once per process. Every difference is significant (Mann–Whitney p ≈ 0.004).
 
 ### Idle cost: the blinking cursor
 

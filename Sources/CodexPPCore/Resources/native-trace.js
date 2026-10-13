@@ -171,6 +171,37 @@
     } catch (error) { console.error('[Codex++] trace renderer profile:', error); }
   });
 
+  // Opt-in heap snapshot of the visible app window when the trace ends
+  // (CODEXPP_TRACE_HEAP_SNAPSHOT=1), streamed to disk chunk by chunk.
+  async function takeHeapSnapshot() {
+    if (!optIn('HEAP_SNAPSHOT')) return;
+    const contents = electron.webContents.getAllWebContents().find(item => {
+      try { const url = new URL(item.getURL()); return item.getType?.() === 'window' && url.protocol === 'app:' && url.pathname === '/index.html' && electron.BrowserWindow.fromWebContents(item)?.isVisible?.(); } catch { return false; }
+    });
+    if (!contents) return;
+    const file = path.join(diagnostics, `startup-renderer-${process.pid}-${contents.id}.heapsnapshot`);
+    const temporary = `${file}.${Date.now()}.tmp`;
+    let fd = null, attached = false;
+    const onMessage = (_event, method, params) => { if (method === 'HeapProfiler.addHeapSnapshotChunk' && fd != null) fs.writeSync(fd, params.chunk); };
+    try {
+      fd = fs.openSync(temporary, 'w', 0o600);
+      if (!contents.debugger.isAttached()) { contents.debugger.attach('1.3'); attached = true; }
+      contents.debugger.on('message', onMessage);
+      await contents.debugger.sendCommand('HeapProfiler.enable');
+      await contents.debugger.sendCommand('HeapProfiler.collectGarbage');
+      await contents.debugger.sendCommand('HeapProfiler.takeHeapSnapshot', {reportProgress: false, captureNumericValue: false});
+      fs.closeSync(fd); fd = null;
+      fs.renameSync(temporary, file);
+      profiles.push({kind: 'renderer-heap-snapshot', page: '/index.html', webContentsId: contents.id, file, epochStart: now()});
+    } catch (error) {
+      if (failures.length < 200) failures.push({name: 'heap-snapshot', at: now(), webContentsId: contents.id, message: String(error?.message ?? error).slice(0, 300)});
+    } finally {
+      if (fd != null) { try { fs.closeSync(fd); fs.rmSync(temporary, {force: true}); } catch {} }
+      contents.debugger.removeListener('message', onMessage);
+      if (attached) { try { contents.debugger.detach(); } catch {} }
+    }
+  }
+
   async function stopRendererProfiles() {
     for (const {contents, started, cpu} of rendererProfiles.splice(0)) {
       try {
@@ -313,6 +344,7 @@
       // trace and every profile are on disk.
       const finish = setTimeout(async () => {
         await stopRendererProfiles();
+        await takeHeapSnapshot();
         stopMainProfile();
         await flush();
         complete = true;
