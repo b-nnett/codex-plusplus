@@ -159,34 +159,76 @@ document.addEventListener("animationstart",e=>{if(e.animationName==="codexpp-shi
 }catch{}})();`;
 
 
-// Layout motion. Breakpoints: a sheet with width media queries is rebuilt
+// viewportContainerQueries: a stylesheet with width media queries is rebuilt
 // whenever the window crosses one of them, and Chromium then resets every
 // @font-face, @property and @keyframes rule of the document and restyles and
-// relays out the whole window. app-shared.css (47 breakpoints) did this about
-// 50 times in a 6 s resize. Width-only media rules become container queries on
-// <html> (the viewport, which never scrolls), so a breakpoint restyles only
-// what it styles; rules for <html> itself apply to <body>, which inherits the
-// same values.
-const layoutMotion = String.raw`(()=>{try{
-if(typeof document==="undefined"||globalThis.__codexPPLayoutMotion)return;globalThis.__codexPPLayoutMotion=1;
-const ppViewportQuery=text=>{if(!/\bwidth\b/.test(text)||/height|aspect|orientation|resolution|print|hover|pointer|prefers|color|display-mode|scripting/.test(text))return null;
-const parts=text.split(",").map(t=>{t=t.trim().replace(/^(only\s+)?(screen|all)\s+and\s+/,"");const not=t.match(/^not\s+(?:screen|all)\s+and\s+(.*)$/);return not?"not ("+not[1]+")":"("+t+")"});
-return parts.join(" or ")};
-const ppSelfSelector=/^(?::root|html)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+(?:\([^)]*\))?)*$/;
-const ppRuleText=rule=>{if(!(rule instanceof CSSStyleRule))return rule.cssText;const sel=rule.selectorText;
-const next=sel.split(",").map(part=>ppSelfSelector.test(part.trim())?part.trim()+" > body":part).join(",");return next+rule.cssText.slice(sel.length)};
-const ppMediaRules=(rules,found)=>{for(const r of rules){if(r instanceof CSSMediaRule&&ppViewportQuery(r.media.mediaText))found.push(r);else if(r.cssRules)ppMediaRules(r.cssRules,found)}return found};
-const ppRewrite=sheet=>{try{const node=sheet?.ownerNode;if(!node||node.hasAttribute?.("data-codexpp-viewport"))return;node.setAttribute?.("data-codexpp-viewport","");
-for(const r of ppMediaRules(sheet.cssRules,[])){const parent=r.parentRule??sheet,index=[...parent.cssRules].indexOf(r),original=r.cssText;if(index<0)continue;
-const text="@container codexpp-viewport "+ppViewportQuery(r.media.mediaText)+"{"+[...r.cssRules].map(ppRuleText).join("\n")+"}";
-parent.deleteRule(index);try{parent.insertRule(text,index)}catch{parent.insertRule(original,index)}}}catch{}};
-try{const root=document.createElement("style");root.setAttribute("data-codexpp-viewport","");root.textContent="html{container:codexpp-viewport/inline-size}";(document.head??document.documentElement).prepend(root);
-for(const sheet of document.styleSheets)ppRewrite(sheet);document.addEventListener("load",e=>{if(e.target?.sheet)ppRewrite(e.target.sheet)},true)}catch{}
-}catch{}})();`;
+// relays out the whole window; app-shared.css (47 breakpoints) did this about
+// 50 times in a 6 s resize. At patch time, width-only media rules in the
+// app's stylesheets become container queries on <html> (which is always the
+// viewport and never scrolls), so a breakpoint restyles only what it styles.
+// Rules for <html> itself apply to <body>, which inherits the same values.
+// Height, device, orientation and preference queries stay media queries.
+const viewportContainer = 'codexpp-viewport';
+function viewportCondition(prelude) {
+  const text = prelude.trim();
+  if (!/\bwidth\b/.test(text) || /height|aspect|orientation|resolution|device|print|hover|pointer|prefers|color|display-mode|scripting/.test(text)) return null;
+  const parts = [];
+  for (const piece of splitTopLevel(text, ',')) {
+    let part = piece.trim().replace(/^(only\s+)?(screen|all)\s+and\s+/, '');
+    const not = /^not\s+(?:screen|all)\s+and\s+([\s\S]*)$/.exec(part);
+    const condition = not ? not[1].trim() : part;
+    // Only feature conditions convert; a bare or negated media type does not.
+    if (!condition.startsWith('(') || !condition.endsWith(')')) return null;
+    parts.push(not ? `not (${condition})` : `(${condition})`);
+  }
+  return parts.length ? parts.join(' or ') : null;
+}
+function splitTopLevel(text, separator) {
+  const parts = []; let depth = 0, start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '(' || c === '[') depth++;
+    else if (c === ')' || c === ']') depth--;
+    else if (c === separator && depth === 0) { parts.push(text.slice(start, i)); start = i + 1; }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+const rootSelector = /^(?::root|html)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+(?:\([^)]*\))?)*$/;
+function retargetRoot(prelude) {
+  return splitTopLevel(prelude, ',').map(part => rootSelector.test(part.trim()) ? part.replace(part.trim(), `${part.trim()} > body`) : part).join(',');
+}
+function rewriteViewportCSS(css) {
+  let out = '', emitted = 0, segment = 0, changed = 0;
+  const stack = [];
+  for (let i = 0; i < css.length; i++) {
+    const c = css[i];
+    if (c === '/' && css[i + 1] === '*') { const end = css.indexOf('*/', i + 2); i = end < 0 ? css.length : end + 1; continue; }
+    if (c === '"' || c === "'") { for (i++; i < css.length && css[i] !== c; i++) if (css[i] === '\\') i++; continue; }
+    if (c === '\\') { i++; continue; }
+    if (c === ';') { segment = i + 1; continue; }
+    if (c === '}') { stack.pop(); segment = i + 1; continue; }
+    if (c !== '{') continue;
+    const prelude = css.slice(segment, i);
+    const media = /^(\s*)@media\b([\s\S]*)$/.exec(prelude);
+    const condition = media && viewportCondition(media[2]);
+    let replacement = null;
+    if (condition) { replacement = `${media[1]}@container ${viewportContainer} ${condition}`; changed++; }
+    else if (stack.at(-1) === 'container' && !/^\s*@/.test(prelude)) { const next = retargetRoot(prelude); if (next !== prelude) replacement = next; }
+    if (replacement !== null) { out += css.slice(emitted, segment) + replacement; emitted = i; }
+    stack.push(condition ? 'container' : 'other');
+    segment = i + 1;
+  }
+  if (!changed) return null;
+  out += css.slice(emitted);
+  // The root container, after any leading @charset/@import statements.
+  const head = /^(\s*(@charset|@import)\b[^;]*;)*/.exec(out)[0];
+  return `${head}html{container:${viewportContainer}/inline-size}${out.slice(head.length)}`;
+}
 
 globalThis.CodexPPStartupAdapter = Object.freeze({
   compositorShimmer,
-  layoutMotion,
+  rewriteViewportCSS,
   adapt(input) {
     const marker = '/*codexpp:startup*/';
     const parse = source => acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
@@ -486,9 +528,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         applied.caretBlinkTimeout = 'initial';
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
         applied.compositorShimmer = 'initial';
-        edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${layoutMotion}` });
-        applied.viewportContainerQueries = 'initial';
-      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = skipped.viewportContainerQueries = firstStatement ? 'initial bundle not recognised' : 'module not found';
+      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = firstStatement ? 'initial bundle not recognised' : 'module not found';
       // The app shell measures itself with a ResizeObserver, which runs after
       // layout, and feeds framer-motion values that size the side panel; framer
       // writes them on the next frame, so during a window resize the chat
@@ -760,6 +800,16 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;
+    if (input.css && typeof input.css === 'object') {
+      const css = {};
+      for (const [path, text] of Object.entries(input.css)) {
+        if (typeof text !== 'string') continue;
+        const rewritten = rewriteViewportCSS(text);
+        if (rewritten !== null) css[path] = rewritten;
+      }
+      if (Object.keys(css).length) { result.css = css; applied.viewportContainerQueries = 'css'; }
+      else skipped.viewportContainerQueries = 'no width media queries';
+    } else skipped.viewportContainerQueries = 'stylesheets not provided';
     for (const [file, list] of Object.entries(edits)) {
       if (!list.length) continue;
       let source = sources[file];

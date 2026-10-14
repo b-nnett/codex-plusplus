@@ -44,8 +44,8 @@ function sharedHook(source, cached) {
 
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
-  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst', 'viewportContainerQueries']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'viewportContainerQueries'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -493,34 +493,27 @@ test('the compositor shimmer moves layers instead of repainting the text', () =>
   assert.match(runtime, /:root\[data-codexpp-blurred\] \.codexpp-shimmer\{visibility:hidden\}/);
 });
 
-test('width media rules become container queries on the root, other media rules stay', () => {
-  const runtime = context.CodexPPStartupAdapter.layoutMotion;
-  class CSSRule { constructor(cssText) { this.cssText = cssText; } }
-  class CSSStyleRule extends CSSRule { constructor(selectorText, body) { super(`${selectorText}{${body}}`); this.selectorText = selectorText; } }
-  class CSSMediaRule extends CSSRule { constructor(mediaText, rules) { super(`@media ${mediaText}{${rules.map(r => r.cssText).join('')}}`); this.media = {mediaText}; this.cssRules = rules; } }
-  class CSSLayerBlockRule extends CSSRule { constructor(rules) { super('@layer utilities{}'); this.cssRules = rules; rules.forEach(r => (r.parentRule = this)); }
-    deleteRule(i) { this.cssRules.splice(i, 1); } insertRule(text, i) { this.cssRules.splice(i, 0, new CSSRule(text)); } }
-  const layer = new CSSLayerBlockRule([
-    new CSSStyleRule('.a', 'color:red'),
-    new CSSMediaRule('(width >= 48rem)', [new CSSStyleRule('.md\\:flex', 'display:flex')]),
-    new CSSMediaRule('not all and (width >= 40rem)', [new CSSStyleRule(':root', '--x:1'), new CSSStyleRule('html[data-a] .b', 'color:blue')]),
-    new CSSMediaRule('(height <= 500px)', [new CSSStyleRule('.c', 'display:none')]),
-    new CSSMediaRule('(prefers-reduced-motion: reduce)', [new CSSStyleRule('.d', 'animation:none')]),
-  ]);
-  const prepended = [];
-  const sheet = {cssRules: [layer], ownerNode: {hasAttribute: () => false, setAttribute() {}}};
-  const sandbox = {CSSStyleRule, CSSMediaRule, ResizeObserver: class {}, performance: {now: () => 0}, setTimeout() {}, addEventListener() {}, matchMedia: () => ({matches: false}),
-    document: {styleSheets: [sheet], addEventListener() {}, head: {prepend: node => prepended.push(node)}, createElement: () => ({setAttribute() {}}), querySelector: () => null}};
-  sandbox.globalThis = sandbox;
-  vm.runInNewContext(runtime, sandbox);
-  assert.equal(prepended[0].textContent, 'html{container:codexpp-viewport/inline-size}');
-  assert.deepEqual(layer.cssRules.map(r => r.cssText), [
-    '.a{color:red}',
-    '@container codexpp-viewport ((width >= 48rem)){.md\\:flex{display:flex}}',
-    '@container codexpp-viewport not ((width >= 40rem)){:root > body{--x:1}\nhtml[data-a] .b{color:blue}}',
-    '@media (height <= 500px){.c{display:none}}',
-    '@media (prefers-reduced-motion: reduce){.d{animation:none}}',
-  ]);
+test('width media rules become container queries on the root at patch time; other media rules stay', () => {
+  const rewrite = context.CodexPPStartupAdapter.rewriteViewportCSS;
+  const css = '@layer utilities{.a{color:red}@media (width>=48rem){.md\\:flex{display:flex}}' +
+    '@media not all and (width>=40rem){:root{--x:1}html[data-a] .b{color:blue}}' +
+    '@media (height<=500px){.c{display:none}}@media (prefers-reduced-motion:reduce){.d{animation:none}}' +
+    '@media (min-device-width:600px){.e{color:red}}@media screen and (min-width:450px),(width<=30rem){.f{content:"{not;a}"}}}' +
+    '/* @media (width>=1px){} */.g{background:url(a;b)}';
+  const out = rewrite(css);
+  assert.ok(out.startsWith('html{container:codexpp-viewport/inline-size}@layer utilities{'), 'one root container, before the rules');
+  assert.ok(out.includes('@container codexpp-viewport ((width>=48rem)){.md\\:flex{display:flex}}'));
+  assert.ok(out.includes('@container codexpp-viewport not ((width>=40rem)){:root > body{--x:1}html[data-a] .b{color:blue}}'), 'root rules apply to body');
+  assert.ok(out.includes('@media (height<=500px){.c{display:none}}'), 'height stays a media query');
+  assert.ok(out.includes('@media (prefers-reduced-motion:reduce)'), 'preferences stay');
+  assert.ok(out.includes('@media (min-device-width:600px)'), 'device queries stay');
+  assert.ok(out.includes('@container codexpp-viewport ((min-width:450px)) or ((width<=30rem)){.f{content:"{not;a}"}}'), 'lists, media types and strings');
+  assert.ok(out.endsWith('/* @media (width>=1px){} */.g{background:url(a;b)}'), 'comments and urls untouched');
+  assert.equal(rewrite('.a{color:red}@media (prefers-color-scheme:dark){.a{color:blue}}'), null, 'nothing to change');
+  assert.ok(rewrite('@charset "utf-8";@media (width>=1px){.a{b:c}}').startsWith('@charset "utf-8";html{container:'), 'after @charset');
+  const {applied, css: files} = adapt({css: {'webview/assets/a.css': css, 'webview/assets/b.css': '.x{y:z}'}});
+  assert.equal(applied.viewportContainerQueries, 'css');
+  assert.deepEqual(Object.keys(files), ['webview/assets/a.css'], 'only changed stylesheets are returned');
 });
 
 test('the shell sets its size on window resize events, before the frame, without patching ResizeObserver', () => {

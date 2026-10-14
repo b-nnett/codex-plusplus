@@ -11,7 +11,7 @@ public enum StartupAdapter {
         public let applied: [String: String]
         public let skipped: [String: String]
     }
-    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let checkout: String? }
+    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let checkout: String?; let css: [String: String]? }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
         do {
@@ -61,6 +61,13 @@ public enum StartupAdapter {
             if let main { input["main"] = main.1 }
             if let checkout { input["checkout"] = checkout.1 }
             if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
+            // Every stylesheet, for the viewport container-query rewrite.
+            var stylesheets: [String: String] = [:]
+            for path in try archive.packedFiles(in: "webview/assets") where path.hasSuffix(".css") {
+                let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
+                if data.count <= 8 * 1024 * 1024, let text = String(data: data, encoding: .utf8) { stylesheets[path] = text }
+            }
+            input["css"] = stylesheets
             let output = try adapt(input: input, archive: archive)
             var result: [(String, Data)] = []
             if let source = output.shared, let shared { result.append((shared.0, Data(source.utf8))) }
@@ -69,6 +76,7 @@ public enum StartupAdapter {
             if let source = output.html { result.append((htmlPath, Data(source.utf8))) }
             if let source = output.main, let main { result.append((main.0, Data(source.utf8))) }
             if let source = output.checkout, let checkout { result.append((checkout.0, Data(source.utf8))) }
+            for (path, source) in output.css ?? [:] where stylesheets[path] != nil { result.append((path, Data(source.utf8))) }
             return Result(replacements: result, applied: output.applied, skipped: output.skipped)
         } catch {
             return nil
