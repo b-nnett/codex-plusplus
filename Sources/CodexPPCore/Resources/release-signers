@@ -1,0 +1,5 @@
+# Codex++ release signing key (ssh-keygen allowed-signers format).
+# Releases are signed with: ssh-keygen -Y sign -f <key> -n codexpp-release release.json
+# Add the maintainer's public key on one line, for example:
+# release@codexpp namespaces="codexpp-release" sk-ssh-ed25519@openssh.com AAAA...
+# Until a key is listed, automatic updates stay disabled.

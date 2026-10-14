@@ -26,6 +26,8 @@ final class HelperModel: ObservableObject {
     @Published var message: String?
     @Published private(set) var loginEnabled = SMAppService.mainApp.status == .enabled
     let store: ExtensionStore
+    let updater: SelfUpdater
+    private var reportUpdateResult = false
     private var monitor: Task<Void, Never>?
     private var configurationReadable = true
     private var polling = false
@@ -46,6 +48,7 @@ final class HelperModel: ObservableObject {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let preview = Bundle.main.object(forInfoDictionaryKey: "CodexPPPreview") as? Bool == true
         store = ExtensionStore(root: root ?? (preview ? FileManager.default.temporaryDirectory.appendingPathComponent("CodexPP-Preview") : support.appendingPathComponent("CodexPP")))
+        updater = SelfUpdater(support: store.root)
         do {
             settings = try store.readSettings()
             let candidates = [
@@ -72,9 +75,17 @@ final class HelperModel: ObservableObject {
         return runtimeErrors.count == 1 ? "1 extension error" : "\(runtimeErrors.count) extension errors"
     }
     var statusError: String? { connectionError ?? extensionErrorStatus }
+    /// The installed patch is from an older Codex++ (for example, after Codex++ updated itself).
+    var patchIsOutdated: Bool {
+        let receipt = URL(fileURLWithPath: settings.appPath).appendingPathComponent("Contents/Resources/codexpp-patch.json")
+        guard let data = try? Data(contentsOf: receipt), let fields = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let adapter = fields["adapter"] as? String, let revision = SelfUpdate.patchRevision(ofAdapter: adapter) else { return false }
+        return revision < PatchAdapter.revision
+    }
     var repairActionTitle: String? {
         guard configurationReadable else { return nil }
         if !hasPatchedApp { return "Install Extensions Support and Restart" }
+        if patchIsOutdated { return "Update Extensions Support and Restart \(appName)" }
         if statusError != nil || (running && !connected && !settings.extensionsPaused) {
             return "Repair and Restart \(appName)"
         }
@@ -95,6 +106,19 @@ final class HelperModel: ObservableObject {
     }
     func startMonitoring() {
         guard monitor == nil, !isPreview else { return }
+        updater.changed = { [weak self] in
+            guard let self else { return }
+            if self.reportUpdateResult {
+                switch self.updater.state {
+                case .failed(let reason): self.reportUpdateResult = false; self.message = "Could not update Codex++: \(reason)"
+                case .upToDate: self.reportUpdateResult = false; self.message = "Codex++ \(self.updater.currentVersion) is the latest version."
+                case .ready: self.reportUpdateResult = false
+                default: break
+                }
+            }
+            self.statusChanged?()
+        }
+        updater.start { [weak self] in self?.settings.checkForUpdates ?? false }
         monitor = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.resumeUpdateIfNeeded()
@@ -406,6 +430,14 @@ final class HelperModel: ObservableObject {
                 if !self.connected { throw HelperError.message("Settings is open. Choose Restart once to connect the helper, then select the extension again.") }
             }
         }
+    }
+    func checkForUpdates() { reportUpdateResult = true; updater.checkNow() }
+    func installUpdate() {
+        guard !busy else { message = "Wait for the current operation to finish."; return }
+        do { try updater.install() } catch { message = "Could not start the update: \(error.localizedDescription)" }
+    }
+    func setAutomaticUpdates(_ enabled: Bool) {
+        perform { var next = self.settings; next.checkForUpdates = enabled; try self.save(next) }
     }
     func openURL(_ url: URL) { NSWorkspace.shared.open(url) }
     func showFiles() { try? store.prepare(); NSWorkspace.shared.open(store.directory) }

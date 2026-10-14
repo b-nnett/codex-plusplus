@@ -2,23 +2,25 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 sparkle_commit=066e75a8b3e99962685d6a90cdd5293ebffd9261
-sparkle_root="$PWD/.build/sparkle-framework"
+# CODEXPP_SPARKLE_CACHE: a shared build cache (the self-updater reuses one across releases).
+sparkle_cache="${CODEXPP_SPARKLE_CACHE:-$PWD/.build}"
+sparkle_root="$sparkle_cache/sparkle-framework"
 patch_hash="$(shasum -a 256 vendor/sparkle/local-peer-authentication.patch | awk '{print $1}')"
 toolchain="$(xcodebuild -version | tr '\n' ' ')"
 cache_key="$(printf '%s\n%s\n%s\n' "$sparkle_commit" "$patch_hash" "$toolchain" | shasum -a 256 | awk '{print $1}')"
 if [ ! -f "$sparkle_root/build.sha256" ] || [ "$(cat "$sparkle_root/build.sha256")" != "$cache_key" ]; then
-  sparkle_source="$PWD/.build/sparkle-source"
+  sparkle_source="$sparkle_cache/sparkle-source"
   if [ ! -d "$sparkle_source/.git" ]; then git clone --no-checkout https://github.com/sparkle-project/Sparkle.git "$sparkle_source"; fi
   git -C "$sparkle_source" checkout --force --detach "$sparkle_commit"
   git -C "$sparkle_source" clean -fdx
   git -C "$sparkle_source" apply "$PWD/vendor/sparkle/local-peer-authentication.patch"
-  rm -rf "$PWD/.build/sparkle-products"
+  rm -rf "$sparkle_cache/sparkle-products"
   xcodebuild -project "$sparkle_source/Sparkle.xcodeproj" -scheme Sparkle -configuration Release \
-    -derivedDataPath "$PWD/.build/sparkle-products" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+    -derivedDataPath "$sparkle_cache/sparkle-products" ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
     MACOSX_DEPLOYMENT_TARGET=12.0 CODE_SIGNING_ALLOWED=NO build
   mkdir -p "$sparkle_root"
   rm -rf "$sparkle_root/Sparkle.framework"
-  ditto "$PWD/.build/sparkle-products/Build/Products/Release/Sparkle.framework" "$sparkle_root/Sparkle.framework"
+  ditto "$sparkle_cache/sparkle-products/Build/Products/Release/Sparkle.framework" "$sparkle_root/Sparkle.framework"
   printf '%s' "$cache_key" > "$sparkle_root/build.sha256"
 fi
 sparkle_identity="${CODEXPP_SIGNING_IDENTITY:-}"

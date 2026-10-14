@@ -149,6 +149,10 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
         repairEntry = nil
         statusEntry = add(model.status, to: menu, enabled: false)
+        if case .ready(let version) = model.updater.state {
+            add("Restart to Update Codex++ to \(version)", to: menu, action: #selector(installUpdate), enabled: !model.busy && !model.isPreview)
+                .image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: "Update available")
+        }
         if let title = model.repairActionTitle {
             repairEntry = add(title, to: menu, action: #selector(repair), enabled: !model.busy && !model.isPreview)
             repairEntry?.image = NSImage(systemSymbolName: "wrench.and.screwdriver", accessibilityDescription: "Repair Extensions support")
@@ -190,6 +194,15 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         add("Settings…", to: menu, action: #selector(revealPreferences), enabled: !model.busy)
+        let updates = submenu("Codex++ \(model.updater.currentVersion)", in: menu)
+        switch model.updater.state {
+        case .checking: add("Checking for updates…", to: updates, enabled: false)
+        case .building(let version): add("Preparing Codex++ \(version)…", to: updates, enabled: false)
+        case .failed(let reason): add("Last update check failed", to: updates, enabled: false).toolTip = reason
+        default: break
+        }
+        add("Check for Updates…", to: updates, action: #selector(checkForUpdates), enabled: !model.isPreview)
+        add("Update Automatically", to: updates, action: #selector(toggleAutomaticUpdates), enabled: !model.busy).state = model.settings.checkForUpdates ? .on : .off
         add("GitHub", to: menu, action: #selector(github))
         menu.addItem(.separator())
         add("Quit", to: menu, action: #selector(quitHelper), enabled: !model.busy)
@@ -222,4 +235,7 @@ final class HelperDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openExtensionFolder() { model.showFiles() }
     @objc private func github() { menu.cancelTracking(); model.openURL(model.github) }
     @objc private func quitHelper() { model.quit() }
+    @objc private func installUpdate() { menu.cancelTracking(); model.installUpdate() }
+    @objc private func checkForUpdates() { menu.cancelTracking(); model.checkForUpdates() }
+    @objc private func toggleAutomaticUpdates() { model.setAutomaticUpdates(!model.settings.checkForUpdates) }
 }

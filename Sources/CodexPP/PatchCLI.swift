@@ -5,8 +5,12 @@ import CodexPPCore
 enum PatchCLI {
     @MainActor static func runIfRequested() -> Bool {
         let args = ProcessInfo.processInfo.arguments
-        guard args.count > 1, ["--patch-status", "--check-probe", "--stage-patch", "--patch-app", "--patch-and-restart", "--restore-app", "--recover-patch", "--restart-helper", "--begin-update-validation", "--finish-background-update-validation"].contains(args[1]) else { return false }
+        guard args.count > 1, ["--patch-status", "--check-probe", "--stage-patch", "--patch-app", "--patch-and-restart", "--restore-app", "--recover-patch", "--restart-helper", "--begin-update-validation", "--finish-background-update-validation", "--finish-self-update"].contains(args[1]) else { return false }
         do {
+            if args[1] == "--finish-self-update", args.count == 3 {
+                try finishSelfUpdate(ticketPath: args[2])
+                return true
+            }
             if args[1] == "--finish-background-update-validation" {
                 let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("CodexPP")
                 let settings = try ExtensionStore(root: support).readSettings()
@@ -128,5 +132,45 @@ enum PatchCLI {
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/open"); process.arguments = ["-n", app.path]
         try process.run(); process.waitUntilExit()
         guard process.terminationStatus == 0 else { throw PatchError.invalid("The app could not be opened. The original backup remains available.") }
+    }
+    /// Run by the staged helper after the user chose to update: waits for the
+    /// old helper to quit, swaps the bundles, launches the new helper and
+    /// confirms it is running; otherwise restores and relaunches the old one.
+    @MainActor static func finishSelfUpdate(ticketPath: String) throws {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("CodexPP")
+        let ticketURL = URL(fileURLWithPath: ticketPath)
+        guard ticketURL.standardizedFileURL == support.appendingPathComponent("Updates/self-update.json").standardizedFileURL else { throw PatchError.invalid("Unexpected update ticket.") }
+        let ticket = try JSONDecoder().decode(SelfUpdateTicket.self, from: Data(contentsOf: ticketURL))
+        let installed = URL(fileURLWithPath: ticket.installedPath), staged = URL(fileURLWithPath: ticket.stagedPath)
+        guard Date().timeIntervalSince(ticket.createdAt) < 600, staged.standardizedFileURL == Bundle.main.bundleURL.standardizedFileURL,
+              SelfUpdate.info(staged)?["CFBundleShortVersionString"] as? String == ticket.version else { throw PatchError.invalid("The update ticket does not match this build.") }
+        try LocalSigningIdentity.validate(helper: staged, support: support)
+        let deadline = Date().addingTimeInterval(60)
+        while ProcessLiveness.isAlive(ticket.oldPID) && Date() < deadline { usleep(200_000) }
+        guard !ProcessLiveness.isAlive(ticket.oldPID) else { throw PatchError.invalid("The running Codex++ did not quit.") }
+        let previous = try SelfUpdate.swap(installed: installed, staged: staged)
+        func launch() { _ = try? runProcess("/usr/bin/open", ["-n", installed.path]) }
+        launch()
+        // Healthy: a helper runs from the installed path with the new version.
+        var healthy = false
+        for _ in 0..<120 {
+            usleep(500_000)
+            let running = NSWorkspace.shared.runningApplications.contains { $0.bundleIdentifier == "dev.codexpp.helper" && $0.processIdentifier != getpid() &&
+                $0.bundleURL?.standardizedFileURL == installed.standardizedFileURL && !$0.isTerminated }
+            if running, SelfUpdate.info(installed)?["CFBundleShortVersionString"] as? String == ticket.version { healthy = true; break }
+        }
+        let result: [String: Any] = ["schema": 1, "version": ticket.version, "installed": healthy, "time": ISO8601DateFormatter().string(from: Date())]
+        try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]).write(to: support.appendingPathComponent("Updates/self-update-result.json"), options: .atomic)
+        try? FileManager.default.removeItem(at: ticketURL)
+        guard healthy else {
+            for app in NSWorkspace.shared.runningApplications where app.bundleURL?.standardizedFileURL == installed.standardizedFileURL { app.forceTerminate() }
+            try SelfUpdate.rollBack(installed: installed, previous: previous)
+            launch()
+            throw PatchError.invalid("Codex++ \(ticket.version) did not start; the previous version was restored.")
+        }
+    }
+    private static func runProcess(_ tool: String, _ arguments: [String]) throws -> Int32 {
+        let process = Process(); process.executableURL = URL(fileURLWithPath: tool); process.arguments = arguments
+        try process.run(); process.waitUntilExit(); return process.terminationStatus
     }
 }

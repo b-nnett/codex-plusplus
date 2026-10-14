@@ -8,10 +8,12 @@ public struct HelperSettings: Codable, Equatable, Sendable {
     public var githubRepo: String? = nil
     public var settingsIntent = 0
     public var selectedExtensionId: String? = nil
+    /// Check GitHub releases daily and prepare signed updates of Codex++ in the background.
+    public var checkForUpdates = true
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case appPath, port, extensionsPaused, enabled, githubRepo, settingsIntent, selectedExtensionId
+        case appPath, port, extensionsPaused, enabled, githubRepo, settingsIntent, selectedExtensionId, checkForUpdates
         case legacyWithoutTweaks = "withoutTweaks"
     }
     public init(from decoder: Decoder) throws {
@@ -24,6 +26,7 @@ public struct HelperSettings: Codable, Equatable, Sendable {
         githubRepo = try values.decodeIfPresent(String.self, forKey: .githubRepo)
         settingsIntent = try values.decodeIfPresent(Int.self, forKey: .settingsIntent) ?? 0
         selectedExtensionId = try values.decodeIfPresent(String.self, forKey: .selectedExtensionId)
+        checkForUpdates = try values.decodeIfPresent(Bool.self, forKey: .checkForUpdates) ?? true
     }
     public func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
@@ -34,6 +37,7 @@ public struct HelperSettings: Codable, Equatable, Sendable {
         try values.encodeIfPresent(githubRepo, forKey: .githubRepo)
         try values.encode(settingsIntent, forKey: .settingsIntent)
         try values.encodeIfPresent(selectedExtensionId, forKey: .selectedExtensionId)
+        if !checkForUpdates { try values.encode(false, forKey: .checkForUpdates) }
     }
 
     public func validate() throws {

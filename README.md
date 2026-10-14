@@ -30,9 +30,23 @@ The current desktop app is `ChatGPT.app`, with bundle ID `com.openai.codex` (ver
 
 The first restart from the helper stages, verifies, and installs Extensions support. Subsequent launches of ChatGPT start the helper and its loopback connection automatically. The helper never force-quits the app. The Settings adapter registers Extensions in the shared native navigation list, sidebar, Settings search, and Cmd-K menu. The page uses the app's own Settings page/title, section, card, row, button, and switch components with its React instance.
 
-There is one Extensions system. Renderer packages are supported; packages for older main-process/native APIs need adaptation. A remote catalogue and automatic helper updates are future work.
+There is one Extensions system. Renderer packages are supported; packages for older main-process/native APIs need adaptation. A remote catalogue is future work.
 
 [`better-browser`](extensions/better-browser) enables macOS AutoFill in editable in-app browser fields. It uses a narrow native bridge and the clicked frame with the existing context menu. Build the current helper and restart ChatGPT through Codex++ to install that bridge before enabling the extension.
+
+## Updates
+
+Codex++ keeps itself current from the [GitHub releases](https://github.com/b-nnett/codex-plusplus/releases) of `b-nnett/codex-plusplus`. Because every user builds and signs Codex++ with their own Developer ID, an update is a source release, not a binary:
+
+1. About once a day (and from **Codex++ → Check for Updates…**), the helper downloads `release.json` and `release.json.sig` from the latest release. The signature must be an SSH signature in the `codexpp-release` namespace from the release key listed in `Sources/CodexPPCore/Resources/release-signers`, which is compiled into the helper you built. Checksums published next to a release are not trusted on their own.
+2. The manifest must name this repository, its own tag and artifact, and a newer version; there are no downgrades.
+3. The helper downloads the source tarball, requires its size and SHA-256 to match the signed manifest, extracts it into an empty folder under `~/Library/Application Support/CodexPP/Updates/`, and builds it with `scripts/build-app.sh` using your toolchain and your pinned Developer ID (the Sparkle build is cached across releases). The result must carry the pinned certificate and the new version.
+4. The menu then offers **Restart to Update Codex++**. The staged helper waits for the running one to quit, swaps the bundle in place with one atomic exchange (keeping `.Codex++.previous.app` beside it), launches the new helper and confirms it is running; if it is not, it swaps back and relaunches the old one.
+5. The new helper offers **Update Extensions Support and Restart ChatGPT**, which repatches ChatGPT with the new revision through the usual staged, probed, atomic install.
+
+Turn off **Update Automatically** to only check by hand. Until a release key is listed in `release-signers`, updates stay off.
+
+Releasing: `CODEXPP_REQUIRE_TAG=1 CODEXPP_RELEASE_KEY=<key> scripts/release-source.sh` writes the tarball, `SHA256SUMS`, `release.json` and its signature (a hardware-backed SSH key is recommended; the private key never leaves the maintainer's machine). Draft the GitHub release with those files and push the tag; `.github/workflows/release.yml` rebuilds the tarball from the tag, requires the drafted one to be byte-identical, verifies the signature, runs the tests and publishes the release.
 
 ## Patching and recovery
 
@@ -105,7 +119,7 @@ Settings and installed extensions live in `~/Library/Application Support/CodexPP
 open 'dist/Codex++ Preview.app'
 ```
 
-Benchmark experiments (`Diagnostics/experiments.json`: scripted resizes and panel toggles, Chromium traces, script probes, injected CSS, V8 flags, a fixed shimmer label) exist only in development helpers built with `CODEXPP_EXPERIMENTS=1 ./scripts/build-app.sh`; release bootstraps contain none of that code and never read the file. Startup tracing (`Diagnostics/trace.enable`) only records and is available in every build.
+Benchmark experiments (`Diagnostics/experiments.json`: scripted resizes and panel toggles, Chromium traces, script probes, injected CSS, V8 flags, a fixed shimmer label) exist only in development helpers built with `CODEXPP_EXPERIMENTS=1 ./scripts/build-app.sh`; release bootstraps contain none of that code and never read the file. The same goes for startup tracing (`Diagnostics/trace.enable`, the `patched-traced` variant below), whose debugger, heap and CPU probes a file could otherwise switch on, and for the diagnostic startup edits (query, gate and policy timings).
 
 `scripts/bench-startup.py` measures cold-launch time to interactivity of the installed patch against the retained original bundle, using ChatGPT's own `app_start` span (home and sidebar ready) and an external wall clock. Launches alternate between variants; backgrounded windows are relaunched, and leftover bundle processes are cleared first. `--variants original,patched,patched-paused` also measures the patch with extensions paused. It quits and relaunches ChatGPT repeatedly, so leave the Mac idle while it runs:
 

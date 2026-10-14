@@ -11,7 +11,10 @@ flags=()
 if [ "${CODEXPP_EXPERIMENTS:-0}" = 1 ]; then flags=(-Xswiftc -DCODEXPP_EXPERIMENTS); fi
 swift build -c release -debug-info-format none ${flags[@]+"${flags[@]}"}
 bin_dir="$(swift build -c release --show-bin-path ${flags[@]+"${flags[@]}"})"
-app="$PWD/dist/Codex++.app"
+# CODEXPP_OUTPUT: where to build the app (the self-updater builds into its staging folder).
+app="${CODEXPP_OUTPUT:-$PWD/dist/Codex++.app}"
+[[ "$app" == /*.app ]] || { echo 'CODEXPP_OUTPUT must be an absolute path ending in .app.' >&2; exit 1; }
+sparkle_cache="${CODEXPP_SPARKLE_CACHE:-$PWD/.build}"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 icon_work="$(mktemp -d "${TMPDIR:-/tmp}/codexpp-icon.XXXXXX")"
@@ -58,8 +61,8 @@ if [ -z "$signing_identity" ] || [[ "$signing_identity" == *$'\n'* ]] || [ "$sig
   echo 'A Developer ID Application certificate is required. Set CODEXPP_SIGNING_IDENTITY when multiple identities are installed.' >&2
   exit 1
 fi
-CODEXPP_SIGNING_IDENTITY="$signing_identity" bash scripts/build-sparkle.sh
-ditto "$PWD/.build/sparkle-framework/Sparkle.framework" "$app/Contents/Resources/Sparkle.framework"
+CODEXPP_SIGNING_IDENTITY="$signing_identity" CODEXPP_SPARKLE_CACHE="$sparkle_cache" bash scripts/build-sparkle.sh
+ditto "$sparkle_cache/sparkle-framework/Sparkle.framework" "$app/Contents/Resources/Sparkle.framework"
 node_include="${CODEXPP_NODE_INCLUDE:-}"
 if [ -z "$node_include" ]; then
   for candidate in "$(node -p 'require("path").resolve(process.execPath, "../../include/node")')" /opt/homebrew/include/node /usr/local/include/node; do

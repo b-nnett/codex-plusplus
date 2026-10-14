@@ -1,0 +1,53 @@
+# Publishes a Codex++ release that the maintainer drafted locally.
+#
+# The maintainer runs, on a signed tag:
+#   CODEXPP_REQUIRE_TAG=1 CODEXPP_RELEASE_KEY=<key> scripts/release-source.sh
+#   gh release create v<version> --draft dist/releases/*
+# and pushes the tag. This workflow never sees the signing key. It rebuilds the
+# source tarball from the tag, requires the drafted asset to be byte-identical,
+# verifies release.json's signature against the key in the repository, runs the
+# tests, and only then publishes the draft. Helpers update from published
+# releases only (releases/latest).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-publish:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tests
+        run: |
+          swift test --disable-sandbox
+          node --test Tests/*.test.mjs
+      - name: Rebuild the source release
+        run: CODEXPP_REQUIRE_TAG=1 scripts/release-source.sh
+      - name: Compare with the drafted release and verify its signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          mkdir drafted
+          gh release download "$tag" --dir drafted --pattern '*'
+          artifact="codex-pp-${tag#v}-source.tar.gz"
+          cmp "drafted/$artifact" "dist/releases/$artifact"
+          ssh-keygen -Y verify -f Sources/CodexPPCore/Resources/release-signers -I release@codexpp -n codexpp-release \
+            -s drafted/release.json.sig < drafted/release.json
+          python3 - <<'PY'
+          import json, os
+          drafted = json.load(open('drafted/release.json'))
+          rebuilt = json.load(open('dist/releases/release.json'))
+          assert drafted == rebuilt, (drafted, rebuilt)
+          PY
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "${GITHUB_REF_NAME}" --draft=false --latest

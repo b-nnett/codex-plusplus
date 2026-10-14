@@ -33,6 +33,11 @@ public enum LocalSigningIdentity {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return fingerprint
     }
+    /// A helper bundle (such as a built update) must carry the pinned certificate.
+    public static func validate(helper: URL, support: URL) throws {
+        guard let fingerprint = pinned(support: support) else { throw PatchError.invalid("No signing identity is pinned yet. Patch ChatGPT once before updating Codex++.") }
+        try validateHelper(helper, fingerprint: fingerprint)
+    }
     /// The pinned certificate fingerprint, without querying the Keychain.
     public static func pinned(support: URL) -> String? {
         guard let data = try? Data(contentsOf: support.appendingPathComponent("Patching/signing-identity.json")),
