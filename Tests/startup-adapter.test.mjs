@@ -43,7 +43,7 @@ function sharedHook(source, cached) {
 
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
-  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'resizeObserverCoalescing', 'statsigCacheFirst', 'statsigUserCacheFirst']);
+  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst', 'viewportContainerQueries']);
   assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
@@ -485,27 +485,6 @@ test('the compositor shimmer moves layers instead of repainting the text', () =>
   focused = true; windowListeners.focus();
   assert.ok(!rootAttributes.has('data-codexpp-blurred'), 'focus resumes them');
   assert.match(runtime, /:root\[data-codexpp-blurred\] \.codexpp-shimmer\{visibility:hidden\}/);
-});
-
-test('ResizeObserver callbacks are coalesced only while the window is resizing', () => {
-  const runtime = context.CodexPPStartupAdapter.layoutMotion;
-  let now = 0, resize = null;
-  const timers = [];
-  class FakeRO { constructor(cb) { this.cb = cb; } fire(entries) { this.cb.call(this, entries, this); } }
-  const sandbox = {ResizeObserver: FakeRO, performance: {now: () => now}, setTimeout: (f, ms) => { timers.push(f); return timers.length; },
-    addEventListener: (type, f) => { if (type === 'resize') resize = f; }, requestAnimationFrame() {}, matchMedia: () => ({matches: false}),
-    document: {documentElement: {dataset: {}, setAttribute() {}}, head: {append() {}}, createElement: () => ({}), querySelector: () => null}};
-  sandbox.globalThis = sandbox;
-  vm.runInNewContext(runtime, sandbox);
-  const seen = [];
-  const observer = new sandbox.ResizeObserver(entries => seen.push(entries.map(e => e.v)));
-  observer.fire([{target: 'a', v: 1}]);
-  assert.equal(JSON.stringify(seen), '[[1]]', 'outside a resize: delivered as usual');
-  resize(); now = 10;
-  observer.fire([{target: 'a', v: 2}]); observer.fire([{target: 'a', v: 3}]);
-  assert.equal(JSON.stringify(seen), '[[1]]', 'during a resize: held');
-  timers.pop()();
-  assert.equal(JSON.stringify(seen), '[[1],[3]]', 'then delivered once with the latest size');
 });
 
 test('width media rules become container queries on the root, other media rules stay', () => {

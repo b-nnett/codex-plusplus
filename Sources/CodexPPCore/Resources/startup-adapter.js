@@ -159,17 +159,13 @@ document.addEventListener("animationstart",e=>{if(e.animationName==="codexpp-shi
 }catch{}})();`;
 
 
-// Layout motion: two fixes for work that re-lays out the whole window every
-// frame. Stylesheets: a sheet with width media queries is rebuilt whenever
-// the window crosses one of them, and Chromium then resets every @font-face,
+// Layout motion: a sheet with width media queries is rebuilt whenever the
+// window crosses one of them, and Chromium then resets every @font-face,
 // @property and @keyframes rule of the document and restyles and relays out
 // the whole window. app-shared.css (47 breakpoints) did this about 50 times in a
 // 6 s resize. Width-only media rules become container queries on <html> (the
 // viewport, which never scrolls), so a breakpoint restyles only what it styles;
 // rules for <html> itself apply to <body>, which inherits the same values.
-// Resize: while the window is being resized, ResizeObserver callbacks are
-// coalesced to at most one delivery per 100 ms plus a final one, except the
-// virtualized turn list's own measurement.
 const layoutMotion = String.raw`(()=>{try{
 if(typeof document==="undefined"||globalThis.__codexPPLayoutMotion)return;globalThis.__codexPPLayoutMotion=1;
 const ppViewportQuery=text=>{if(!/\bwidth\b/.test(text)||/height|aspect|orientation|resolution|print|hover|pointer|prefers|color|display-mode|scripting/.test(text))return null;
@@ -185,18 +181,6 @@ const text="@container codexpp-viewport "+ppViewportQuery(r.media.mediaText)+"{"
 parent.deleteRule(index);try{parent.insertRule(text,index)}catch{parent.insertRule(original,index)}}}catch{}};
 try{const root=document.createElement("style");root.setAttribute("data-codexpp-viewport","");root.textContent="html{container:codexpp-viewport/inline-size}";(document.head??document.documentElement).prepend(root);
 for(const sheet of document.styleSheets)ppRewrite(sheet);document.addEventListener("load",e=>{if(e.target?.sheet)ppRewrite(e.target.sheet)},true)}catch{}
-const ppRO=globalThis.ResizeObserver;if(!ppRO)return;
-let ppUntil=0;const ppQuiet=120,ppEvery=100;
-addEventListener("resize",()=>{ppUntil=performance.now()+ppQuiet},{capture:true,passive:true});
-const ppJobs=new Set();let ppTimer=0;
-const ppFlush=()=>{ppTimer=0;const jobs=[...ppJobs];ppJobs.clear();for(const job of jobs){try{job()}catch(e){setTimeout(()=>{throw e})}}
-if(ppJobs.size)ppTimer=setTimeout(ppFlush,ppEvery)};
-const ppQueue=job=>{ppJobs.add(job);if(!ppTimer)ppTimer=setTimeout(ppFlush,Math.max(ppEvery,ppUntil-performance.now()))};
-globalThis.ResizeObserver=class extends ppRO{constructor(callback){
-const exempt=/virtualized-turn-list|thread-virtualizer/.test(new Error().stack??"");const latest=new Map();let self=null;
-const job=()=>{const entries=[...latest.values()];latest.clear();if(entries.length&&self)callback.call(self,entries,self)};
-super(function(entries,observer){self=observer;if(exempt||performance.now()>=ppUntil){if(latest.size){for(const e of entries)latest.set(e.target,e);ppJobs.delete(job);job();return}
-return callback.call(this,entries,observer)}for(const e of entries)latest.set(e.target,e);ppQueue(job)})}};
 }catch{}})();`;
 
 globalThis.CodexPPStartupAdapter = Object.freeze({
@@ -498,8 +482,8 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
         applied.compositorShimmer = 'initial';
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${layoutMotion}` });
-        applied.resizeObserverCoalescing = 'initial';
-      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = skipped.resizeObserverCoalescing = firstStatement ? 'initial bundle not recognised' : 'module not found';
+        applied.viewportContainerQueries = 'initial';
+      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = skipped.viewportContainerQueries = firstStatement ? 'initial bundle not recognised' : 'module not found';
       if (firstStatement && applied.chunkTimings) {
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `const ppKey="codexpp.startupChunks.v2:"+import.meta.url;let ppList=null;try{ppList=JSON.parse(localStorage.getItem(ppKey)??"null")}catch{}` +
