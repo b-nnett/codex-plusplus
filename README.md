@@ -36,7 +36,7 @@ There is one Extensions system. Renderer packages are supported; packages for ol
 
 ## Patching and recovery
 
-The installer follows the external helper approach used by [Vencord's installer](https://github.com/Vencord/Installer/blob/main/patcher.go), with adapters for this app. Patch revision **v36** has pinned adapters for ChatGPT builds **20052** and **13536**. The authenticated structural adapter and exact recipe were also verified live against **ChatGPT 26.1007.30912, build 20156, arm64**. Known releases use pinned hashes. Future updates require a valid complete OpenAI signature and successful structural adapter discovery before staging; unexpected or ambiguous contracts fail with the replacement closed.
+The installer follows the external helper approach used by [Vencord's installer](https://github.com/Vencord/Installer/blob/main/patcher.go), with adapters for this app. This release (patch revision **v137**) is reviewed for **ChatGPT 26.1007.71326, build 20398, arm64**, verified live through the authenticated structural adapter; that is the build it supports. The pinned adapters for builds 20052 and 13536 remain from earlier reviews. Known releases use pinned hashes. Future updates require a valid complete OpenAI signature and successful structural adapter discovery before staging; unexpected or ambiguous contracts fail with the replacement closed.
 
 Settings integration uses a bundled Acorn parser to discover native components through their JSX property contracts and import/export graph. Source-range edits register Extensions in navigation, title lookup, search, and Cmd-K. Minified local names, export aliases, hashed bundle names, and React cache indexes are discovered rather than pinned. Missing or ambiguous matches stop staging; vendor JavaScript is parsed as data and never executed by discovery. A signed `codexpp-settings-discovery.json` records the resolved component and hook bindings. Known releases use pinned archive and native-binary hashes. Future releases require a complete valid OpenAI signature before structural adapter discovery; missing or ambiguous contracts stop the automatic repatch with the app closed. Discovery uses the app’s bundled Node runtime after verifying its OpenAI signature; JavaScriptCore remains the fallback when that runtime is absent. Archive lookups avoid rebuilding directory maps and all source replacements are written in one pass. No separate Node installation or network access is required.
 
@@ -105,6 +105,8 @@ Settings and installed extensions live in `~/Library/Application Support/CodexPP
 open 'dist/Codex++ Preview.app'
 ```
 
+Benchmark experiments (`Diagnostics/experiments.json`: scripted resizes and panel toggles, Chromium traces, script probes, injected CSS, V8 flags, a fixed shimmer label) exist only in development helpers built with `CODEXPP_EXPERIMENTS=1 ./scripts/build-app.sh`; release bootstraps contain none of that code and never read the file. Startup tracing (`Diagnostics/trace.enable`) only records and is available in every build.
+
 `scripts/bench-startup.py` measures cold-launch time to interactivity of the installed patch against the retained original bundle, using ChatGPT's own `app_start` span (home and sidebar ready) and an external wall clock. Launches alternate between variants; backgrounded windows are relaunched, and leftover bundle processes are cleared first. `--variants original,patched,patched-paused` also measures the patch with extensions paused. It quits and relaunches ChatGPT repeatedly, so leave the Mac idle while it runs:
 
 ```sh
@@ -124,21 +126,39 @@ python3 scripts/bench-startup.py --variants original,patched --runs 5 --record d
 python3 scripts/launch-video.py dist/launches/bench.json
 ```
 
-Measured on ChatGPT build 20156 (patch v97), six alternating cold launches each, `bench-startup.py --variants original,patched --runs 6 --steady 25 --idle 45:105`:
+Measured on ChatGPT 26.1007.71326 (build 20398, patch v135), three alternating cold launches each after a discarded warm-up, `bench-startup.py --variants original,patched --runs 3 --warmup 1 --steady 30 --record dist/evidence/launch`:
 
 | | Stock | Codex++ | Change |
 |---|---|---|---|
-| Click to interactive (home and sidebar ready) | 4.39 s | 2.45 s | −44% |
-| CPU used in the first 25 s | 41.2 s | 14.2 s | −66% |
-| Memory footprint at 25 s (macOS `footprint`) | 4.84 GB | 1.86 GB | −62% |
-| Processes at 25 s | 29 | 21 | −8 |
-| Idle CPU, focused and untouched | 16.8% of a core | 3.8% | −78% |
+| Click to interactive (home and sidebar ready) | 4.10 s | 2.35 s | −43% |
+| CPU used in the first 30 s | 38.0 s | 12.4 s | −67% |
+| Memory footprint at 30 s (macOS `footprint`) | 4.43 GB | 1.55 GB | −65% |
+| Processes at 30 s | 24 | 15 | −9 |
+| Idle CPU, focused and untouched, 45 s after launch | 12.8% of a core | 3.8% | −70% |
 
-Summed RSS (7.9 GB vs 3.3 GB) overstates both, because shared pages count once per process. Every difference is significant (Mann–Whitney p ≈ 0.004).
+Summed RSS (7.4 GB vs 2.8 GB) overstates both, because shared pages count once per process. With three launches each, every launch difference has Mann–Whitney p ≈ 0.05, the smallest possible at that sample size. The idle row comes from `scripts/evidence-video.py idle --settle 45`.
+
+### Window resizing and the side panel
+
+Resizing a long thread with the side panel open was the worst interaction in the stock app. Four causes, each found with Chromium traces (`chromeTrace` and `manualTrace` experiments) and frame-by-frame analysis of screen recordings:
+
+- **Breakpoints.** ChatGPT's main stylesheet has 47 width media queries. Each time the window crossed one, Chromium rebuilt the sheet, reset every `@font-face`, `@property` and `@keyframes` rule and restyled and relaid out the whole window, about 50 times in a 6 s resize. Width-only media rules now run as container queries on `<html>`, which is always exactly the viewport, so a breakpoint restyles only what it styles (`viewportContainerQueries`).
+- **Menu rebuilds.** The side panel's browser reports its bounds on every frame, and each report rebuilt the whole application menu in the main process; in a 12 s hand resize that was 1.6 s of work ending in a 0.9 s garbage collection that froze drawing. A burst now rebuilds the menu once at the start and once 250 ms later (`coalesceBrowserMenuRefresh`).
+- **Chat column jitter.** The shell measures its width with a ResizeObserver, which runs after layout, and the panel width it drives was written by framer-motion on the next frame, so the chat column took each step for a frame and snapped back. Observers of window-wide elements now get their new size from the window's resize event, before the frame is laid out.
+- **The side panel's own animation** is unchanged; it now plays smoothly in long threads because the costs above are gone.
+
+| Same 240-step window resize, side panel open | Stock | Codex++ |
+|---|---|---|
+| Time to apply the 240 sizes | 6.12 s | 3.31 s |
+| CPU work | 16.0 core·s | 6.8 core·s |
+| Chat/panel divider jumping backwards | 132 times | 0 |
+| Longest freeze in a 12 s hand resize | 872 ms | 68 ms |
+
+`scripts/evidence-video.py resize|panel|idle|shimmer` films stock and patched runs under identical conditions with a live CPU readout of the whole process tree and renders labelled clips plus a side-by-side (`--settle 30` lets both apps finish starting first; Screen Recording and Accessibility permission required).
 
 ### Agent turns
 
-`scripts/process-sampler.py --out FILE --duration SECONDS` samples CPU (percent of one core) by process kind, every process ChatGPT and the agent spawn, and the memory footprint of the whole tree while a turn runs; the turn's own timeline is in `~/.codex/sessions/.../rollout-*.jsonl`. In a typical turn the model's generation is nearly all of the wall time. Two client costs stood out: the "Thinking" shimmer (a background-position animation that repaints the label on every step, about 17% of a core while the model thinks), and MCP churn. Codex++ moves the shimmer to the compositor: the text is drawn once in the base colour and a copy in the highlight colour slides under a soft-edged window that moves with `transform`, so nothing repaints. With a shimmer on screen this measured 13.2% of a core against 26.8% (`{"demoShimmer":"original"|"compositor"}` in `Diagnostics/experiments.json` shows a fixed label for the A/B). The remaining cost is producing a frame for each of the shimmer's 24 steps per second, which a compositor animation still needs. Each MCP inventory request (`mcpServerStatus/list`) starts every configured MCP server to list its tools, and each server of a new thread reporting ready used to trigger another one; Codex++ collapses those into one refetch per thread, skipped when the inventory is under a minute old.
+`scripts/process-sampler.py --out FILE --duration SECONDS` samples CPU (percent of one core) by process kind, every process ChatGPT and the agent spawn, and the memory footprint of the whole tree while a turn runs; the turn's own timeline is in `~/.codex/sessions/.../rollout-*.jsonl`. In a typical turn the model's generation is nearly all of the wall time. Two client costs stood out: the "Thinking" shimmer (a background-position animation that repaints the label on every step, about 17% of a core while the model thinks), and MCP churn. Codex++ moves the shimmer to the compositor: the text is drawn once in the base colour and a copy in the highlight colour slides under a soft-edged window that moves with `transform`, so nothing repaints. With a shimmer on screen this measured 13.2% of a core against 26.8% for the renderer alone, and 11.8% against 18.1% for the whole process tree (in a development build, `{"demoShimmer":"original"|"compositor"}` in `Diagnostics/experiments.json` shows a fixed label for the A/B). The remaining cost is producing a frame for each of the shimmer's 24 steps per second, which a compositor animation still needs. Each MCP inventory request (`mcpServerStatus/list`) starts every configured MCP server to list its tools, and each server of a new thread reporting ready used to trigger another one; Codex++ collapses those into one refetch per thread, skipped when the inventory is under a minute old.
 
 ### Idle cost: the blinking cursor
 

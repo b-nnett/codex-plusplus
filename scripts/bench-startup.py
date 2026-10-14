@@ -457,7 +457,7 @@ def main():
     ap.add_argument("--record", metavar="DIR", help="film every measured launch into DIR (needs Screen Recording); "
                     "render with scripts/launch-video.py")
     ap.add_argument("--experiment", action="append", default=[], metavar="NAME",
-                    help="startup experiment enabled for patched-exp launches (e.g. compileCache)")
+                    help="startup experiment enabled for patched-exp launches (e.g. css); needs a helper built with CODEXPP_EXPERIMENTS=1")
     ap.add_argument("--trace-env", action="append", default=[], metavar="KEY=VALUE",
                     help="probe switch for traced launches, e.g. CODEXPP_TRACE_RENDERER_PROFILE=0 (written to trace.enable)")
     ap.add_argument("--trace-wait", type=float, default=60, help="seconds to wait for a traced launch's profiles")
