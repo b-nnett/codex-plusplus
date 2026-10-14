@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 121
+    public static let revision = 127
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
@@ -159,6 +159,23 @@ public struct PatchAdapter: Codable, Sendable {
                   });
                 });
               }
+              // manualTrace: after perfScriptDelayMs (and Diagnostics/trace-now, with manualTraceOnFile),
+              // say "start", record a Chromium trace for manualTrace seconds while someone uses the
+              // app by hand, then say "stop".
+              if (Number(ppExperiments.manualTrace) > 0) {
+                void ppElectron.app.whenReady().then(() => setTimeout(async () => {
+                  const ppSay = word => { try { require('child_process').spawn('/usr/bin/say', [word], {stdio: 'ignore'}).unref(); } catch {} };
+                  // Wait (up to an hour) for Diagnostics/trace-now when it is armed with manualTraceOnFile.
+                  const ppTrigger = require('path').join(\(try literal(support.path)), 'Diagnostics', 'trace-now');
+                  for (let ppWait = 0; ppExperiments.manualTraceOnFile === true && ppWait < 12000 && !require('fs').existsSync(ppTrigger); ppWait++) await new Promise(done => setTimeout(done, 300));
+                  try { require('fs').rmSync(ppTrigger, {force: true}); } catch {}
+                  await ppElectron.contentTracing.startRecording({included_categories: ['devtools.timeline', 'blink', 'cc', 'viz', 'gpu', 'disabled-by-default-devtools.timeline', 'disabled-by-default-devtools.timeline.stack', 'disabled-by-default-v8.cpu_profiler']}).catch(() => {});
+                  ppSay('start');
+                  await new Promise(done => setTimeout(done, Number(ppExperiments.manualTrace) * 1000));
+                  ppSay('stop');
+                  try { await ppElectron.contentTracing.stopRecording(require('path').join(\(try literal(support.path)), 'Diagnostics', 'chrome-trace-manual.json')); } catch {}
+                }, Number(ppExperiments.perfScriptDelayMs) || 18000).unref?.());
+              }
               // perfScript: scripted resize then side-panel toggles on the main window,
               // for traced A/B runs of layout cost. Times go to Diagnostics/perf-script.json.
               if (ppExperiments.perfScript === true) {
@@ -169,19 +186,25 @@ public struct PatchAdapter: Codable, Sendable {
                   const ppWrite = () => { try { require('fs').writeFileSync(require('path').join(\(try literal(support.path)), 'Diagnostics', 'perf-script.json'), JSON.stringify(ppLog)); } catch {} };
                   if (!ppWindow) { ppMark('no-visible-window'); ppWrite(); return; }
                   const ppStart = ppWindow.getBounds();
+                  const ppFind = items => { for (const item of items ?? []) { if (/Toggle Changes Panel|Switch between Chat and tabs/.test(item.label ?? '')) return item; const sub = ppFind(item.submenu?.items); if (sub) return sub; } return null; };
+                  const ppToggle = ppFind(ppElectron.Menu.getApplicationMenu()?.items);
+                  // perfPanelFirst: toggle the side panel once before the resize (to resize with it open).
+                  if (ppExperiments.perfPanelFirst === true && ppToggle) { ppToggle.click(undefined, ppWindow, ppWindow.webContents); await new Promise(done => setTimeout(done, 2500)); ppMark('panel-toggled'); }
                   // chromeTrace: record Chromium's own timeline (style, layout, paint, raster) for the resize.
                   const ppChrome = ppExperiments.chromeTrace === true;
                   if (ppChrome) await ppElectron.contentTracing.startRecording({included_categories: ['devtools.timeline', 'blink', 'cc', 'viz', 'disabled-by-default-devtools.timeline', 'disabled-by-default-devtools.timeline.stack', 'disabled-by-default-devtools.timeline.invalidationTracking', 'disabled-by-default-v8.cpu_profiler']}).catch(() => {});
-                  // perfProbe: a JS expression evaluated in the window before the resize, logged as JSON.
+                  // perfProbe: a JS expression evaluated in the window before the resize, logged as JSON
+                  // (perfProbeOnly: then stop, without resizing).
                   if (typeof ppExperiments.perfProbe === 'string') { try { ppMark('probe:' + JSON.stringify(await ppWindow.webContents.executeJavaScript(ppExperiments.perfProbe))); } catch (error) { ppMark('probe-failed:' + error); } }
+                  if (ppExperiments.perfProbeOnly === true) { ppWrite(); return; }
+                  // perfResizeSwing: half the width swing of the resize (default 260 px).
+                  const ppSwing = Number(ppExperiments.perfResizeSwing) || 260;
                   ppMark('resize-start');
                   await new Promise(done => { let ppStep = 0; const ppTimer = setInterval(() => {
-                    ppStep++; ppWindow.setBounds({...ppStart, width: Math.round(ppStart.width - 260 + 260 * Math.cos(ppStep / 60 * Math.PI))});
+                    ppStep++; ppWindow.setBounds({...ppStart, width: Math.round(ppStart.width - ppSwing + ppSwing * Math.cos(ppStep / 60 * Math.PI))});
                     if (ppStep >= 360) { clearInterval(ppTimer); ppWindow.setBounds(ppStart); done(); } }, 16); });
                   ppMark('resize-end');
                   if (ppChrome) { try { const ppFile = await ppElectron.contentTracing.stopRecording(require('path').join(\(try literal(support.path)), 'Diagnostics', 'chrome-trace.json')); ppMark('chrome-trace:' + ppFile); } catch (error) { ppMark('chrome-trace-failed:' + error); } }
-                  const ppFind = items => { for (const item of items ?? []) { if (/Toggle Changes Panel|Switch between Chat and tabs/.test(item.label ?? '')) return item; const sub = ppFind(item.submenu?.items); if (sub) return sub; } return null; };
-                  const ppToggle = ppFind(ppElectron.Menu.getApplicationMenu()?.items);
                   if (ppChrome) await ppElectron.contentTracing.startRecording({included_categories: ['devtools.timeline', 'blink', 'cc', 'viz', 'disabled-by-default-devtools.timeline']}).catch(() => {});
                   for (let ppIndex = 0; ppIndex < 6 && ppToggle; ppIndex++) {
                     await new Promise(done => setTimeout(done, 2000));

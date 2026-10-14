@@ -159,13 +159,8 @@ document.addEventListener("animationstart",e=>{if(e.animationName==="codexpp-shi
 }catch{}})();`;
 
 
-// Layout motion: three fixes for work that re-lays out the whole window every
-// frame. Panel: opening the right panel animated its width (a framer-motion
-// spring on a 0..1 progress value), so every frame re-laid out the transcript;
-// on long threads frames were dropped and the panel just appeared. The width
-// now changes once and the panel (and its title-bar tab strip) slides with
-// transform on the compositor: in after the width opens, out before it
-// collapses. Stylesheets: a sheet with width media queries is rebuilt whenever
+// Layout motion: two fixes for work that re-lays out the whole window every
+// frame. Stylesheets: a sheet with width media queries is rebuilt whenever
 // the window crosses one of them, and Chromium then resets every @font-face,
 // @property and @keyframes rule of the document and restyles and relays out
 // the whole window. app-shared.css (47 breakpoints) did this about 50 times in a
@@ -173,24 +168,10 @@ document.addEventListener("animationstart",e=>{if(e.animationName==="codexpp-shi
 // viewport, which never scrolls), so a breakpoint restyles only what it styles;
 // rules for <html> itself apply to <body>, which inherits the same values.
 // Resize: while the window is being resized, ResizeObserver callbacks are
-// coalesced to at most one delivery per 100 ms plus a final one, except the virtualized turn list's own measurement.
+// coalesced to at most one delivery per 100 ms plus a final one, except the
+// virtualized turn list's own measurement.
 const layoutMotion = String.raw`(()=>{try{
 if(typeof document==="undefined"||globalThis.__codexPPLayoutMotion)return;globalThis.__codexPPLayoutMotion=1;
-const ppPanelSel='[data-app-shell-focus-area="right-panel"]:is(aside,[data-app-shell-titlebar-slot])';
-let ppToken=0;
-const ppPanels=()=>[...document.querySelectorAll(ppPanelSel)];
-const ppDir=()=>/ltr:me-auto/.test(document.querySelector('aside[data-app-shell-focus-area="right-panel"]')?.className??"")?-1:1;
-const ppSlide=(panels,from,to,easing,id)=>panels.map(p=>{const a=p.animate([{transform:"translateX("+from+"%)"},{transform:"translateX("+to+"%)"}],{duration:id==="codexpp-panel-out"?200:260,easing,fill:"forwards"});a.id=id;return a});
-globalThis.__codexPPPanelSlide=(mv,target)=>{try{
-if(matchMedia("(prefers-reduced-motion: reduce)").matches||document.documentElement.dataset.reducedMotion==="true")return false;
-const token=++ppToken,dir=ppDir();
-for(const p of ppPanels())for(const a of p.getAnimations?.()??[])if(a.id?.startsWith("codexpp-panel-"))a.cancel();
-if(target===1){if(mv.get()===1)return false;mv.set(1);
-const slideIn=panels=>{const done=ppSlide(panels,dir*100,0,"cubic-bezier(.2,.8,.2,1)","codexpp-panel-in");for(const a of done)a.onfinish=()=>a.cancel()};
-const now=ppPanels();if(now.length)slideIn(now);else requestAnimationFrame(()=>{if(token===ppToken)slideIn(ppPanels())});return true}
-const panels=ppPanels();if(!panels.length||mv.get()===0)return false;
-const outs=ppSlide(panels,0,dir*100,"cubic-bezier(.4,0,1,1)","codexpp-panel-out");
-outs[0].onfinish=()=>{if(token===ppToken)mv.set(0);requestAnimationFrame(()=>{for(const a of outs)a.cancel()})};return true}catch{return false}};
 const ppViewportQuery=text=>{if(!/\bwidth\b/.test(text)||/height|aspect|orientation|resolution|print|hover|pointer|prefers|color|display-mode|scripting/.test(text))return null;
 const parts=text.split(",").map(t=>{t=t.trim().replace(/^(only\s+)?(screen|all)\s+and\s+/,"");const not=t.match(/^not\s+(?:screen|all)\s+and\s+(.*)$/);return not?"not ("+not[1]+")":"("+t+")"});
 return parts.join(" or ")};
@@ -518,22 +499,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         applied.compositorShimmer = 'initial';
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${layoutMotion}` });
         applied.resizeObserverCoalescing = 'initial';
-        // function pzt(e,t,n){let r=+!!t;if(n){e.set(r);return}Qs(e,r,cC)}: the right panel's spring.
-        const springs = [];
-        walk(trees.initial, node => {
-          if (node.type !== 'FunctionDeclaration' || node.params.length !== 3 || node.body.body.length !== 3) return;
-          const [decl, check, call] = node.body.body;
-          const text = sources.initial.slice(node.body.start, node.body.end);
-          if (decl.type === 'VariableDeclaration' && check.type === 'IfStatement' && call.type === 'ExpressionStatement' && call.expression.type === 'CallExpression' &&
-              /^\{let \w+=\+!!\w+;if\(\w+\)\{\w+\.set\(\w+\);return\}\w+\(\w+,\w+,\w+\)\}$/.test(text)) springs.push({ call, mv: node.params[0].name, target: decl.declarations[0].id.name });
-        });
-        // Only the panel spring: the module defines the same shape once more with four parameters (excluded above).
-        if (springs.length === 1) {
-          const { call, mv, target } = springs[0];
-          edits.initial.push({ start: call.start, end: call.start, text: `${marker}if(globalThis.__codexPPPanelSlide?.(${mv},${target}))return;` });
-          applied.panelSlide = 'initial';
-        } else skipped.panelSlide = `expected one match, found ${springs.length}`;
-      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = skipped.resizeObserverCoalescing = skipped.panelSlide = firstStatement ? 'initial bundle not recognised' : 'module not found';
+      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = skipped.resizeObserverCoalescing = firstStatement ? 'initial bundle not recognised' : 'module not found';
       if (firstStatement && applied.chunkTimings) {
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `const ppKey="codexpp.startupChunks.v2:"+import.meta.url;let ppList=null;try{ppList=JSON.parse(localStorage.getItem(ppKey)??"null")}catch{}` +
@@ -649,10 +615,23 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       record('opaqueSurfaceExperiment', 'main', surfaces, fn => ({ start: fn.body.start + 1, end: fn.body.start + 1, text: `${marker}if(globalThis.__codexPPOpaqueWindows===true)return!0;` }));
       for (const [name, matches] of Object.entries(prewarms))
         record(name, 'main', matches, fn => ({ start: fn.body.start + 1, end: fn.body.start + 1, text: `${marker}return;` }));
+      // X.setOnBrowserStateChanged(()=>{menu.refreshApplicationMenu(),...}): the side-panel browser
+      // reports its bounds on every frame while the window resizes or the panel animates, and each
+      // report rebuilt the whole application menu (1.6 s of a 12 s resize, then a 0.9 s major GC).
+      // Now the first change refreshes at once and a burst collapses into one more 250 ms later.
+      const menuRefreshes = [];
+      walk(trees.main, node => {
+        if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression' || node.callee.property.name !== 'setOnBrowserStateChanged' || node.arguments.length !== 1) return;
+        const fn = node.arguments[0];
+        if (fn.type === 'ArrowFunctionExpression' && fn.params.length === 0 && src.slice(fn.start, fn.end).includes('.refreshApplicationMenu()')) menuRefreshes.push(fn);
+      });
+      record('coalesceBrowserMenuRefresh', 'main', menuRefreshes, fn => ({ start: fn.start, end: fn.end,
+        text: `${marker}((ppRun,ppWait=250)=>{let ppTimer=0,ppPending=!1;const ppTick=()=>{if(ppPending){ppPending=!1;ppRun();ppTimer=setTimeout(ppTick,ppWait)}else ppTimer=0};` +
+          `return()=>{if(ppTimer){ppPending=!0;return}ppRun();ppTimer=setTimeout(ppTick,ppWait)}})(${src.slice(fn.start, fn.end)})` }));
     } else {
       skipped.authStorageGateCacheFirst = 'module not found';
       skipped.deferDockIcon = 'module not found';
-      skipped.opaqueSurfaceExperiment = skipped.lazyPageWindowPrewarm = skipped.lazyAvatarOverlayPrewarm = skipped.lazyHotkeyWindowPrewarm = skipped.lazyDetachedWindowPrewarm = 'module not found';
+      skipped.coalesceBrowserMenuRefresh = skipped.opaqueSurfaceExperiment = skipped.lazyPageWindowPrewarm = skipped.lazyAvatarOverlayPrewarm = skipped.lazyHotkeyWindowPrewarm = skipped.lazyDetachedWindowPrewarm = 'module not found';
     }
 
     if (trees.requirements) {

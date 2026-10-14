@@ -44,7 +44,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'resizeObserverCoalescing', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'panelSlide', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -362,6 +362,27 @@ test('hidden window prewarms are skipped and each window opens on demand', async
   assert.throws(() => adapt({main: patched}), /already applied/);
 });
 
+test('a burst of side-panel browser state changes rebuilds the app menu once more, not every time', () => {
+  const main = 'let refreshes=0,syncs=0;const qe={refreshApplicationMenu(){refreshes++}},pe={sync(){syncs++}};' +
+    'const Be={cb:null,setOnBrowserStateChanged(e){this.cb=e}};Be.setOnBrowserStateChanged(()=>{qe.refreshApplicationMenu(),pe.sync()});' +
+    'globalThis.state={fire:()=>Be.cb(),get counts(){return[refreshes,syncs]}};';
+  const {main: patched, applied} = adapt({main});
+  assert.equal(applied.coalesceBrowserMenuRefresh, 'main');
+  const timers = [];
+  const sandbox = {setTimeout: f => (timers.push(f), timers.length)};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(patched, sandbox);
+  sandbox.state.fire();
+  assert.equal(JSON.stringify(sandbox.state.counts), '[1,1]', 'the first change refreshes at once');
+  for (let i = 0; i < 30; i++) sandbox.state.fire();
+  assert.equal(JSON.stringify(sandbox.state.counts), '[1,1]', 'a burst waits');
+  timers.shift()();
+  assert.equal(JSON.stringify(sandbox.state.counts), '[2,2]', 'then refreshes once');
+  timers.shift()();
+  sandbox.state.fire();
+  assert.equal(JSON.stringify(sandbox.state.counts), '[3,3]', 'and a later change refreshes at once again');
+});
+
 test('the text cursor blinks only after activity where caret-animation is supported', () => {
   const run = supported => {
     const {initial: patched, applied} = adapt({initial});
@@ -464,33 +485,6 @@ test('the compositor shimmer moves layers instead of repainting the text', () =>
   focused = true; windowListeners.focus();
   assert.ok(!rootAttributes.has('data-codexpp-blurred'), 'focus resumes them');
   assert.match(runtime, /:root\[data-codexpp-blurred\] \.codexpp-shimmer\{visibility:hidden\}/);
-});
-
-test('the right panel snaps its width once and slides on the compositor', () => {
-  const withPanel = initial + 'export function pzt(e,t,n){let r=+!!t;if(n){e.set(r);return}Qs(e,r,cC)}export function fzt(e,t,n,r){if(e.stop(),r.animate===!1||n){e.set(+!!t);return}Qs(e,+!!t,cC)}';
-  const {initial: patched, applied} = adapt({initial: withPanel});
-  assert.equal(applied.panelSlide, 'initial');
-  const springs = [], sets = [];
-  const mv = {value: 0, set(v) { this.value = v; sets.push(v); }, get() { return this.value; }};
-  const animations = [];
-  const element = className => ({className, getAnimations: () => [], animate(keyframes) { const a = {keyframes, cancel() {}}; animations.push(a); return a; }});
-  const panels = [element('relative ltr:ms-auto rtl:me-auto'), element('group/titlebar')];
-  const sandbox = {Qs: (...a) => springs.push(a), cC: {}, innerWidth: 1000, matchMedia: () => ({matches: false}), requestAnimationFrame: f => f(), setTimeout() {},
-    document: {documentElement: {dataset: {}, setAttribute() {}, removeAttribute() {}}, head: {append() {}}, createElement: () => ({}), querySelector: () => panels[0], querySelectorAll: () => panels,
-      addEventListener() {}, hasFocus: () => true}, addEventListener() {}, AudioContext: class {}, window: {setTimeout() {}}};
-  sandbox.globalThis = sandbox;
-  vm.runInNewContext(patched.replace(/export /g, '') + ';this.pzt=pzt;', sandbox);
-  sandbox.pzt(mv, true, false);
-  assert.deepEqual([sets, springs.length], [[1], 0], 'opening sets the final width once, no spring');
-  assert.deepEqual(animations.map(a => a.keyframes[0].transform), ['translateX(100%)', 'translateX(100%)'], 'the mounted panel and its tab strip slide in');
-  sandbox.pzt(mv, false, false);
-  assert.deepEqual(sets, [1], 'closing waits for the slide-out');
-  assert.equal(animations[2].keyframes[1].transform, 'translateX(100%)');
-  animations[2].onfinish();
-  assert.deepEqual(sets, [1, 0], 'then collapses the width once');
-  sandbox.matchMedia = () => ({matches: true});
-  sandbox.pzt(mv, true, false);
-  assert.equal(springs.length, 1, 'reduced motion keeps the original spring');
 });
 
 test('ResizeObserver callbacks are coalesced only while the window is resizing', () => {
