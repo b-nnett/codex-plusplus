@@ -324,17 +324,18 @@ final class FocusModeTests: XCTestCase {
         let faster = try await evaluate("""
         (() => {
           const toggle = () => document.dispatchEvent(new KeyboardEvent('keydown',{key:'|',metaKey:true,shiftKey:true,bubbles:true}));
+          // With Reduce Motion (as on CI runners) every transition is 0 s, by design.
+          const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
           toggle(); toggle();
-          const exit = getComputedStyle(document.querySelector('aside')).transitionDuration === '0.09s';
+          const exit = getComputedStyle(document.querySelector('aside')).transitionDuration === (reduced ? '0s' : '0.09s');
           toggle();
           return String(exit && !document.documentElement.classList.contains('codexpp-focus-mode-exiting') &&
-            getComputedStyle(document.querySelector('aside')).transitionDuration !== '0.09s');
+            (reduced || getComputedStyle(document.querySelector('aside')).transitionDuration !== '0.09s'));
         })();
         """, in: view)
         XCTAssertEqual(faster, "true")
         _ = try await evaluate("void __codexPP.sync([]);", in: view)
-        // Extension teardown finishes the earlier toggles' work first; on a
-        // loaded machine that takes longer than a fixed delay, so wait for it.
+        // Teardown is asynchronous; wait for it rather than a fixed delay.
         var cleaned = "false"
         for _ in 0..<30 where cleaned != "true" {
             try await Task.sleep(for: .milliseconds(100))
