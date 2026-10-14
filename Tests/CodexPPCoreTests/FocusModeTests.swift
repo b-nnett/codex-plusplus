@@ -333,8 +333,13 @@ final class FocusModeTests: XCTestCase {
         """, in: view)
         XCTAssertEqual(faster, "true")
         _ = try await evaluate("void __codexPP.sync([]);", in: view)
-        try await Task.sleep(for: .milliseconds(100))
-        let cleaned = try await evaluate("String(!document.documentElement.classList.contains('codexpp-focus-mode-exiting'))", in: view)
+        // Extension teardown finishes the earlier toggles' work first; on a
+        // loaded machine that takes longer than a fixed delay, so wait for it.
+        var cleaned = "false"
+        for _ in 0..<30 where cleaned != "true" {
+            try await Task.sleep(for: .milliseconds(100))
+            cleaned = try await evaluate("String(!document.documentElement.classList.contains('codexpp-focus-mode-exiting'))", in: view)
+        }
         XCTAssertEqual(cleaned, "true")
     }
 
