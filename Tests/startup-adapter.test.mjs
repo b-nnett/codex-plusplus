@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst', 'viewportContainerQueries']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -523,25 +523,28 @@ test('width media rules become container queries on the root, other media rules 
   ]);
 });
 
-test('window resizes deliver new sizes of window-wide elements to their observers before the frame', () => {
-  const runtime = context.CodexPPStartupAdapter.layoutMotion;
-  class FakeRO { constructor(cb) { this.cb = cb; } observe() {} unobserve() {} disconnect() {} }
+test('the shell sets its size on window resize events, before the frame, without patching ResizeObserver', () => {
+  const initial = 'export function P(S,b,E,bQs){let e=!1;try{S.updateUserAsync(b).then(bQs).finally(()=>{e||E(b)})}catch(e){}return `x`};' +
+    'export function shell(st,l,He,be){return e=>{st(e),e!=null&&!l&&(He.set(e.clientHeight),be.set(e.clientWidth))}}';
+  const {initial: patched, applied} = adapt({initial});
+  assert.equal(applied.shellResizeSync, 'initial');
   let resize = null;
-  const element = width => ({isConnected: true, getBoundingClientRect: () => ({width, height: 500})});
-  const shell = element(900), button = element(40);
-  const sandbox = {ResizeObserver: FakeRO, WeakRef, innerWidth: 1000, devicePixelRatio: 2, DOMRectReadOnly: class { constructor(x, y, width, height) { Object.assign(this, {x, y, width, height}); } },
-    getComputedStyle: () => ({paddingLeft: '10px', paddingRight: '10px'}), setTimeout() {}, matchMedia: () => ({matches: false}),
-    addEventListener: (type, f) => { if (type === 'resize') resize = f; },
-    document: {styleSheets: [], addEventListener() {}, head: {prepend() {}}, createElement: () => ({setAttribute() {}}), querySelector: () => null}};
+  const sandbox = {addEventListener: (type, f) => { if (type === 'resize') resize = f; }, document: {styleSheets: [], addEventListener() {}, head: {prepend() {}}, createElement: () => ({setAttribute() {}})},
+    matchMedia: () => ({matches: false}), setTimeout() {}, CSS: {supports: () => false}};
   sandbox.globalThis = sandbox;
-  vm.runInNewContext(runtime, sandbox);
-  const seen = [];
-  const observer = new sandbox.ResizeObserver(entries => seen.push(entries.map(e => [e.borderBoxSize[0].inlineSize, e.contentRect.width])));
-  observer.observe(shell); observer.observe(button);
+  vm.runInNewContext(patched.replace(/export /g, '') + ';this.shell=shell;', sandbox);
+  assert.equal(typeof sandbox.ResizeObserver, 'undefined', 'ResizeObserver is left alone');
+  const value = () => ({v: null, set(x) { this.v = x; }});
+  const height = value(), width = value(), element = {isConnected: true, clientHeight: 700, clientWidth: 1200};
+  // The app's guard (l) is a client flag that is always true, so its own mount measurement never runs.
+  const ref = sandbox.shell(() => {}, true, height, width);
+  ref(element);
+  assert.deepEqual([height.v, width.v], [null, null], 'mount behaves as stock');
+  element.clientWidth = 1100; element.clientHeight = 690;
   resize();
-  assert.equal(JSON.stringify(seen), '[[[900,880]]]', 'only the window-wide element, with border and content sizes');
-  observer.disconnect(); resize();
-  assert.equal(seen.length, 1, 'disconnected observers are left alone');
+  assert.deepEqual([height.v, width.v], [690, 1100], 'a window resize sets the new size at once');
+  ref(null); element.clientWidth = 900; resize();
+  assert.equal(width.v, 1100, 'an unmounted shell is forgotten');
 });
 
 test('release builds skip the diagnostic edits', () => {
