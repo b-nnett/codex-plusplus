@@ -3,3 +3,4 @@
 # Add the maintainer's public key on one line, for example:
 # release@codexpp namespaces="codexpp-release" sk-ssh-ed25519@openssh.com AAAA...
 # Until a key is listed, automatic updates stay disabled.
+release@codexpp namespaces="codexpp-release" sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAICoeFNX5pRJ/vFmpFyD9s2KyMzODWr1b1ZwcNVoOuQyMAAAAE3NzaDpjb2RleHBwLXJlbGVhc2U=

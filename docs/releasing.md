@@ -6,11 +6,17 @@ so a release needs the update-signing key and must pass the release workflow.
 
 ## One-time setup
 
-1. Create the release key on a hardware key (the private half never leaves it):
+1. Create the release key on a hardware key (the private half never leaves it).
+   Apple's OpenSSH has no FIDO support, so use Homebrew's, unlinked so it does
+   not replace the system `ssh` (verification works with Apple's):
 
    ```sh
-   ssh-keygen -t ed25519-sk -C release@codexpp -f ~/.ssh/codexpp_release
+   brew install openssh && brew unlink openssh
+   /opt/homebrew/opt/openssh/bin/ssh-keygen -t ed25519-sk -O application=ssh:codexpp-release -C release@codexpp -N "" -f ~/.ssh/codexpp_release
    ```
+
+   `release-source.sh` signs with that `ssh-keygen` automatically (or
+   `CODEXPP_SSH_KEYGEN`) and verifies with `/usr/bin/ssh-keygen`.
 
 2. Add its public key to `Sources/CodexPPCore/Resources/release-signers`:
 
@@ -40,7 +46,8 @@ so a release needs the update-signing key and must pass the release workflow.
    commit, and tag with a signed tag:
 
    ```sh
-   git tag -s "v$(cat VERSION)" -m "Codex++ $(cat VERSION)"
+   git -c gpg.format=ssh -c user.signingkey="$HOME/.ssh/codexpp_release.pub" -c gpg.ssh.program=/opt/homebrew/opt/openssh/bin/ssh-keygen \
+     tag -s "v$(cat VERSION)" -m "Codex++ $(cat VERSION)"
    ```
 
 2. Build and sign the source release (`check.sh` first):

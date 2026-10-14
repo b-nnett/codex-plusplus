@@ -23,8 +23,18 @@ rm -f "$output/release.json.sig"
 # CODEXPP_RELEASE_KEY: the release signing key (a hardware-backed SSH key is
 # recommended). Its public half is listed in Sources/CodexPPCore/Resources/release-signers.
 if [ -n "${CODEXPP_RELEASE_KEY:-}" ]; then
-  ssh-keygen -Y sign -f "$CODEXPP_RELEASE_KEY" -n codexpp-release "$output/release.json"
-  ssh-keygen -Y verify -f Sources/CodexPPCore/Resources/release-signers -I release@codexpp -n codexpp-release -s "$output/release.json.sig" < "$output/release.json"
+  # Signing with a FIDO key needs an ssh-keygen with security-key support
+  # (Apple's has none; Homebrew's openssh does). Helpers verify with Apple's.
+  signer="${CODEXPP_SSH_KEYGEN:-}"
+  if [ -z "$signer" ]; then
+    signer=ssh-keygen
+    for candidate in /opt/homebrew/opt/openssh/bin/ssh-keygen /usr/local/opt/openssh/bin/ssh-keygen; do
+      if [ -x "$candidate" ]; then signer="$candidate"; break; fi
+    done
+  fi
+  echo 'Touch the release key to sign release.json.' >&2
+  "$signer" -Y sign -f "$CODEXPP_RELEASE_KEY" -n codexpp-release "$output/release.json"
+  /usr/bin/ssh-keygen -Y verify -f Sources/CodexPPCore/Resources/release-signers -I release@codexpp -n codexpp-release -s "$output/release.json.sig" < "$output/release.json"
 else
   echo 'release.json is unsigned: set CODEXPP_RELEASE_KEY to sign it. Helpers ignore unsigned releases.' >&2
 fi
