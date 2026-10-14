@@ -21,6 +21,9 @@ git_root="$(git rev-parse --show-toplevel)"
 relative="$(python3 -c 'import os,sys;print(os.path.relpath(sys.argv[1],sys.argv[2]))' "$PWD" "$git_root")"
 test -z "$(git -C "$git_root" status --porcelain --untracked-files=all -- "$relative")"
 if [ "${CODEXPP_REQUIRE_TAG:-0}" = 1 ]; then
+  # A release without the update-signing key could never update itself again.
+  grep -Eq '^release@codexpp namespaces="codexpp-release" (sk-)?ssh-ed25519' Sources/CodexPPCore/Resources/release-signers || {
+    echo 'Release check failed: add the release signing key to Sources/CodexPPCore/Resources/release-signers.' >&2; exit 1; }
   test "$(git -C "$git_root" describe --exact-match --tags HEAD)" = "v$version"
   ! grep -Eq "^## ${version//./\\.}.*unreleased" CHANGELOG.md
 fi
