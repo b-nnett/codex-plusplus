@@ -2,6 +2,16 @@
 
 A fresh macOS base for Codex++, kept outside the ChatGPT desktop app. The helper owns patching, connection status, recovery controls, and links to the project. The signed main-process patch hosts renderer Extensions through Electron's in-process `webContents` API; it opens no DevTools or extension-control network listener.
 
+## Upgrading from Codex++ 1.x
+
+Codex++ 2.0 replaces the 1.x tweak system (still on the [`legacy-1.x`](https://github.com/b-nnett/codex-plusplus/tree/legacy-1.x) branch) with a signed menu-bar helper. 1.x tweaks do not load in 2.0. Before installing 2.0, quit ChatGPT and remove 1.x, which restores the app when it can:
+
+```sh
+codexplusplus uninstall
+```
+
+Add `--purge` to also delete 1.x tweaks, config, logs and backups. 2.0 patches only an app that still carries OpenAI's signature, so if the uninstall cannot restore it, reinstall ChatGPT from OpenAI first.
+
 ## Run
 
 Requires macOS 14 or later, Swift 6 / Xcode command-line tools, and Node with its Node-API development headers to build the native browser adapter. Homebrew header locations are discovered automatically; set `CODEXPP_NODE_INCLUDE` for another installation. The built helper uses ChatGPT's bundled Node runtime and needs no separate Node installation.
@@ -194,9 +204,6 @@ The main source boundaries are `CodexPPCore` (storage, versioned patch adapters,
 
 ## Release
 
-1. Commit all `codex-pp` changes and tag the commit `v$(cat VERSION)`.
-2. Run `./scripts/check.sh` and the signed live checks documented above.
-3. Run `CODEXPP_REQUIRE_TAG=1 ./scripts/check-release.sh`.
-4. Run `./scripts/release-source.sh` and publish `dist/releases/`.
+[docs/releasing.md](docs/releasing.md) has the full procedure: the one-time release key and repository setup, then for each release a signed tag, `./scripts/check.sh` and the signed live checks documented above, `CODEXPP_REQUIRE_TAG=1 CODEXPP_RELEASE_KEY=<key> ./scripts/release-source.sh`, and a drafted GitHub release that `.github/workflows/release.yml` verifies and publishes.
 
-The source release is reproducible from the recorded commit and uses normalized gzip timestamps. `release.json` records the exact commit and SHA-256 digest. A builder may additionally set `CODEXPP_VERSION`, `CODEXPP_BUILD_NUMBER`, and `CODEXPP_NOTARY_PROFILE` when producing a local notarized helper for their own signing identity.
+The source release is reproducible from the recorded commit and uses normalized gzip timestamps. The signed `release.json` records the exact commit, size and SHA-256 digest. A builder may additionally set `CODEXPP_VERSION`, `CODEXPP_BUILD_NUMBER`, and `CODEXPP_NOTARY_PROFILE` when producing a local notarized helper for their own signing identity.

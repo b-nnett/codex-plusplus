@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.1.0 — unreleased
+## 2.0.0 — unreleased
+
+Codex++ 2.0 is a new implementation for the ChatGPT desktop app (`com.openai.codex`): a signed macOS menu-bar helper that stages, probes and atomically installs a patched copy of the app, built and signed locally with your own Developer ID. It shares no code with Codex++ 1.x (the Node-based tweak system), whose source stays on the `legacy-1.x` branch and whose tags and releases are unchanged. 1.x tweaks are not loaded by 2.0; extensions use the contract in the README.
+
+Upgrading from 1.x: quit ChatGPT, run `codexplusplus uninstall` (add `--purge` to also delete 1.x tweaks and data), then build and install 2.0. 2.0 only patches an app that still carries OpenAI's signature, so it refuses an app 1.x has modified. 1.x's background update check will see 2.0 as its latest release and fail before changing anything, because 2.0 is not a 1.x package.
+
 
 - Initial source release of the Codex++ macOS menu bar helper and renderer extension host.
 - Exact-build patch recipes, authenticated update handoff, atomic rollback, native Settings integration, Appshot compatibility, AutoFill, bookmarks, Better Sidebar, and Focus Mode.
