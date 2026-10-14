@@ -134,7 +134,8 @@ test('a reloaded renderer receives the full payload again', async () => {
   const f = fixture();
   try {
     await f.runtime.poll();
-    delete f.renderer.__codexPP;
+    // Delete inside the context: older Node does not propagate an outside delete.
+    vm.runInContext('delete globalThis.__codexPP', f.renderer);
     await f.runtime.poll();
     assert.equal(f.renderer.executions, 2);
   } finally { f.cleanup(); }

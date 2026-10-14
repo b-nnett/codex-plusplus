@@ -221,6 +221,9 @@ test('capture requests require the trusted app main frame', async () => {
 });
 
 test('delayed warmup keeps the runtime off the startup path and dispose cancels it', async t => {
+  // The warmup timer is unref'd; keep the loop alive so older Node does not cancel the test.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   const runtime = standardRuntime();
   const h = harness(runtime.onMessage);
   t.after(() => h.bridge.dispose());
@@ -241,6 +244,9 @@ test('delayed warmup keeps the runtime off the startup path and dispose cancels 
 });
 
 test('a capture before the delayed warmup starts the runtime once', async t => {
+  // The warmup timer is unref'd; keep the loop alive so older Node does not cancel the test.
+  const keepAlive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(keepAlive));
   const runtime = standardRuntime();
   const h = harness(runtime.onMessage);
   t.after(() => h.bridge.dispose());
