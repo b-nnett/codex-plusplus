@@ -233,6 +233,8 @@
       trace.span('runtime.poll.diagnostics', () => writeDiagnostics({schema:1, pid:process.pid, windows:contents.length,
         activeExtensions:[...active], runtimeErrors:errors, problems:loaded.problems}));
     } catch (error) {
+      // An unreadable configuration fails closed: no extension keeps running.
+      await Promise.all(appContents().map(item => synchronizeOne(item, [], digest([true, []])).catch(() => {})));
       writeDiagnostics({schema:1, pid:process.pid, windows:0,
         activeExtensions:[], runtimeErrors:{runtime:String(error)}});
     }
@@ -282,7 +284,13 @@
   }
 
   async function action(event, request) {
-    const configuration = settings();
+    // Pause stays available when settings.json is unreadable, and writes a valid file.
+    let configuration;
+    try { configuration = settings(); }
+    catch (error) {
+      if (request.action !== 'pause') throw error;
+      configuration = {appPath:'/Applications/ChatGPT.app', extensionsPaused:true, enabled:{}};
+    }
     const owner = electron.BrowserWindow.fromWebContents(event.sender);
     switch (request.action) {
       case 'state': break;

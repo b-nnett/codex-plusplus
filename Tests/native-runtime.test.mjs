@@ -174,3 +174,19 @@ test('a settings change reaches windows at once instead of waiting for the heart
     assert.deepEqual(diagnostic.activeExtensions, [], 'paused within about a second, not four');
   } finally { f.cleanup(); }
 });
+
+test('an unreadable settings file stops every extension, and Pause still works', async () => {
+  const f = fixture();
+  try {
+    await f.runtime.poll();
+    assert.equal(f.renderer.executions, 1);
+    assert.equal(vm.runInContext('globalThis.__codexPP.status().states.filter(s=>s.state==="active").length', f.renderer), 1);
+    fs.writeFileSync(path.join(f.support, 'settings.json'), '{not json');
+    await f.runtime.poll();
+    assert.equal(vm.runInContext('globalThis.__codexPP.status().states.filter(s=>s.state==="active").length', f.renderer), 0, 'fails closed');
+    f.runtime.handle({sender: f.contents, senderFrame: f.contents.mainFrame}, {type: 'codexpp-settings', requestId: 'pause', action: 'pause'});
+    for (let attempt = 0; attempt < 20 && f.messages.length === 0; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+    const settings = JSON.parse(fs.readFileSync(path.join(f.support, 'settings.json'), 'utf8'));
+    assert.equal(settings.extensionsPaused, true, 'Pause rewrites a valid settings file');
+  } finally { f.cleanup(); }
+});

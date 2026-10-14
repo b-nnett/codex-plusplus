@@ -45,6 +45,8 @@ public struct AppPatcher: Sendable {
     public let port: Int
     public let adapter: PatchAdapter
     public let onProgress: @Sendable (String) -> Void
+    /// Unowned vendor originals go to the Trash rather than being deleted.
+    public var trashesOriginals = true
     public init(support: URL, helper: URL, port: Int = 9222, adapter: PatchAdapter = .current, onProgress: @escaping @Sendable (String) -> Void = { _ in }) {
         self.support = support; self.helper = helper; self.port = port; self.adapter = adapter; self.onProgress = onProgress
     }
@@ -118,7 +120,46 @@ public struct AppPatcher: Sendable {
     }
     private func writeJournal(_ journal: PatchJournal) throws {
         try JSONEncoder().encode(journal).write(to: journalURL, options: .atomic)
-        let handle = try FileHandle(forWritingTo: journalURL); defer { try? handle.close() }; try handle.synchronize()
+        flushToDisk([journalURL])
+    }
+    /// fsync alone leaves data in the drive's cache on macOS: write out every
+    /// dirty buffer, then force the drive to flush through these files.
+    private func flushToDisk(_ files: [URL]) {
+        sync()
+        for file in files {
+            let fd = open(file.path, O_RDONLY | O_NOFOLLOW)
+            guard fd >= 0 else { continue }
+            _ = fcntl(fd, F_FULLFSYNC); close(fd)
+        }
+    }
+    /// Processes running the app's own code: its main executable or an Electron
+    /// helper app (renderer, GPU, utility). Standalone tools such as the crash
+    /// reporter can outlive the app and do not block an exchange.
+    static func processes(inside bundle: URL) -> [pid_t] {
+        // realpath, not resolvingSymlinksInPath, which strips /private from /private/var paths.
+        guard let real = realpath(bundle.path, nil) else { return [] }
+        let prefix = String(cString: real) + "/"; free(real)
+        let capacity = proc_listallpids(nil, 0)
+        guard capacity > 0 else { return [] }
+        var pids = [pid_t](repeating: 0, count: Int(capacity) + 64)
+        let count = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+        var path = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        return pids.prefix(Int(max(0, count))).filter { pid in
+            guard pid > 0, proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { return false }
+            let executable = String(cString: path)
+            guard executable.hasPrefix(prefix) else { return false }
+            let relative = executable.dropFirst(prefix.count)
+            return relative.hasPrefix("Contents/MacOS/") || relative.contains(".app/Contents/MacOS/")
+        }
+    }
+    /// After ChatGPT quits, its helper processes (renderers, GPU) take a moment
+    /// to exit: wait for them, but never swap the bundle under a running app.
+    private func ensureClosed(_ app: URL, timeout: TimeInterval = 15) throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !Self.processes(inside: app).isEmpty {
+            guard Date() < deadline else { throw PatchError.invalid("ChatGPT is running. Quit it before the patched app is installed or restored.") }
+            usleep(100_000)
+        }
     }
     private func exchange(_ first: URL, _ second: URL) throws {
         guard renameatx_np(AT_FDCWD, first.path, AT_FDCWD, second.path, UInt32(RENAME_SWAP)) == 0 else { throw PatchError.invalid("Atomic app exchange failed: \(String(cString: strerror(errno)))") }
@@ -144,10 +185,11 @@ public struct AppPatcher: Sendable {
         func owned(_ name: String) -> Bool { name.hasSuffix(".app") && (name.hasPrefix(".ChatGPT.codexpp-stage-") || name.hasPrefix(".ChatGPT.codexpp-original-")) }
         var referenced: Set<String> = []
         for name in names where name.hasSuffix(".app") && !owned(name) {
-            if let data = try? Data(contentsOf: receiptURL(parent.appendingPathComponent(name))),
-               let receipt = try? JSONDecoder().decode(PatchReceipt.self, from: data) {
-                referenced.insert(URL(fileURLWithPath: receipt.backupPath).standardizedFileURL.path)
-            }
+            let url = receiptURL(parent.appendingPathComponent(name))
+            guard fm.fileExists(atPath: url.path) else { continue }
+            // A receipt this version cannot read might own a backup: keep everything.
+            guard let data = try? Data(contentsOf: url), let receipt = try? JSONDecoder().decode(PatchReceipt.self, from: data) else { return }
+            referenced.insert(URL(fileURLWithPath: receipt.backupPath).standardizedFileURL.path)
         }
         for name in names where owned(name) {
             let bundle = parent.appendingPathComponent(name)
@@ -155,6 +197,8 @@ public struct AppPatcher: Sendable {
                   let data = try? Data(contentsOf: bundle.appendingPathComponent("Contents/Info.plist")),
                   let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
                   info["CFBundleIdentifier"] as? String == DesktopAppLocator.bundleIdentifier else { continue }
+            // A vendor original is recoverable from the Trash; stages are disposable.
+            if trashesOriginals, name.hasPrefix(".ChatGPT.codexpp-original-"), (try? fm.trashItem(at: bundle, resultingItemURL: nil)) != nil { continue }
             try? fm.removeItem(at: bundle)
         }
     }
@@ -366,6 +410,8 @@ public struct AppPatcher: Sendable {
             let installed = journal.replaces.map { ("patched", $0) } ?? ("unpatched", journal.receipt.originalArchiveHash)
             guard try status(app).state == installed.0, try fileSHA256(archive(app)) == installed.1,
                   journal.replaces == nil || archiveHash(backup) == journal.receipt.originalArchiveHash else { throw PatchError.invalid("The original app changed. Recover the staged transaction before retrying.") }
+            try ensureClosed(app)
+            flushToDisk([archive(stage), stage.appendingPathComponent("Contents/Info.plist"), receiptURL(stage)])
             journal.phase = "exchanging"; try writeJournal(journal)
             try exchange(app, stage)
             let result: PatchReport
@@ -394,16 +440,20 @@ public struct AppPatcher: Sendable {
         return try commit(app)
     }
     public func prepare(_ app: URL) throws -> URL? {
-        let pending: (URL, Bool)? = try withLock {
-            guard fm.fileExists(atPath: journalURL.path) else { return nil }
+        enum Pending { case none, stale, staged(URL, Bool) }
+        let pending: Pending = try withLock {
+            guard fm.fileExists(atPath: journalURL.path) else { return .none }
             let journal = try validatedJournal(app)
-            guard journal.phase == "prepared" || journal.phase == "verified",
-                  try fileSHA256(archive(app)) == journal.replaces ?? journal.receipt.originalArchiveHash else { throw PatchError.invalid("Interrupted installation requires recovery before continuing.") }
+            guard journal.phase == "prepared" || journal.phase == "verified" else { throw PatchError.invalid("Interrupted installation requires recovery before continuing.") }
+            // Before the exchange the installed app was never touched: if it has
+            // changed since (a vendor update), the staged transaction is discarded.
+            guard try fileSHA256(archive(app)) == journal.replaces ?? journal.receipt.originalArchiveHash else { return .stale }
             let stage = URL(fileURLWithPath: journal.stage)
             _ = try status(stage)
-            return (stage, journal.phase == "prepared")
+            return .staged(stage, journal.phase == "prepared")
         }
-        if let (stage, needsProbe) = pending {
+        if case .stale = pending { try recover(app); return try prepare(app) }
+        if case let .staged(stage, needsProbe) = pending {
             // probe revalidates the journal under the lock before advancing it.
             if needsProbe { try probe(stage) }
             return stage
@@ -470,6 +520,7 @@ public struct AppPatcher: Sendable {
                   try fileSHA256(archive(backup)) == receipt.originalArchiveHash, try status(backup).state == "unpatched" else { throw PatchError.invalid("The original app backup failed verification.") }
             // The same transaction recovery path handles interrupted restoration.
             let journal = PatchJournal(schema: 1, target: app.path, stage: backup.path.replacingOccurrences(of: ".codexpp-original-", with: ".codexpp-stage-"), backup: backup.path, receipt: receipt, phase: "restoring")
+            try ensureClosed(app)
             try writeJournal(journal)
             try exchange(app, backup)
             let result = try status(app)

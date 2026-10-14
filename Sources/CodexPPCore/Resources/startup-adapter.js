@@ -47,8 +47,8 @@
 //   titles, and prewarms a thread for the next new chat). When such a thread's
 //   MCP servers report ready, the window refetched the host's whole MCP
 //   inventory, which starts every MCP server again (two bursts of about six node
-//   processes, 1.2 s each). Skip those refetches for threads the window has no
-//   conversation for.
+//   processes, 1.2 s each). Only that shared refetch is gated: one trailing call
+//   2 s after the last report, skipped when the inventory is under a minute old.
 // lazyCheckoutPricingPrewarm, lazyCheckoutCreditPrewarm: personal ChatGPT
 //   accounts boot a hidden, signed-in chatgpt.com checkout page at launch so an
 //   upgrade or credit purchase opens instantly (about 250 MB plus the web app's
@@ -473,24 +473,23 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           const key = options?.properties.find(p => p.type === 'Property' && p.key.name === 'queryKey')?.value;
           if (key?.type === 'ArrayExpression' && key.elements.at(-1)?.type === 'TemplateLiteral' && key.elements.at(-1).quasis[0]?.value.cooked === 'toolsAndAuthOnly' &&
               inner.arguments[0].type === 'MemberExpression' && inner.arguments[0].property.name === 'queryClient')
-            inventory ??= { client: sources.initial.slice(inner.arguments[0].start, inner.arguments[0].end), key: sources.initial.slice(key.start, key.end) };
+            inventory ??= { node: inner, client: sources.initial.slice(inner.arguments[0].start, inner.arguments[0].end), key: sources.initial.slice(key.start, key.end) };
         });
         if (!inventory) return;
         readyCases.push({ ready, event: node.discriminant.object.name, manager, inventory });
       });
-      // Per thread, the six servers report ready one by one, and each report scheduled
-      // another inventory refetch (each one restarting every MCP server). Collapse a
-      // thread's reports into one trailing refetch, once per thread, skipped when the
-      // host inventory was fetched in the last minute or the window has no
-      // conversation for the thread.
-      record('skipHiddenThreadRefetch', 'initial', readyCases, ({ ready, event, manager, inventory }) => ({ start: ready.consequent[0].start, end: ready.consequent[0].start,
-        text: `${marker}if(${event}.params?.threadId!=null){const ppThread=${event}.params.threadId,ppKnown=typeof ${manager}.getConversation!=="function"||${manager}.getConversation(ppThread)!=null,` +
-          `ppState=globalThis.__codexPPMcpReady??={done:new Set,timers:new Map};` +
-          `if(!ppKnown)break;if(${event}.params.status===\`ready\`){if(ppState.done.has(ppThread))break;clearTimeout(ppState.timers.get(ppThread));` +
-          `ppState.timers.set(ppThread,setTimeout(()=>{ppState.timers.delete(ppThread);ppState.done.size>500&&ppState.done.clear();ppState.done.add(ppThread);` +
-          // The host inventory is shared by every thread: a fetch in the last minute already covers this one.
-          `if((${inventory.client}.getQueryState(${inventory.key})?.dataUpdatedAt??0)>Date.now()-6e4)return;` +
-          `${ready.consequent.map(c => sources.initial.slice(c.start, c.end)).filter(t => !/^break;?$/.test(t)).join('')}},2e3));break}}` }));
+      // Every MCP server of every thread (including hidden ones: the fork that
+      // predicts the next prompt, title generation, the prewarmed next chat)
+      // reports ready on its own, and each report refetched the host's shared
+      // tool inventory, which restarts every MCP server. Only that shared call
+      // is gated: reports collapse into one trailing refetch 2 s after the last,
+      // skipped when the inventory was fetched in the last minute. Everything
+      // else in the case (per-thread invalidations, failures) runs as before.
+      record('skipHiddenThreadRefetch', 'initial', readyCases, ({ inventory }) => ({ start: inventory.node.start, end: inventory.node.end,
+        text: `${marker}(globalThis.__codexPPInventoryRefetch??=(()=>{const ppTimers=new Map;return(ppClient,ppKey,ppRun)=>{` +
+          `if((ppClient.getQueryState(ppKey)?.dataUpdatedAt??0)>Date.now()-6e4)return;const ppId=JSON.stringify(ppKey);clearTimeout(ppTimers.get(ppId));` +
+          `ppTimers.set(ppId,setTimeout(()=>{ppTimers.delete(ppId);(ppClient.getQueryState(ppKey)?.dataUpdatedAt??0)>Date.now()-6e4||ppRun()},2e3))}})())` +
+          `(${inventory.client},${inventory.key},()=>${sources.initial.slice(inventory.node.start, inventory.node.end)})` }));
 
       // Only in a module another edit recognised as ChatGPT's initial bundle.
       const recognised = Object.values(applied).includes('initial');
@@ -634,11 +633,17 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       walk(trees.main, node => {
         if (node.type !== 'CallExpression' || node.callee.type !== 'MemberExpression' || node.callee.property.name !== 'setOnBrowserStateChanged' || node.arguments.length !== 1) return;
         const fn = node.arguments[0];
-        if (fn.type === 'ArrowFunctionExpression' && fn.params.length === 0 && src.slice(fn.start, fn.end).includes('.refreshApplicationMenu()')) menuRefreshes.push(fn);
+        if (fn.type !== 'ArrowFunctionExpression' || fn.params.length !== 0) return;
+        const calls = [];
+        walk(fn.body, inner => { if (inner.type === 'CallExpression' && inner.arguments.length === 0 && member(inner, 'refreshApplicationMenu')) calls.push(inner); });
+        if (calls.length === 1) menuRefreshes.push(calls[0]);
       });
-      record('coalesceBrowserMenuRefresh', 'main', menuRefreshes, fn => ({ start: fn.start, end: fn.end,
-        text: `${marker}((ppRun,ppWait=250)=>{let ppTimer=0,ppPending=!1;const ppTick=()=>{if(ppPending){ppPending=!1;ppRun();ppTimer=setTimeout(ppTick,ppWait)}else ppTimer=0};` +
-          `return()=>{if(ppTimer){ppPending=!0;return}ppRun();ppTimer=setTimeout(ppTick,ppWait)}})(${src.slice(fn.start, fn.end)})` }));
+      // Only the menu rebuild is throttled; the rest of the callback (such as the
+      // focused window's active-thread sync) still runs on every change.
+      record('coalesceBrowserMenuRefresh', 'main', menuRefreshes, call => ({ start: call.start, end: call.end,
+        text: `${marker}(globalThis.__codexPPMenuRefresh??=(()=>{let ppTimer=0,ppPending=null;const ppTick=()=>{const ppRun=ppPending;ppPending=null;` +
+          `if(ppRun){ppRun();ppTimer=setTimeout(ppTick,250)}else ppTimer=0};return ppRun=>{if(ppTimer){ppPending=ppRun;return}ppRun();ppTimer=setTimeout(ppTick,250)}})())` +
+          `(()=>${src.slice(call.start, call.end)})` }));
     } else {
       skipped.authStorageGateCacheFirst = 'module not found';
       skipped.deferDockIcon = 'module not found';

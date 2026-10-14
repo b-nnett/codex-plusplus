@@ -382,12 +382,12 @@ test('a burst of side-panel browser state changes rebuilds the app menu once mor
   sandbox.state.fire();
   assert.equal(JSON.stringify(sandbox.state.counts), '[1,1]', 'the first change refreshes at once');
   for (let i = 0; i < 30; i++) sandbox.state.fire();
-  assert.equal(JSON.stringify(sandbox.state.counts), '[1,1]', 'a burst waits');
+  assert.equal(JSON.stringify(sandbox.state.counts), '[1,31]', 'a burst waits for the menu, but every other step still runs');
   timers.shift()();
-  assert.equal(JSON.stringify(sandbox.state.counts), '[2,2]', 'then refreshes once');
+  assert.equal(JSON.stringify(sandbox.state.counts), '[2,31]', 'then the menu refreshes once');
   timers.shift()();
   sandbox.state.fire();
-  assert.equal(JSON.stringify(sandbox.state.counts), '[3,3]', 'and a later change refreshes at once again');
+  assert.equal(JSON.stringify(sandbox.state.counts), '[3,32]', 'and a later change refreshes at once again');
 });
 
 test('the text cursor blinks only after activity where caret-animation is supported', () => {
@@ -432,35 +432,34 @@ test('checkout pages are rendered for their route, not prewarmed at launch', () 
   assert.equal(sandbox.W(true, true), 'webview', 'the credit route still renders');
 });
 
-test('MCP ready reports refetch the inventory once per conversation, never for hidden threads', async () => {
+test('MCP ready reports collapse the shared inventory refetch; per-thread work runs as stock', async () => {
   const initial = 'export function P(S,b,E,bQs){let e=!1;try{S.updateUserAsync(b).then(bQs).finally(()=>{e||E(b)})}catch(e){}return `x`};' +
     'export function on(n,log){n.subscribe({type:`notification`,listener:(a,o)=>{switch(a.method){case`item/completed`:n.getConversationCwd(a.params.threadId);break;' +
-    'case`mcpServer/startupStatus/updated`:a.params.status===`ready`&&(gl(e.queryClient,{queryKey:[`mcp`,`toolsAndAuthOnly`],exact:!0}),log.push(`toolsAndAuthOnly:`+a.params.threadId)),a.params.status===`failed`&&log.push(`failed:`+a.params.threadId);break}}})}';
+    'case`mcpServer/startupStatus/updated`:a.params.status===`ready`&&(gl(e.queryClient,{queryKey:[`mcp`,`toolsAndAuthOnly`],exact:!0}),log.push(`thread:`+a.params.threadId)),a.params.status===`failed`&&log.push(`failed:`+a.params.threadId);break}}})}';
   const {initial: patched, applied} = adapt({initial});
   assert.equal(applied.skipHiddenThreadRefetch, 'initial');
   const timers = [];
-  let fetchedAt = 0;
-  const sandbox = {setTimeout: (f, ms) => (timers.push(f), timers.length), clearTimeout: id => { if (id) timers[id - 1] = null; }, performance: {now: () => 0},
-    gl() {}, e: {queryClient: {getQueryState: () => ({dataUpdatedAt: fetchedAt})}}};
+  let fetchedAt = 0, refetches = 0;
+  const sandbox = {setTimeout: (f, ms) => (timers.push(f), timers.length), clearTimeout: id => { if (id) timers[id - 1] = null; }, performance: {now: () => 0}, JSON, Date,
+    gl() { refetches++; }, e: {queryClient: {getQueryState: () => ({dataUpdatedAt: fetchedAt})}}};
   sandbox.globalThis = sandbox;
   vm.runInNewContext(patched.replace(/export /g, '') + ';this.on=on;', sandbox);
   const log = [];
   let listener;
-  const known = new Set(['user-thread']);
-  sandbox.on({subscribe: options => { listener = options.listener; }, getConversationCwd() {}, getConversation: id => known.has(id) ? {} : null}, log);
+  sandbox.on({subscribe: options => { listener = options.listener; }, getConversationCwd() {}, getConversation: () => null}, log);
   const ready = (threadId, name) => listener({method: 'mcpServer/startupStatus/updated', params: {status: 'ready', threadId, name}});
   for (const name of ['a', 'b', 'c']) { ready('prediction-fork', name); ready('user-thread', name); }
+  assert.equal(log.filter(l => l.startsWith('thread:')).length, 6, 'every report still runs its per-thread work');
+  assert.equal(refetches, 0, 'the shared refetch waits');
   for (const f of timers.splice(0)) f?.();
-  assert.deepEqual(log, ['toolsAndAuthOnly:user-thread'], 'six reports, one refetch, none for the hidden thread');
-  ready('user-thread', 'a');
-  assert.equal(timers.filter(Boolean).length, 0, 'a thread is refetched once');
-  listener({method: 'mcpServer/startupStatus/updated', params: {status: 'failed', threadId: 'user-thread', name: 'a'}});
-  ready(null, 'a');
-  assert.deepEqual(log, ['toolsAndAuthOnly:user-thread', 'failed:user-thread', 'toolsAndAuthOnly:null'], 'failures and host-wide startup behave as before');
-  known.add('second-thread'); fetchedAt = Date.now();
+  assert.equal(refetches, 1, 'six reports, one shared refetch');
+  listener({method: 'mcpServer/startupStatus/updated', params: {status: 'failed', threadId: 'unknown-thread', name: 'a'}});
+  assert.ok(log.includes('failed:unknown-thread'), 'failures for any thread behave as before');
+  fetchedAt = Date.now();
   ready('second-thread', 'a');
   for (const f of timers.splice(0)) f?.();
-  assert.equal(log.length, 3, 'an inventory fetched in the last minute covers a new thread');
+  assert.equal(refetches, 1, 'an inventory fetched in the last minute covers a new thread');
+  assert.ok(log.includes('thread:second-thread'));
 });
 
 test('the compositor shimmer moves layers instead of repainting the text', () => {

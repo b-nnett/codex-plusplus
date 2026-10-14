@@ -25,7 +25,9 @@ final class AppPatcherTests: XCTestCase {
         }
         try FileManager.default.copyItem(at: asar, to: app.appendingPathComponent("Contents/Resources/app.asar"))
         try sign(app); try sign(helper)
-        return (root, app, AppPatcher(support: root.appendingPathComponent("Support"), helper: helper, adapter: adapter))
+        var patcher = AppPatcher(support: root.appendingPathComponent("Support"), helper: helper, adapter: adapter)
+        patcher.trashesOriginals = false
+        return (root, app, patcher)
     }
     // Simulates a successful startup probe for the tiny non-Electron fixture.
     // The real Electron startup probe is run separately against the staged app.
@@ -227,5 +229,41 @@ final class AppPatcherTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: receipt).write(to: receiptURL)
         XCTAssertEqual(try patcher.restore(app).state, "unpatched")
         XCTAssertEqual(Set(try hiddenBundles(root)), [foreign.lastPathComponent, other.lastPathComponent, kept.lastPathComponent])
+    }
+    func testPrepareDiscardsAStaleTransactionAfterAVendorUpdate() throws {
+        let (root, app, patcher) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let stale = try patcher.stage(app); try setPhase("verified", root)
+        let archive = app.appendingPathComponent("Contents/Resources/app.asar")
+        try (Data(contentsOf: archive) + Data("update".utf8)).write(to: archive)
+        // The fixture's adapter rejects the changed archive, but only after the
+        // stale transaction was cleared rather than blocking every later patch.
+        XCTAssertThrowsError(try patcher.prepare(app)) { error in
+            XCTAssertFalse("\(error)".contains("requires recovery"), "\(error)")
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: stale.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Support/Patching/transaction.json").path))
+    }
+    func testRunningProcessesInsideABundleAreFound() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let bundle = root.appendingPathComponent("Running.app"), executable = bundle.appendingPathComponent("Contents/MacOS/sleep")
+        try FileManager.default.createDirectory(at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: executable)
+        XCTAssertTrue(AppPatcher.processes(inside: bundle).isEmpty)
+        let process = Process(); process.executableURL = executable; process.arguments = ["30"]
+        try process.run(); defer { process.terminate() }
+        XCTAssertEqual(AppPatcher.processes(inside: bundle), [process.processIdentifier])
+        XCTAssertTrue(AppPatcher.processes(inside: root.appendingPathComponent("Run")).isEmpty, "prefix match is per directory")
+    }
+    func testPruningKeepsEverythingWhenAReceiptIsUnreadable() throws {
+        let (root, app, patcher) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let fm = FileManager.default
+        let leftover = root.appendingPathComponent(".ChatGPT.codexpp-original-OLD.app")
+        try fm.copyItem(at: app, to: leftover)
+        let future = root.appendingPathComponent("ChatGPT Beta.app")
+        try fm.copyItem(at: app, to: future)
+        try Data("{\"schema\": 99}".utf8).write(to: future.appendingPathComponent("Contents/Resources/codexpp-patch.json"))
+        _ = try patcher.stage(app); try patcher.recover(app)
+        XCTAssertTrue(fm.fileExists(atPath: leftover.path), "an unreadable receipt might own this backup")
     }
 }
