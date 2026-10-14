@@ -41,4 +41,26 @@ final class StartupAdapterTests: XCTestCase {
         XCTAssertEqual(status.missing.map(\.name), ["Cached settings"])
         XCTAssertEqual(status.missing.first?.reason, "expected one match, found 0")
     }
+
+    /// Against a real stock ChatGPT archive (CODEXPP_ORIGINAL_ASAR): every release
+    /// speed-up must match exactly once, and only development-only edits may skip.
+    func testEveryReleaseEditAppliesToTheReviewedArchive() throws {
+        guard let path = ProcessInfo.processInfo.environment["CODEXPP_ORIGINAL_ASAR"] else {
+            throw XCTSkip("Set CODEXPP_ORIGINAL_ASAR to the reviewed original app archive for the startup adapter check.")
+        }
+        let archive = try AsarArchive(URL(fileURLWithPath: path))
+        let (browserPath, browserSource) = try NativeBrowserAdapter.patch(archive: archive)
+        let result = try XCTUnwrap(StartupAdapter.discover(archive: archive, replacements: [(browserPath, browserSource)]), "discovery failed")
+        let developmentOnly: Set<String> = ["queryTimings", "appGateReasons", "loadingGateTimings", "policyPhaseTimings", "opaqueSurfaceExperiment"]
+        XCTAssertEqual(Set(result.skipped.keys), PatchAdapter.experimentsEnabled ? [] : developmentOnly, "\(result.skipped)")
+        for name in StartupStatus.labels.keys where !developmentOnly.contains(name) { XCTAssertNotNil(result.applied[name], name) }
+        for (path, data) in result.replacements where path.hasSuffix(".js") {
+            let script = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mjs")
+            try data.write(to: script); defer { try? FileManager.default.removeItem(at: script) }
+            let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["node", "--check", script.path]; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+            try process.run(); process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0, "\(path) does not parse")
+        }
+    }
 }

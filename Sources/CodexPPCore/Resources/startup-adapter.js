@@ -146,7 +146,11 @@ const ppCss=":is(.loading-shimmer-pure-text,.loading-shimmer){--codexpp-base:var
 ":root[data-codexpp-blurred] .codexpp-shimmer{visibility:hidden}:root[data-codexpp-blurred] :is(.codexpp-shimmer-window,.codexpp-shimmer-text,"+ppSel.split(",").map(s=>s+"[data-codexpp-shimmer=off]").join(",")+"){animation-play-state:paused!important}";
 const ppStyle=document.createElement("style");ppStyle.textContent=ppCss;(document.head??document.documentElement).append(ppStyle);
 const ppText=el=>{let t="";for(const n of el.childNodes){if(n.nodeType===3)t+=n.data;else if(!(n.nodeType===1&&n.classList.contains("codexpp-shimmer")))return null}return t};
-const ppAttach=el=>{if(el.dataset.codexppShimmer)return;const text=ppText(el);if(text==null||!text.trim()){el.dataset.codexppShimmer="off";return}
+// The highlight copy is laid out as one left-to-right, start-aligned line; any
+// other label (wrapped, centred, right-to-left) keeps the original shimmer.
+const ppSimple=el=>{const cs=getComputedStyle(el),line=parseFloat(cs.lineHeight)||1.25*parseFloat(cs.fontSize)||20;
+return cs.direction==="ltr"&&/^(start|left|-webkit-left)$/.test(cs.textAlign)&&el.getBoundingClientRect().height<=1.6*line};
+const ppAttach=el=>{if(el.dataset.codexppShimmer)return;const text=ppText(el);if(text==null||!text.trim()||!ppSimple(el)){el.dataset.codexppShimmer="off";return}
 const overlay=document.createElement("span"),win=document.createElement("span"),copy=document.createElement("span");
 overlay.className="codexpp-shimmer";overlay.setAttribute("aria-hidden","true");win.className="codexpp-shimmer-window";copy.className="codexpp-shimmer-text";
 const cs=getComputedStyle(el);copy.style.padding=cs.padding;copy.textContent=text;win.append(copy);overlay.append(win);el.append(overlay);el.dataset.codexppShimmer="on";
@@ -261,7 +265,8 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       if (!trees[file]) { skipped[name] = 'module not found'; return; }
       if (developmentOnly.has(name) && !diagnostics) { skipped[name] = 'development builds only'; return; }
       if (matches.length !== 1) { skipped[name] = `expected one match, found ${matches.length}`; return; }
-      edits[file].push(edit(matches[0]));
+      const made = edit(matches[0]);
+      for (const one of Array.isArray(made) ? made : [made]) edits[file].push({ ...one, name });
       applied[name] = file;
     }
 
@@ -306,13 +311,18 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
             sources.shared.slice(key.start, key.end).indexOf('`get-settings`') < 0) return;
         settingsQueries.push({ node, prop: props.get('queryFn'), fn: props.get('queryFn').value });
       });
-      record('settingsCacheFirst', 'shared', settingsQueries, ({ node, prop, fn }) => {
-        const original = sources.shared.slice(fn.start, fn.end);
+      record('settingsCacheFirst', 'shared', settingsQueries, ({ node, fn }) => {
         const store = 'ppSettingsKey="codexpp.settings:"+import.meta.url';
-        return { start: prop.start, end: node.end - 1, text: `${marker}queryFn:()=>Promise.resolve((${original})()).then(ppSettings=>{try{const ${store};` +
-          `ppSettings!=null&&localStorage.setItem(ppSettingsKey,JSON.stringify(ppSettings))}catch{}return ppSettings}),` +
-          sources.shared.slice(fn.end, node.end - 1).replace(/^,/, '') +
-          `,...(()=>{try{const ${store},ppStored=localStorage.getItem(ppSettingsKey);return ppStored==null?{}:{initialData:JSON.parse(ppStored),initialDataUpdatedAt:0}}catch{return{}}})()` };
+        return [
+          // queryFn: the original, with the query context forwarded; each result is cached
+          // (older builds' entries are removed).
+          { start: fn.start, end: fn.end, text: `${marker}(...ppArgs)=>Promise.resolve((${sources.shared.slice(fn.start, fn.end)})(...ppArgs)).then(ppSettings=>{try{const ${store};` +
+            `if(ppSettings!=null){localStorage.setItem(ppSettingsKey,JSON.stringify(ppSettings));` +
+            `for(const ppOld of Object.keys(localStorage))ppOld.startsWith("codexpp.settings:")&&ppOld!==ppSettingsKey&&localStorage.removeItem(ppOld)}}catch{}return ppSettings})` },
+          // After the last property (a trailing comma stays valid): the cached value as initial data.
+          { start: node.properties.at(-1).end, end: node.properties.at(-1).end,
+            text: `,...(()=>{try{const ${store},ppStored=localStorage.getItem(ppSettingsKey);return ppStored==null?{}:{initialData:JSON.parse(ppStored),initialDataUpdatedAt:0}}catch{return{}}})()` },
+        ];
       });
 
       // build(client, options, state) { ... a || (a = new Query({...}), this.add(a)), a }
@@ -518,7 +528,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         const fields = ':is([contenteditable],textarea,input)';
         const css = `${fields}{caret-animation:manual}@media (prefers-reduced-motion:no-preference){:root[data-codexpp-caret-blink] ${fields}:focus{` +
           `animation:codexpp-caret-blink 1.06s step-end 5}}@keyframes codexpp-caret-blink{50%{caret-color:transparent}}`;
-        edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
+        edits.initial.push({ name: 'caretBlinkTimeout', start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `if(typeof document==="undefined"||!globalThis.CSS?.supports?.("caret-animation","manual"))return;` +
           `const ppStyle=document.createElement("style");ppStyle.textContent=${JSON.stringify(css)};(document.head??document.documentElement).append(ppStyle);` +
           // Restart the blink on activity: drop the attribute, set it again next frame.
@@ -526,7 +536,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `ppFrame=requestAnimationFrame(()=>ppRoot.setAttribute("data-codexpp-caret-blink",""))};` +
           `for(const ppEvent of["keydown","pointerdown","focusin"])addEventListener(ppEvent,ppWake,!0)}catch{}})();` });
         applied.caretBlinkTimeout = 'initial';
-        edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
+        edits.initial.push({ name: 'compositorShimmer', start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
         applied.compositorShimmer = 'initial';
       } else skipped.caretBlinkTimeout = skipped.compositorShimmer = firstStatement ? 'initial bundle not recognised' : 'module not found';
       // The app shell measures itself with a ResizeObserver, which runs after
@@ -556,7 +566,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `ppElement.isConnected&&(ppHeight.set(ppElement.clientHeight),ppWidth.set(ppElement.clientWidth))},!0);` +
           `return(ppElement,ppHeight,ppWidth)=>{ppElement?ppShells.set(ppWidth,[ppElement,ppHeight]):ppShells.delete(ppWidth)}})())(${element},${height},${width});` }));
       if (firstStatement && applied.chunkTimings) {
-        edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
+        edits.initial.push({ name: 'learnedStartupPreload', start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `const ppKey="codexpp.startupChunks.v2:"+import.meta.url;let ppList=null;try{ppList=JSON.parse(localStorage.getItem(ppKey)??"null")}catch{}` +
           `if(Array.isArray(ppList))for(const ppName of ppList.slice(0,40)){if(typeof ppName!=="string"||!/^\\.\\/[\\w.-]+\\.js$/.test(ppName))continue;` +
           `const ppLink=document.createElement("link");ppLink.rel="modulepreload";ppLink.crossOrigin="";ppLink.href=new URL(ppName,import.meta.url).href;document.head.append(ppLink)}` +
@@ -736,7 +746,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         const cacheable = '/^(PATH|MANPATH|INFOPATH|FPATH|LANG|LC_[A-Z]+|EDITOR|VISUAL|PAGER|HOMEBREW_(PREFIX|CELLAR|REPOSITORY)|[A-Z][A-Z0-9_]*_(HOME|ROOT|DIR|PATH))$/';
         const sensitive = '/(KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL|COOKIE|SESSION|PRIVATE)/i';
         const credentials = '/:\\/\\/[^\\/\\s@]*@/';
-        edits.requirements.push({ start: load.start, end: load.end, text: `${marker}await(async ppLoad=>{const ppFs=require("fs"),` +
+        edits.requirements.push({ name: 'shellEnvironmentCacheFirst', start: load.start, end: load.end, text: `${marker}await(async ppLoad=>{const ppFs=require("fs"),` +
           `ppFile=require("path").join(${electron}.app.getPath("userData"),"codexpp-shell-environment-v2.json"),ppBefore={...process.env},` +
           // Caches written before the allow-list may hold values it now refuses.
           `ppOld=(()=>{try{ppFs.unlinkSync(require("path").join(${electron}.app.getPath("userData"),"codexpp-shell-environment.json"))}catch{}})(),` +
@@ -751,14 +761,14 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `void ppPending.then(()=>ppSave(ppCached.savedAt),()=>{})})(${src.slice(load.argument.callee.start, load.argument.callee.end)})` });
         applied.shellEnvironmentCacheFirst = 'requirements';
         const { mkdir } = phases[0];
-        if (mkdir) edits.requirements.push({ start: mkdir.start, end: mkdir.end,
+        if (mkdir) edits.requirements.push({ name: 'shellEnvironmentCacheFirst', start: mkdir.start, end: mkdir.end,
           text: `${marker}(require("fs").mkdirSync(${src.slice(mkdir.argument.arguments[0].start, mkdir.argument.arguments[0].end)},{recursive:!0}),void 0)` });
       } else if (trees.requirements) skipped.shellEnvironmentCacheFirst = 'shell environment load not found';
       if (phases.length === 1 && diagnostics) {
         const { first, request, validate } = phases[0];
-        edits.requirements.push({ start: first.end, end: first.end, text: `${marker}${mark('environment')};` });
-        edits.requirements.push({ start: request.start, end: request.start, text: `${marker}(${mark('policy-read')},0)||` });
-        edits.requirements.push({ start: validate.end, end: validate.end, text: `,ppPhase=(${mark('policy-validated')})` });
+        edits.requirements.push({ name: 'policyPhaseTimings', start: first.end, end: first.end, text: `${marker}${mark('environment')};` });
+        edits.requirements.push({ name: 'policyPhaseTimings', start: request.start, end: request.start, text: `${marker}(${mark('policy-read')},0)||` });
+        edits.requirements.push({ name: 'policyPhaseTimings', start: validate.end, end: validate.end, text: `,ppPhase=(${mark('policy-validated')})` });
       }
     } else skipped.policyPhaseTimings = 'module not found';
 
@@ -810,12 +820,41 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       if (Object.keys(css).length) { result.css = css; applied.viewportContainerQueries = 'css'; }
       else skipped.viewportContainerQueries = 'no width media queries';
     } else skipped.viewportContainerQueries = 'stylesheets not provided';
+    // Each edit names its speed-up. An edit that overlaps another replacement,
+    // reuses an identifier the vendor code already has, or leaves the module
+    // unparsable is dropped by name and reported; the others still apply.
+    const drop = (name, reason) => { delete applied[name]; skipped[name] = reason; };
+    const compose = (file, list) => {
+      let source = sources[file];
+      for (const edit of [...list].sort((a, b) => b.start - a.start)) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
+      return source;
+    };
+    const parses = text => { try { parse(text); return true; } catch { return false; } };
     for (const [file, list] of Object.entries(edits)) {
       if (!list.length) continue;
-      let source = sources[file];
-      for (const edit of list.sort((a, b) => b.start - a.start)) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
-      parse(source);
-      result[file] = source;
+      const rejected = new Map();
+      const ordered = [...list].sort((a, b) => a.start - b.start || a.end - b.end);
+      for (let i = 1; i < ordered.length; i++) {
+        if (ordered[i].start < ordered[i - 1].end) for (const edit of [ordered[i - 1], ordered[i]]) rejected.set(edit.name, 'overlaps another edit');
+      }
+      const existing = new Map();
+      for (const edit of list) {
+        for (const id of new Set(edit.text.match(/\bpp[A-Z][\w$]*/g) ?? [])) {
+          if (!existing.has(id)) existing.set(id, new RegExp(`\\b${id.replace(/\$/g, '\\$')}\\b`).test(sources[file]));
+          if (existing.get(id)) rejected.set(edit.name, `identifier ${id} already exists`);
+        }
+      }
+      let kept = list.filter(edit => !rejected.has(edit.name));
+      if (!parses(compose(file, kept))) {
+        for (const name of new Set(kept.map(edit => edit.name))) {
+          if (!parses(compose(file, kept.filter(edit => edit.name === name)))) rejected.set(name, 'did not parse');
+        }
+        kept = kept.filter(edit => !rejected.has(edit.name));
+        if (!parses(compose(file, kept))) for (const edit of kept) rejected.set(edit.name, 'did not parse with the other edits');
+        kept = kept.filter(edit => !rejected.has(edit.name));
+      }
+      for (const [name, reason] of rejected) drop(name, reason);
+      if (kept.length) result[file] = compose(file, kept);
     }
     return result;
   }

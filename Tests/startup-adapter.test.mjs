@@ -470,11 +470,14 @@ test('the compositor shimmer moves layers instead of repainting the text', () =>
   assert.match(runtime, /prefers-reduced-motion:reduce/);
   // A plain-text label gets the overlay; a label with elements keeps the original shimmer.
   const listeners = {}, appended = [];
-  const make = (tag, children = []) => ({tagName: tag, nodeType: 1, childNodes: children, dataset: {}, classList: {contains: c => c === 'codexpp-shimmer' && tag === 'overlay'},
+  const make = (tag, children = [], height = 20) => ({tagName: tag, nodeType: 1, childNodes: children, dataset: {}, classList: {contains: c => c === 'codexpp-shimmer' && tag === 'overlay'},
+    getBoundingClientRect: () => ({height}),
     style: {}, setAttribute() {}, append(...nodes) { this.childNodes.push(...nodes); appended.push(...nodes); }, matches: () => true, remove() {}});
   const rootAttributes = new Set(), windowListeners = {};
   let focused = true;
-  const sandbox = {Element: Object, MutationObserver: class { observe() {} }, getComputedStyle: () => ({padding: '0px'}),
+  const styles = new Map();
+  const sandbox = {Element: Object, MutationObserver: class { observe() {} },
+    getComputedStyle: el => ({padding: '0px', direction: 'ltr', textAlign: 'start', lineHeight: '20px', fontSize: '14px', ...styles.get(el)}),
     addEventListener: (type, f) => { windowListeners[type] = f; },
     document: {head: {append() {}}, hasFocus: () => focused, documentElement: {setAttribute: n => rootAttributes.add(n), removeAttribute: n => rootAttributes.delete(n)},
       createElement: () => ({...make('overlay'), className: ''}), addEventListener: (type, f) => { listeners[type] = f; }}};
@@ -486,6 +489,15 @@ test('the compositor shimmer moves layers instead of repainting the text', () =>
   const rich = make('div', [{nodeType: 1, classList: {contains: () => false}}]);
   listeners.animationstart({animationName: 'codexpp-shimmer-mark', target: rich});
   assert.equal(rich.dataset.codexppShimmer, 'off', 'rich content falls back to the original shimmer');
+  const wrapped = make('div', [{nodeType: 3, data: 'Working for a long time on a long label'}], 40);
+  listeners.animationstart({animationName: 'codexpp-shimmer-mark', target: wrapped});
+  assert.equal(wrapped.dataset.codexppShimmer, 'off', 'a wrapped label keeps the original shimmer');
+  for (const style of [{direction: 'rtl'}, {textAlign: 'center'}]) {
+    const label = make('div', [{nodeType: 3, data: 'Thinking'}]);
+    styles.set(label, style);
+    listeners.animationstart({animationName: 'codexpp-shimmer-mark', target: label});
+    assert.equal(label.dataset.codexppShimmer, 'off', JSON.stringify(style));
+  }
   focused = false; windowListeners.blur();
   assert.ok(rootAttributes.has('data-codexpp-blurred'), 'an unfocused window pauses its shimmers');
   focused = true; windowListeners.focus();
@@ -547,4 +559,30 @@ test('release builds skip the diagnostic edits', () => {
   assert.equal(release.skipped.policyPhaseTimings, 'development builds only');
   assert.ok(!release.requirements.includes('.policy??={}'), 'no phase marks');
   assert.equal(release.applied.shellEnvironmentCacheFirst, 'requirements', 'speed-ups still apply');
+});
+
+test('an edit that would reuse a vendor identifier is dropped by name; the rest still apply', () => {
+  const base = adapt({shared, initial});
+  assert.equal(base.applied.caretBlinkTimeout, 'initial');
+  const result = adapt({shared, initial: initial + ';var ppRoot=1;'});
+  assert.match(result.skipped.caretBlinkTimeout, /identifier ppRoot already exists/);
+  assert.equal(result.applied.statsigUserCacheFirst, 'initial', 'other edits in the module still apply');
+  assert.ok(!result.initial.includes('codexpp-caret-blink'));
+});
+
+test('the settings query keeps its context, any property order and a trailing comma; old builds\' caches are removed', async () => {
+  const shared = 'export const VK=()=>({queryKey:XG(`get-settings`),placeholderData:P,queryFn:({signal})=>load(signal),});';
+  const {shared: patched, applied} = adapt({shared});
+  assert.equal(applied.settingsCacheFirst, 'shared');
+  const storage = {};
+  for (const [name, value] of Object.entries({getItem: k => storage[k] ?? null, setItem: (k, v) => { storage[k] = String(v); }, removeItem: k => { delete storage[k]; }}))
+    Object.defineProperty(storage, name, {value, enumerable: false});
+  storage['codexpp.settings:app://-/assets/app-shared-OLD.js'] = '{"theme":"old"}';
+  storage['unrelated'] = 'kept';
+  const signal = {aborted: false};
+  const sandbox = {module: {}, XG: k => [k], P: {}, load: async s => ({theme: 'dark', signal: s === signal}), localStorage: storage};
+  vm.runInNewContext(patched.replace('export const VK=', 'module.VK=').replaceAll('import.meta.url', '"app://-/assets/app-shared-1.js"'), sandbox);
+  const result = await sandbox.module.VK().queryFn({signal});
+  assert.equal(result.signal, true, 'the query context reaches the original queryFn');
+  assert.deepEqual(Object.keys(storage).sort(), ['codexpp.settings:app://-/assets/app-shared-1.js', 'unrelated'], 'older builds\' entries are removed');
 });
