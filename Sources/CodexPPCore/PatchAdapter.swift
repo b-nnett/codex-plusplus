@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 135
+    public static let revision = 136
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
@@ -205,7 +205,7 @@ public struct PatchAdapter: Codable, Sendable {
                     if (ppStep >= 360) { clearInterval(ppTimer); ppWindow.setBounds(ppStart); done(); } }, 16); });
                   ppMark('resize-end');
                   if (ppChrome) { try { const ppFile = await ppElectron.contentTracing.stopRecording(require('path').join(\(try literal(support.path)), 'Diagnostics', 'chrome-trace.json')); ppMark('chrome-trace:' + ppFile); } catch (error) { ppMark('chrome-trace-failed:' + error); } }
-                  if (ppChrome) await ppElectron.contentTracing.startRecording({included_categories: ['devtools.timeline', 'blink', 'cc', 'viz', 'disabled-by-default-devtools.timeline']}).catch(() => {});
+                  if (ppChrome) await ppElectron.contentTracing.startRecording({included_categories: ['devtools.timeline', 'blink', 'cc', 'viz', 'disabled-by-default-devtools.timeline', 'disabled-by-default-devtools.timeline.stack', 'disabled-by-default-v8.cpu_profiler']}).catch(() => {});
                   for (let ppIndex = 0; ppIndex < 6 && ppToggle; ppIndex++) {
                     await new Promise(done => setTimeout(done, 2000));
                     ppMark(`toggle-${ppIndex}`); ppToggle.click(undefined, ppWindow, ppWindow.webContents);

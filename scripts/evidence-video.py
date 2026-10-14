@@ -18,7 +18,7 @@ import argparse, json, math, os, signal, subprocess, sys, tempfile, time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PATCHED = "/Applications/ChatGPT.app"
 SUPPORT = os.path.expanduser("~/Library/Application Support/CodexPP")
-LABELS = {"original": "Stock ChatGPT", "patched": "ChatGPT + Codex++",
+LABELS = {"original": "Stock ChatGPT", "patched": "ChatGPT + Codex++", "patched-paused": "Codex++ (extensions paused)",
           "shimmer-original": "Original shimmer", "shimmer-compositor": "Codex++ compositor shimmer"}
 
 
@@ -56,7 +56,7 @@ def quit_app():
 
 
 def main_pid():
-    out = subprocess.run(["pgrep", "-f", "/Contents/MacOS/ChatGPT$"], capture_output=True, text=True).stdout.split()
+    out = subprocess.run(["pgrep", "-x", "ChatGPT"], capture_output=True, text=True).stdout.split()
     return int(out[0]) if out else None
 
 
@@ -182,15 +182,24 @@ def resize_steps():
 def run(args):
     os.makedirs(args.out, exist_ok=True)
     stock = original_bundle()
-    if args.scenario == "resize":
+    if args.scenario in ("resize", "panel"):
         variants = [("original", stock, None), ("patched", PATCHED, None)]
+        if args.paused:
+            variants.append(("patched-paused", PATCHED, None))
     elif args.scenario == "idle":
         variants = [("original", stock, None), ("patched", PATCHED, None)]
     else:
         variants = [("shimmer-original", PATCHED, {"demoShimmer": "original"}), ("shimmer-compositor", PATCHED, {"demoShimmer": "compositor"})]
     results, clips = {}, []
+    settings_path = os.path.join(SUPPORT, "settings.json")
+    with open(settings_path, "rb") as f:
+        settings = f.read()
     for name, bundle, experiments in variants:
-        launch(bundle, experiments, args.thread if args.scenario == "resize" else None)
+        paused = json.loads(settings)
+        paused["extensionsPaused"] = name == "patched-paused" or paused.get("extensionsPaused", False)
+        with open(settings_path, "w") as f:
+            json.dump(paused, f)
+        launch(bundle, experiments, args.thread if args.scenario in ("resize", "panel") else None)
         place(80, 126, 1407, 950)
         time.sleep(args.settle)
         osa('tell application "System Events" to tell process "ChatGPT" to set frontmost to true')
@@ -198,7 +207,10 @@ def run(args):
         bounds = json.loads(subprocess.run([tool("window-bounds"), str(pid)], capture_output=True, text=True, check=True).stdout)
         if args.scenario == "resize" and not ensure_panel(bounds):
             sys.exit(f"{name}: could not open the side panel")
-        seconds = 16 if args.scenario == "resize" else 24
+        if args.scenario == "panel" and panel_open(bounds):
+            osa('tell application "System Events" to tell process "ChatGPT" to click menu item "Switch between Chat and tabs" of menu "View" of menu bar 1')
+            time.sleep(2)
+        seconds = {"resize": 16, "panel": 15}.get(args.scenario, 24)
         raw = os.path.join(args.out, f"{name}-raw.mov")
         recording = Recording(raw, seconds)
         sampler = Sampler(os.path.join(args.out, f"{name}-cpu.jsonl"), seconds, bundle)
@@ -211,6 +223,12 @@ def run(args):
                 'set size of window 1 to {w as integer, 950}', 'end repeat', 'end tell')
             record["resize_seconds"] = round(time.time() - began, 2)
             bounds["width"] = max(resize_steps())  # crop wide enough for the widest step
+        if args.scenario == "panel":
+            record["toggles"] = []
+            for _ in range(6):
+                record["toggles"].append(round(time.time() - recording.start, 3))
+                osa('tell application "System Events" to tell process "ChatGPT" to click menu item "Switch between Chat and tabs" of menu "View" of menu bar 1')
+                time.sleep(2)
         recording.wait()
         samples = sampler.samples()
         timeline, rows = cpu_timeline(samples, recording.start)
@@ -220,15 +238,20 @@ def run(args):
         record["cpu_mean_pct"] = round(sum(active) / max(1, len(active)), 1)
         clip = os.path.join(args.out, f"{name}.mp4")
         render(raw, bounds, LABELS[name], timeline, clip, skip, duration)
-        if args.scenario == "resize":
+        if args.scenario in ("resize", "panel"):
             render(raw, bounds, LABELS[name], timeline, os.path.join(args.out, f"{name}-slow.mp4"), skip, duration, speed=0.25)
-        os.remove(raw)
+        if args.keep_raw:
+            record["raw"] = raw
+        else:
+            os.remove(raw)
         clips.append(clip)
         results[name] = record
         print(json.dumps(record))
-    side_by_side(clips, os.path.join(args.out, "side-by-side.mp4"))
-    if args.scenario == "resize":
-        side_by_side([c.replace(".mp4", "-slow.mp4") for c in clips], os.path.join(args.out, "side-by-side-slow.mp4"))
+    with open(settings_path, "wb") as f:
+        f.write(settings)
+    side_by_side(clips[:2], os.path.join(args.out, "side-by-side.mp4"))
+    if args.scenario in ("resize", "panel"):
+        side_by_side([c.replace(".mp4", "-slow.mp4") for c in clips[:2]], os.path.join(args.out, "side-by-side-slow.mp4"))
     with open(os.path.join(args.out, "results.json"), "w") as f:
         json.dump(results, f, indent=2)
     quit_app()
@@ -238,8 +261,10 @@ def run(args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("scenario", choices=["resize", "idle", "shimmer"])
+    ap.add_argument("scenario", choices=["resize", "idle", "shimmer", "panel"])
     ap.add_argument("--thread", help="codex://threads/... URL to open for the resize scenario")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--paused", action="store_true", help="also film the patched app with extensions paused")
+    ap.add_argument("--keep-raw", action="store_true", help="keep the full-screen recordings for frame analysis")
     ap.add_argument("--settle", type=float, default=0, help="seconds to wait after launch before filming")
     run(ap.parse_args())
