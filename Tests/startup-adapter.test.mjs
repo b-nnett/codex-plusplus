@@ -516,3 +516,24 @@ test('width media rules become container queries on the root, other media rules 
     '@media (prefers-reduced-motion: reduce){.d{animation:none}}',
   ]);
 });
+
+test('window resizes deliver new sizes of window-wide elements to their observers before the frame', () => {
+  const runtime = context.CodexPPStartupAdapter.layoutMotion;
+  class FakeRO { constructor(cb) { this.cb = cb; } observe() {} unobserve() {} disconnect() {} }
+  let resize = null;
+  const element = width => ({isConnected: true, getBoundingClientRect: () => ({width, height: 500})});
+  const shell = element(900), button = element(40);
+  const sandbox = {ResizeObserver: FakeRO, WeakRef, innerWidth: 1000, devicePixelRatio: 2, DOMRectReadOnly: class { constructor(x, y, width, height) { Object.assign(this, {x, y, width, height}); } },
+    getComputedStyle: () => ({paddingLeft: '10px', paddingRight: '10px'}), setTimeout() {}, matchMedia: () => ({matches: false}),
+    addEventListener: (type, f) => { if (type === 'resize') resize = f; },
+    document: {styleSheets: [], addEventListener() {}, head: {prepend() {}}, createElement: () => ({setAttribute() {}}), querySelector: () => null}};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(runtime, sandbox);
+  const seen = [];
+  const observer = new sandbox.ResizeObserver(entries => seen.push(entries.map(e => [e.borderBoxSize[0].inlineSize, e.contentRect.width])));
+  observer.observe(shell); observer.observe(button);
+  resize();
+  assert.equal(JSON.stringify(seen), '[[[900,880]]]', 'only the window-wide element, with border and content sizes');
+  observer.disconnect(); resize();
+  assert.equal(seen.length, 1, 'disconnected observers are left alone');
+});

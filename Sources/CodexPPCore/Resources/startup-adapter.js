@@ -159,13 +159,21 @@ document.addEventListener("animationstart",e=>{if(e.animationName==="codexpp-shi
 }catch{}})();`;
 
 
-// Layout motion: a sheet with width media queries is rebuilt whenever the
-// window crosses one of them, and Chromium then resets every @font-face,
-// @property and @keyframes rule of the document and restyles and relays out
-// the whole window. app-shared.css (47 breakpoints) did this about 50 times in a
-// 6 s resize. Width-only media rules become container queries on <html> (the
-// viewport, which never scrolls), so a breakpoint restyles only what it styles;
-// rules for <html> itself apply to <body>, which inherits the same values.
+// Layout motion. Breakpoints: a sheet with width media queries is rebuilt
+// whenever the window crosses one of them, and Chromium then resets every
+// @font-face, @property and @keyframes rule of the document and restyles and
+// relays out the whole window. app-shared.css (47 breakpoints) did this about
+// 50 times in a 6 s resize. Width-only media rules become container queries on
+// <html> (the viewport, which never scrolls), so a breakpoint restyles only
+// what it styles; rules for <html> itself apply to <body>, which inherits the
+// same values. Resize: the shell measures its width with a ResizeObserver,
+// which runs after layout, and feeds framer-motion values that size the side
+// panel; framer writes them on the next frame, so while the window resized the
+// chat column took the whole change for a frame and snapped back (the column
+// and the panel's browser jittered). On a window resize event, which runs
+// before the frame's animation callbacks, observers of window-wide elements
+// (60% of the width or more) get their new sizes at once, so the panel width
+// lands in the same frame; the real delivery later reports the same sizes.
 const layoutMotion = String.raw`(()=>{try{
 if(typeof document==="undefined"||globalThis.__codexPPLayoutMotion)return;globalThis.__codexPPLayoutMotion=1;
 const ppViewportQuery=text=>{if(!/\bwidth\b/.test(text)||/height|aspect|orientation|resolution|print|hover|pointer|prefers|color|display-mode|scripting/.test(text))return null;
@@ -181,6 +189,20 @@ const text="@container codexpp-viewport "+ppViewportQuery(r.media.mediaText)+"{"
 parent.deleteRule(index);try{parent.insertRule(text,index)}catch{parent.insertRule(original,index)}}}catch{}};
 try{const root=document.createElement("style");root.setAttribute("data-codexpp-viewport","");root.textContent="html{container:codexpp-viewport/inline-size}";(document.head??document.documentElement).prepend(root);
 for(const sheet of document.styleSheets)ppRewrite(sheet);document.addEventListener("load",e=>{if(e.target?.sheet)ppRewrite(e.target.sheet)},true)}catch{}
+const ppRO=globalThis.ResizeObserver;
+if(ppRO&&globalThis.WeakRef){const ppLive=new Set();
+globalThis.ResizeObserver=class extends ppRO{constructor(callback){super(callback);this.ppCallback=callback;this.ppTargets=new Set();this.ppRef=new WeakRef(this)}
+observe(target,options){this.ppTargets.add(target);ppLive.add(this.ppRef);return super.observe(target,options)}
+unobserve(target){this.ppTargets.delete(target);return super.unobserve(target)}
+disconnect(){this.ppTargets.clear();ppLive.delete(this.ppRef);return super.disconnect()}};
+const ppEntry=(target,rect)=>{const cs=getComputedStyle(target),px=key=>parseFloat(cs[key])||0;
+const left=px("paddingLeft")+px("borderLeftWidth"),top=px("paddingTop")+px("borderTopWidth");
+const width=Math.max(0,rect.width-left-px("paddingRight")-px("borderRightWidth")),height=Math.max(0,rect.height-top-px("paddingBottom")-px("borderBottomWidth"));
+return{target,contentRect:new DOMRectReadOnly(px("paddingLeft"),px("paddingTop"),width,height),borderBoxSize:[{inlineSize:rect.width,blockSize:rect.height}],
+contentBoxSize:[{inlineSize:width,blockSize:height}],devicePixelContentBoxSize:[{inlineSize:width*devicePixelRatio,blockSize:height*devicePixelRatio}]}};
+addEventListener("resize",()=>{const min=innerWidth*.6;for(const ref of ppLive){const observer=ref.deref();if(!observer){ppLive.delete(ref);continue}const entries=[];
+for(const target of observer.ppTargets){if(!target.isConnected)continue;const rect=target.getBoundingClientRect();if(rect.width>=min)entries.push(ppEntry(target,rect))}
+if(entries.length)try{observer.ppCallback.call(observer,entries,observer)}catch(error){setTimeout(()=>{throw error})}}},true)}
 }catch{}})();`;
 
 globalThis.CodexPPStartupAdapter = Object.freeze({
