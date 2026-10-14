@@ -5,8 +5,12 @@ version="${CODEXPP_VERSION:-$(cat VERSION)}"
 build_number="${CODEXPP_BUILD_NUMBER:-1}"
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid CODEXPP_VERSION.' >&2; exit 1; }
 [[ "$build_number" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid CODEXPP_BUILD_NUMBER.' >&2; exit 1; }
-swift build -c release -debug-info-format none
-bin_dir="$(swift build -c release --show-bin-path)"
+# CODEXPP_EXPERIMENTS=1 builds a development helper whose bootstraps carry the
+# benchmark experiments (Diagnostics/experiments.json); releases never do.
+flags=()
+if [ "${CODEXPP_EXPERIMENTS:-0}" = 1 ]; then flags=(-Xswiftc -DCODEXPP_EXPERIMENTS); fi
+swift build -c release -debug-info-format none ${flags[@]+"${flags[@]}"}
+bin_dir="$(swift build -c release --show-bin-path ${flags[@]+"${flags[@]}"})"
 app="$PWD/dist/Codex++.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"

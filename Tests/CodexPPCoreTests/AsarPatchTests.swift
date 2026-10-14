@@ -128,6 +128,10 @@ final class AsarPatchTests: XCTestCase {
         XCTAssertTrue(text.contains("ppNativeBrowser.setEnabled(event, request.enabled)"))
         XCTAssertTrue(text.contains("type:'codexpp-browser-autofill-result'"))
         XCTAssertFalse(text.contains("shell:true"))
+        XCTAssertTrue(text.contains("enableCompileCache"))
+        // Benchmark experiments (script probes, injected CSS, V8 flags) ship only in dev builds.
+        XCTAssertEqual(text.contains("experiments.json"), PatchAdapter.experimentsEnabled)
+        XCTAssertEqual(text.contains("executeJavaScript(ppExperiments.perfProbe)"), PatchAdapter.experimentsEnabled)
         let script = path.deletingLastPathComponent().appendingPathComponent("bootstrap.js")
         try bootstrap.write(to: script)
         let process = Process()
