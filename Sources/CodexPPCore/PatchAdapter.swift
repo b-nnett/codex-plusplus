@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 107
+    public static let revision = 121
     public static func id(build: String) -> String { "chatgpt-macos-\(build)-v\(revision)" }
     /// Receipts this adapter may replace: any revision of the same build.
     func accepts(receiptAdapter id: String) -> Bool {
@@ -153,8 +153,44 @@ public struct PatchAdapter: Codable, Sendable {
                     contents.executeJavaScript(`(()=>{const e=document.createElement('div');e.className='loading-shimmer-pure-text loading-shimmer-working';` +
                       `${ppMode === 'original' ? "e.dataset.codexppShimmer='off';" : ''}e.textContent='Thinking';` +
                       `Object.assign(e.style,{position:'fixed',left:'50%',top:'40%',zIndex:99,fontSize:'14px'});document.body.append(e)})()`, true).catch(() => {});
+                    // demoShimmerBlurMs: unfocus the window after a delay, leaving it visible and on top.
+                    const ppBlur = Number(ppExperiments.demoShimmerBlurMs);
+                    if (ppBlur > 0) setTimeout(() => { try { const ppWindow = ppElectron.BrowserWindow.fromWebContents(contents); ppWindow?.isFocused() && ppWindow.blur(); } catch {} }, ppBlur).unref?.();
                   });
                 });
+              }
+              // perfScript: scripted resize then side-panel toggles on the main window,
+              // for traced A/B runs of layout cost. Times go to Diagnostics/perf-script.json.
+              if (ppExperiments.perfScript === true) {
+                void ppElectron.app.whenReady().then(() => setTimeout(async () => {
+                  const ppLog = [], ppMark = name => ppLog.push([Date.now(), name]);
+                  const ppArea = w => { const b = w.getBounds(); return b.width * b.height; };
+                  const ppWindow = ppElectron.BrowserWindow.getAllWindows().filter(w => !w.isDestroyed() && w.isVisible()).sort((a, b) => ppArea(b) - ppArea(a))[0];
+                  const ppWrite = () => { try { require('fs').writeFileSync(require('path').join(\(try literal(support.path)), 'Diagnostics', 'perf-script.json'), JSON.stringify(ppLog)); } catch {} };
+                  if (!ppWindow) { ppMark('no-visible-window'); ppWrite(); return; }
+                  const ppStart = ppWindow.getBounds();
+                  // chromeTrace: record Chromium's own timeline (style, layout, paint, raster) for the resize.
+                  const ppChrome = ppExperiments.chromeTrace === true;
+                  if (ppChrome) await ppElectron.contentTracing.startRecording({included_categories: ['devtools.timeline', 'blink', 'cc', 'viz', 'disabled-by-default-devtools.timeline', 'disabled-by-default-devtools.timeline.stack', 'disabled-by-default-devtools.timeline.invalidationTracking', 'disabled-by-default-v8.cpu_profiler']}).catch(() => {});
+                  // perfProbe: a JS expression evaluated in the window before the resize, logged as JSON.
+                  if (typeof ppExperiments.perfProbe === 'string') { try { ppMark('probe:' + JSON.stringify(await ppWindow.webContents.executeJavaScript(ppExperiments.perfProbe))); } catch (error) { ppMark('probe-failed:' + error); } }
+                  ppMark('resize-start');
+                  await new Promise(done => { let ppStep = 0; const ppTimer = setInterval(() => {
+                    ppStep++; ppWindow.setBounds({...ppStart, width: Math.round(ppStart.width - 260 + 260 * Math.cos(ppStep / 60 * Math.PI))});
+                    if (ppStep >= 360) { clearInterval(ppTimer); ppWindow.setBounds(ppStart); done(); } }, 16); });
+                  ppMark('resize-end');
+                  if (ppChrome) { try { const ppFile = await ppElectron.contentTracing.stopRecording(require('path').join(\(try literal(support.path)), 'Diagnostics', 'chrome-trace.json')); ppMark('chrome-trace:' + ppFile); } catch (error) { ppMark('chrome-trace-failed:' + error); } }
+                  const ppFind = items => { for (const item of items ?? []) { if (/Toggle Changes Panel|Switch between Chat and tabs/.test(item.label ?? '')) return item; const sub = ppFind(item.submenu?.items); if (sub) return sub; } return null; };
+                  const ppToggle = ppFind(ppElectron.Menu.getApplicationMenu()?.items);
+                  if (ppChrome) await ppElectron.contentTracing.startRecording({included_categories: ['devtools.timeline', 'blink', 'cc', 'viz', 'disabled-by-default-devtools.timeline']}).catch(() => {});
+                  for (let ppIndex = 0; ppIndex < 6 && ppToggle; ppIndex++) {
+                    await new Promise(done => setTimeout(done, 2000));
+                    ppMark(`toggle-${ppIndex}`); ppToggle.click(undefined, ppWindow, ppWindow.webContents);
+                  }
+                  if (ppChrome) { await new Promise(done => setTimeout(done, 1500)); try { await ppElectron.contentTracing.stopRecording(require('path').join(\(try literal(support.path)), 'Diagnostics', 'chrome-trace-toggles.json')); } catch {} }
+                  ppMark(ppToggle ? 'done' : 'no-toggle-menu-item');
+                  ppWrite();
+                }, Number(ppExperiments.perfScriptDelayMs) || 18000).unref?.());
               }
               if (ppExperiments.codeCache === true) {
                 const ppRegisterSchemes = ppElectron.protocol.registerSchemesAsPrivileged.bind(ppElectron.protocol);

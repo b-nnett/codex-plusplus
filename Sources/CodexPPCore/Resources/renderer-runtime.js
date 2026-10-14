@@ -81,6 +81,8 @@
           animatedImages: [...document.images].filter(image => /\.(gif|webp|apng)(\?|$)/i.test(image.currentSrc)).map(image => describe(image)).slice(0, 20),
           visibility: document.visibilityState,
           jsHeapMB: performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null,
+          domNodes: document.getElementsByTagName('*').length,
+          turnNodes: document.querySelectorAll('[data-content-search-turn-key]').length,
           iframes: [...document.querySelectorAll('iframe,webview')].slice(0, 20).map(frame => {
             let origin = null; try { origin = new URL(frame.src).origin; } catch {}
             const parents = []; for (let node = frame.parentElement; node && parents.length < 4; node = node.parentElement) parents.push(describe(node));

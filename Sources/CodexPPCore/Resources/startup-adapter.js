@@ -124,6 +124,7 @@
 // window slides with transform and the copy slides back by the same amount, so
 // only the compositor moves layers. Same path, timing and colours as the
 // original. Labels that hold more than plain text keep the original shimmer.
+// While the window is not focused, shimmers pause and show the plain label.
 const compositorShimmer = String.raw`(()=>{try{
 if(typeof document==="undefined"||globalThis.__codexPPShimmer)return;globalThis.__codexPPShimmer=1;
 const ppSel=".loading-shimmer-pure-text,.loading-shimmer,.loading-shimmer-pure-text-inverted";
@@ -141,7 +142,8 @@ const ppCss=":is(.loading-shimmer-pure-text,.loading-shimmer){--codexpp-base:var
 "@keyframes codexpp-shimmer-window{from{transform:translateX(-100%)}to{transform:translateX(250%)}}@keyframes codexpp-shimmer-text{from{transform:translateX(50%)}to{transform:translateX(-125%)}}"+
 ".loading-shimmer[data-codexpp-shimmer=on]:hover{-webkit-text-fill-color:var(--text-primary)!important}.loading-shimmer:hover>.codexpp-shimmer{display:none!important}"+
 "@media (prefers-reduced-motion:reduce){.codexpp-shimmer{display:none!important}}:root[data-reduced-motion=true] .codexpp-shimmer{display:none!important}"+
-"@media (prefers-reduced-motion:reduce){.motion-reduce\\:animate-none>.codexpp-shimmer{display:none!important}}";
+"@media (prefers-reduced-motion:reduce){.motion-reduce\\:animate-none>.codexpp-shimmer{display:none!important}}"+
+":root[data-codexpp-blurred] .codexpp-shimmer{visibility:hidden}:root[data-codexpp-blurred] :is(.codexpp-shimmer-window,.codexpp-shimmer-text,"+ppSel.split(",").map(s=>s+"[data-codexpp-shimmer=off]").join(",")+"){animation-play-state:paused!important}";
 const ppStyle=document.createElement("style");ppStyle.textContent=ppCss;(document.head??document.documentElement).append(ppStyle);
 const ppText=el=>{let t="";for(const n of el.childNodes){if(n.nodeType===3)t+=n.data;else if(!(n.nodeType===1&&n.classList.contains("codexpp-shimmer")))return null}return t};
 const ppAttach=el=>{if(el.dataset.codexppShimmer)return;const text=ppText(el);if(text==null||!text.trim()){el.dataset.codexppShimmer="off";return}
@@ -150,11 +152,75 @@ overlay.className="codexpp-shimmer";overlay.setAttribute("aria-hidden","true");w
 const cs=getComputedStyle(el);copy.style.padding=cs.padding;copy.textContent=text;win.append(copy);overlay.append(win);el.append(overlay);el.dataset.codexppShimmer="on";
 new MutationObserver(()=>{const next=ppText(el);if(next==null||!next.trim()){overlay.remove();el.dataset.codexppShimmer="off";return}if(next!==copy.textContent)copy.textContent=next;if(overlay.parentNode!==el)el.append(overlay)})
 .observe(el,{childList:true,characterData:true,subtree:true})};
+// Pause while the window is not focused: frames for a shimmer nobody is looking at.
+const ppRoot=document.documentElement,ppFocus=()=>{document.hasFocus()?ppRoot.removeAttribute("data-codexpp-blurred"):ppRoot.setAttribute("data-codexpp-blurred","")};
+addEventListener("focus",ppFocus);addEventListener("blur",ppFocus);ppFocus();
 document.addEventListener("animationstart",e=>{if(e.animationName==="codexpp-shimmer-mark"&&e.target instanceof Element&&e.target.matches(ppSel))ppAttach(e.target)},true);
+}catch{}})();`;
+
+
+// Layout motion: three fixes for work that re-lays out the whole window every
+// frame. Panel: opening the right panel animated its width (a framer-motion
+// spring on a 0..1 progress value), so every frame re-laid out the transcript;
+// on long threads frames were dropped and the panel just appeared. The width
+// now changes once and the panel (and its title-bar tab strip) slides with
+// transform on the compositor: in after the width opens, out before it
+// collapses. Stylesheets: a sheet with width media queries is rebuilt whenever
+// the window crosses one of them, and Chromium then resets every @font-face,
+// @property and @keyframes rule of the document and restyles and relays out
+// the whole window. app-shared.css (47 breakpoints) did this about 50 times in a
+// 6 s resize. Width-only media rules become container queries on <html> (the
+// viewport, which never scrolls), so a breakpoint restyles only what it styles;
+// rules for <html> itself apply to <body>, which inherits the same values.
+// Resize: while the window is being resized, ResizeObserver callbacks are
+// coalesced to at most one delivery per 100 ms plus a final one, except the virtualized turn list's own measurement.
+const layoutMotion = String.raw`(()=>{try{
+if(typeof document==="undefined"||globalThis.__codexPPLayoutMotion)return;globalThis.__codexPPLayoutMotion=1;
+const ppPanelSel='[data-app-shell-focus-area="right-panel"]:is(aside,[data-app-shell-titlebar-slot])';
+let ppToken=0;
+const ppPanels=()=>[...document.querySelectorAll(ppPanelSel)];
+const ppDir=()=>/ltr:me-auto/.test(document.querySelector('aside[data-app-shell-focus-area="right-panel"]')?.className??"")?-1:1;
+const ppSlide=(panels,from,to,easing,id)=>panels.map(p=>{const a=p.animate([{transform:"translateX("+from+"%)"},{transform:"translateX("+to+"%)"}],{duration:id==="codexpp-panel-out"?200:260,easing,fill:"forwards"});a.id=id;return a});
+globalThis.__codexPPPanelSlide=(mv,target)=>{try{
+if(matchMedia("(prefers-reduced-motion: reduce)").matches||document.documentElement.dataset.reducedMotion==="true")return false;
+const token=++ppToken,dir=ppDir();
+for(const p of ppPanels())for(const a of p.getAnimations?.()??[])if(a.id?.startsWith("codexpp-panel-"))a.cancel();
+if(target===1){if(mv.get()===1)return false;mv.set(1);
+const slideIn=panels=>{const done=ppSlide(panels,dir*100,0,"cubic-bezier(.2,.8,.2,1)","codexpp-panel-in");for(const a of done)a.onfinish=()=>a.cancel()};
+const now=ppPanels();if(now.length)slideIn(now);else requestAnimationFrame(()=>{if(token===ppToken)slideIn(ppPanels())});return true}
+const panels=ppPanels();if(!panels.length||mv.get()===0)return false;
+const outs=ppSlide(panels,0,dir*100,"cubic-bezier(.4,0,1,1)","codexpp-panel-out");
+outs[0].onfinish=()=>{if(token===ppToken)mv.set(0);requestAnimationFrame(()=>{for(const a of outs)a.cancel()})};return true}catch{return false}};
+const ppViewportQuery=text=>{if(!/\bwidth\b/.test(text)||/height|aspect|orientation|resolution|print|hover|pointer|prefers|color|display-mode|scripting/.test(text))return null;
+const parts=text.split(",").map(t=>{t=t.trim().replace(/^(only\s+)?(screen|all)\s+and\s+/,"");const not=t.match(/^not\s+(?:screen|all)\s+and\s+(.*)$/);return not?"not ("+not[1]+")":"("+t+")"});
+return parts.join(" or ")};
+const ppSelfSelector=/^(?::root|html)(?:\[[^\]]*\]|\.[\w-]+|:[\w-]+(?:\([^)]*\))?)*$/;
+const ppRuleText=rule=>{if(!(rule instanceof CSSStyleRule))return rule.cssText;const sel=rule.selectorText;
+const next=sel.split(",").map(part=>ppSelfSelector.test(part.trim())?part.trim()+" > body":part).join(",");return next+rule.cssText.slice(sel.length)};
+const ppMediaRules=(rules,found)=>{for(const r of rules){if(r instanceof CSSMediaRule&&ppViewportQuery(r.media.mediaText))found.push(r);else if(r.cssRules)ppMediaRules(r.cssRules,found)}return found};
+const ppRewrite=sheet=>{try{const node=sheet?.ownerNode;if(!node||node.hasAttribute?.("data-codexpp-viewport"))return;node.setAttribute?.("data-codexpp-viewport","");
+for(const r of ppMediaRules(sheet.cssRules,[])){const parent=r.parentRule??sheet,index=[...parent.cssRules].indexOf(r),original=r.cssText;if(index<0)continue;
+const text="@container codexpp-viewport "+ppViewportQuery(r.media.mediaText)+"{"+[...r.cssRules].map(ppRuleText).join("\n")+"}";
+parent.deleteRule(index);try{parent.insertRule(text,index)}catch{parent.insertRule(original,index)}}}catch{}};
+try{const root=document.createElement("style");root.setAttribute("data-codexpp-viewport","");root.textContent="html{container:codexpp-viewport/inline-size}";(document.head??document.documentElement).prepend(root);
+for(const sheet of document.styleSheets)ppRewrite(sheet);document.addEventListener("load",e=>{if(e.target?.sheet)ppRewrite(e.target.sheet)},true)}catch{}
+const ppRO=globalThis.ResizeObserver;if(!ppRO)return;
+let ppUntil=0;const ppQuiet=120,ppEvery=100;
+addEventListener("resize",()=>{ppUntil=performance.now()+ppQuiet},{capture:true,passive:true});
+const ppJobs=new Set();let ppTimer=0;
+const ppFlush=()=>{ppTimer=0;const jobs=[...ppJobs];ppJobs.clear();for(const job of jobs){try{job()}catch(e){setTimeout(()=>{throw e})}}
+if(ppJobs.size)ppTimer=setTimeout(ppFlush,ppEvery)};
+const ppQueue=job=>{ppJobs.add(job);if(!ppTimer)ppTimer=setTimeout(ppFlush,Math.max(ppEvery,ppUntil-performance.now()))};
+globalThis.ResizeObserver=class extends ppRO{constructor(callback){
+const exempt=/virtualized-turn-list|thread-virtualizer/.test(new Error().stack??"");const latest=new Map();let self=null;
+const job=()=>{const entries=[...latest.values()];latest.clear();if(entries.length&&self)callback.call(self,entries,self)};
+super(function(entries,observer){self=observer;if(exempt||performance.now()>=ppUntil){if(latest.size){for(const e of entries)latest.set(e.target,e);ppJobs.delete(job);job();return}
+return callback.call(this,entries,observer)}for(const e of entries)latest.set(e.target,e);ppQueue(job)})}};
 }catch{}})();`;
 
 globalThis.CodexPPStartupAdapter = Object.freeze({
   compositorShimmer,
+  layoutMotion,
   adapt(input) {
     const marker = '/*codexpp:startup*/';
     const parse = source => acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
@@ -450,7 +516,24 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         applied.caretBlinkTimeout = 'initial';
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
         applied.compositorShimmer = 'initial';
-      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = firstStatement ? 'initial bundle not recognised' : 'module not found';
+        edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}${layoutMotion}` });
+        applied.resizeObserverCoalescing = 'initial';
+        // function pzt(e,t,n){let r=+!!t;if(n){e.set(r);return}Qs(e,r,cC)}: the right panel's spring.
+        const springs = [];
+        walk(trees.initial, node => {
+          if (node.type !== 'FunctionDeclaration' || node.params.length !== 3 || node.body.body.length !== 3) return;
+          const [decl, check, call] = node.body.body;
+          const text = sources.initial.slice(node.body.start, node.body.end);
+          if (decl.type === 'VariableDeclaration' && check.type === 'IfStatement' && call.type === 'ExpressionStatement' && call.expression.type === 'CallExpression' &&
+              /^\{let \w+=\+!!\w+;if\(\w+\)\{\w+\.set\(\w+\);return\}\w+\(\w+,\w+,\w+\)\}$/.test(text)) springs.push({ call, mv: node.params[0].name, target: decl.declarations[0].id.name });
+        });
+        // Only the panel spring: the module defines the same shape once more with four parameters (excluded above).
+        if (springs.length === 1) {
+          const { call, mv, target } = springs[0];
+          edits.initial.push({ start: call.start, end: call.start, text: `${marker}if(globalThis.__codexPPPanelSlide?.(${mv},${target}))return;` });
+          applied.panelSlide = 'initial';
+        } else skipped.panelSlide = `expected one match, found ${springs.length}`;
+      } else skipped.caretBlinkTimeout = skipped.compositorShimmer = skipped.resizeObserverCoalescing = skipped.panelSlide = firstStatement ? 'initial bundle not recognised' : 'module not found';
       if (firstStatement && applied.chunkTimings) {
         edits.initial.push({ start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `const ppKey="codexpp.startupChunks.v2:"+import.meta.url;let ppList=null;try{ppList=JSON.parse(localStorage.getItem(ppKey)??"null")}catch{}` +

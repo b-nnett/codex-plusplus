@@ -43,8 +43,8 @@ function sharedHook(source, cached) {
 
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
-  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'resizeObserverCoalescing', 'statsigCacheFirst', 'statsigUserCacheFirst']);
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'panelSlide', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -445,8 +445,12 @@ test('the compositor shimmer moves layers instead of repainting the text', () =>
   const listeners = {}, appended = [];
   const make = (tag, children = []) => ({tagName: tag, nodeType: 1, childNodes: children, dataset: {}, classList: {contains: c => c === 'codexpp-shimmer' && tag === 'overlay'},
     style: {}, setAttribute() {}, append(...nodes) { this.childNodes.push(...nodes); appended.push(...nodes); }, matches: () => true, remove() {}});
+  const rootAttributes = new Set(), windowListeners = {};
+  let focused = true;
   const sandbox = {Element: Object, MutationObserver: class { observe() {} }, getComputedStyle: () => ({padding: '0px'}),
-    document: {head: {append() {}}, createElement: () => ({...make('overlay'), className: ''}), addEventListener: (type, f) => { listeners[type] = f; }}};
+    addEventListener: (type, f) => { windowListeners[type] = f; },
+    document: {head: {append() {}}, hasFocus: () => focused, documentElement: {setAttribute: n => rootAttributes.add(n), removeAttribute: n => rootAttributes.delete(n)},
+      createElement: () => ({...make('overlay'), className: ''}), addEventListener: (type, f) => { listeners[type] = f; }}};
   sandbox.globalThis = sandbox;
   vm.runInNewContext(runtime, sandbox);
   const plain = make('div', [{nodeType: 3, data: 'Thinking'}]);
@@ -455,4 +459,87 @@ test('the compositor shimmer moves layers instead of repainting the text', () =>
   const rich = make('div', [{nodeType: 1, classList: {contains: () => false}}]);
   listeners.animationstart({animationName: 'codexpp-shimmer-mark', target: rich});
   assert.equal(rich.dataset.codexppShimmer, 'off', 'rich content falls back to the original shimmer');
+  focused = false; windowListeners.blur();
+  assert.ok(rootAttributes.has('data-codexpp-blurred'), 'an unfocused window pauses its shimmers');
+  focused = true; windowListeners.focus();
+  assert.ok(!rootAttributes.has('data-codexpp-blurred'), 'focus resumes them');
+  assert.match(runtime, /:root\[data-codexpp-blurred\] \.codexpp-shimmer\{visibility:hidden\}/);
+});
+
+test('the right panel snaps its width once and slides on the compositor', () => {
+  const withPanel = initial + 'export function pzt(e,t,n){let r=+!!t;if(n){e.set(r);return}Qs(e,r,cC)}export function fzt(e,t,n,r){if(e.stop(),r.animate===!1||n){e.set(+!!t);return}Qs(e,+!!t,cC)}';
+  const {initial: patched, applied} = adapt({initial: withPanel});
+  assert.equal(applied.panelSlide, 'initial');
+  const springs = [], sets = [];
+  const mv = {value: 0, set(v) { this.value = v; sets.push(v); }, get() { return this.value; }};
+  const animations = [];
+  const element = className => ({className, getAnimations: () => [], animate(keyframes) { const a = {keyframes, cancel() {}}; animations.push(a); return a; }});
+  const panels = [element('relative ltr:ms-auto rtl:me-auto'), element('group/titlebar')];
+  const sandbox = {Qs: (...a) => springs.push(a), cC: {}, innerWidth: 1000, matchMedia: () => ({matches: false}), requestAnimationFrame: f => f(), setTimeout() {},
+    document: {documentElement: {dataset: {}, setAttribute() {}, removeAttribute() {}}, head: {append() {}}, createElement: () => ({}), querySelector: () => panels[0], querySelectorAll: () => panels,
+      addEventListener() {}, hasFocus: () => true}, addEventListener() {}, AudioContext: class {}, window: {setTimeout() {}}};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(patched.replace(/export /g, '') + ';this.pzt=pzt;', sandbox);
+  sandbox.pzt(mv, true, false);
+  assert.deepEqual([sets, springs.length], [[1], 0], 'opening sets the final width once, no spring');
+  assert.deepEqual(animations.map(a => a.keyframes[0].transform), ['translateX(100%)', 'translateX(100%)'], 'the mounted panel and its tab strip slide in');
+  sandbox.pzt(mv, false, false);
+  assert.deepEqual(sets, [1], 'closing waits for the slide-out');
+  assert.equal(animations[2].keyframes[1].transform, 'translateX(100%)');
+  animations[2].onfinish();
+  assert.deepEqual(sets, [1, 0], 'then collapses the width once');
+  sandbox.matchMedia = () => ({matches: true});
+  sandbox.pzt(mv, true, false);
+  assert.equal(springs.length, 1, 'reduced motion keeps the original spring');
+});
+
+test('ResizeObserver callbacks are coalesced only while the window is resizing', () => {
+  const runtime = context.CodexPPStartupAdapter.layoutMotion;
+  let now = 0, resize = null;
+  const timers = [];
+  class FakeRO { constructor(cb) { this.cb = cb; } fire(entries) { this.cb.call(this, entries, this); } }
+  const sandbox = {ResizeObserver: FakeRO, performance: {now: () => now}, setTimeout: (f, ms) => { timers.push(f); return timers.length; },
+    addEventListener: (type, f) => { if (type === 'resize') resize = f; }, requestAnimationFrame() {}, matchMedia: () => ({matches: false}),
+    document: {documentElement: {dataset: {}, setAttribute() {}}, head: {append() {}}, createElement: () => ({}), querySelector: () => null}};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(runtime, sandbox);
+  const seen = [];
+  const observer = new sandbox.ResizeObserver(entries => seen.push(entries.map(e => e.v)));
+  observer.fire([{target: 'a', v: 1}]);
+  assert.equal(JSON.stringify(seen), '[[1]]', 'outside a resize: delivered as usual');
+  resize(); now = 10;
+  observer.fire([{target: 'a', v: 2}]); observer.fire([{target: 'a', v: 3}]);
+  assert.equal(JSON.stringify(seen), '[[1]]', 'during a resize: held');
+  timers.pop()();
+  assert.equal(JSON.stringify(seen), '[[1],[3]]', 'then delivered once with the latest size');
+});
+
+test('width media rules become container queries on the root, other media rules stay', () => {
+  const runtime = context.CodexPPStartupAdapter.layoutMotion;
+  class CSSRule { constructor(cssText) { this.cssText = cssText; } }
+  class CSSStyleRule extends CSSRule { constructor(selectorText, body) { super(`${selectorText}{${body}}`); this.selectorText = selectorText; } }
+  class CSSMediaRule extends CSSRule { constructor(mediaText, rules) { super(`@media ${mediaText}{${rules.map(r => r.cssText).join('')}}`); this.media = {mediaText}; this.cssRules = rules; } }
+  class CSSLayerBlockRule extends CSSRule { constructor(rules) { super('@layer utilities{}'); this.cssRules = rules; rules.forEach(r => (r.parentRule = this)); }
+    deleteRule(i) { this.cssRules.splice(i, 1); } insertRule(text, i) { this.cssRules.splice(i, 0, new CSSRule(text)); } }
+  const layer = new CSSLayerBlockRule([
+    new CSSStyleRule('.a', 'color:red'),
+    new CSSMediaRule('(width >= 48rem)', [new CSSStyleRule('.md\\:flex', 'display:flex')]),
+    new CSSMediaRule('not all and (width >= 40rem)', [new CSSStyleRule(':root', '--x:1'), new CSSStyleRule('html[data-a] .b', 'color:blue')]),
+    new CSSMediaRule('(height <= 500px)', [new CSSStyleRule('.c', 'display:none')]),
+    new CSSMediaRule('(prefers-reduced-motion: reduce)', [new CSSStyleRule('.d', 'animation:none')]),
+  ]);
+  const prepended = [];
+  const sheet = {cssRules: [layer], ownerNode: {hasAttribute: () => false, setAttribute() {}}};
+  const sandbox = {CSSStyleRule, CSSMediaRule, ResizeObserver: class {}, performance: {now: () => 0}, setTimeout() {}, addEventListener() {}, matchMedia: () => ({matches: false}),
+    document: {styleSheets: [sheet], addEventListener() {}, head: {prepend: node => prepended.push(node)}, createElement: () => ({setAttribute() {}}), querySelector: () => null}};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(runtime, sandbox);
+  assert.equal(prepended[0].textContent, 'html{container:codexpp-viewport/inline-size}');
+  assert.deepEqual(layer.cssRules.map(r => r.cssText), [
+    '.a{color:red}',
+    '@container codexpp-viewport ((width >= 48rem)){.md\\:flex{display:flex}}',
+    '@container codexpp-viewport not ((width >= 40rem)){:root > body{--x:1}\nhtml[data-a] .b{color:blue}}',
+    '@media (height <= 500px){.c{display:none}}',
+    '@media (prefers-reduced-motion: reduce){.d{animation:none}}',
+  ]);
 });

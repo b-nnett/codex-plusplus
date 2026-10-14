@@ -11,8 +11,8 @@ final class StartupAdapterTests: XCTestCase {
     /// The JavaScriptCore fallback must agree with the Node adapter.
     func testInProcessFallbackAppliesAllFourEdits() throws {
         let output = try StartupAdapter.adaptInProcess(input: ["shared": shared, "initial": initial])
-        XCTAssertEqual(output.applied, ["statsigCacheFirst": "shared", "statsigUserCacheFirst": "initial", "deferDictationCues": "initial", "loadingGateTimings": "initial", "caretBlinkTimeout": "initial", "compositorShimmer": "initial"])
-        XCTAssertEqual(output.skipped.keys.sorted(), ["appGateReasons", "authStorageGateCacheFirst", "chunkTimings", "deferDockIcon", "lazyAvatarOverlayPrewarm", "lazyCheckoutCreditPrewarm", "lazyCheckoutPricingPrewarm", "lazyDetachedWindowPrewarm", "lazyHotkeyWindowPrewarm", "lazyPageWindowPrewarm", "learnedStartupPreload", "opaqueSurfaceExperiment", "policyPhaseTimings", "queryTimings", "settingsCacheFirst", "skipHiddenThreadRefetch", "startupRevealUnthrottled", "statsigBootstrapCacheFirst"])
+        XCTAssertEqual(output.applied, ["statsigCacheFirst": "shared", "statsigUserCacheFirst": "initial", "deferDictationCues": "initial", "loadingGateTimings": "initial", "caretBlinkTimeout": "initial", "compositorShimmer": "initial", "resizeObserverCoalescing": "initial"])
+        XCTAssertEqual(output.skipped.keys.sorted(), ["appGateReasons", "authStorageGateCacheFirst", "chunkTimings", "deferDockIcon", "lazyAvatarOverlayPrewarm", "lazyCheckoutCreditPrewarm", "lazyCheckoutPricingPrewarm", "lazyDetachedWindowPrewarm", "lazyHotkeyWindowPrewarm", "lazyPageWindowPrewarm", "learnedStartupPreload", "opaqueSurfaceExperiment", "panelSlide", "policyPhaseTimings", "queryTimings", "settingsCacheFirst", "skipHiddenThreadRefetch", "startupRevealUnthrottled", "statsigBootstrapCacheFirst"])
         XCTAssertTrue(output.shared?.contains("values_updated") == true)
         XCTAssertFalse(output.initial?.contains("window.setTimeout(()=>{try{Qpl()}") ?? true)
         XCTAssertThrowsError(try StartupAdapter.adaptInProcess(input: ["shared": output.shared!, "initial": initial]))
