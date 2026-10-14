@@ -54,7 +54,7 @@ public enum StartupAdapter {
                 guard let source = String(data: try archive.data(at: path), encoding: .utf8) else { return nil }
                 return (path, source)
             }
-            var input: [String: Any] = [:]
+            var input: [String: Any] = ["diagnostics": PatchAdapter.experimentsEnabled]
             if let shared { input["shared"] = shared.1 }
             if let initial { input["initial"] = initial.1 }
             if let requirements { input["requirements"] = requirements.1 }

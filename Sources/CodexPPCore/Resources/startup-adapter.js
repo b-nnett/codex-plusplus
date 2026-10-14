@@ -225,6 +225,10 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
     const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], checkout: [] };
+    // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
+    // ship only in development builds of the helper (input.diagnostics).
+    const diagnostics = input.diagnostics === true;
+    const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
     const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, checkout: input.checkout };
     if ([sources.shared, sources.initial, sources.requirements, sources.main, sources.checkout].some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
@@ -234,6 +238,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     for (const [key, source] of Object.entries(sources)) if (typeof source === 'string') trees[key] = parse(source);
     function record(name, file, matches, edit) {
       if (!trees[file]) { skipped[name] = 'module not found'; return; }
+      if (developmentOnly.has(name) && !diagnostics) { skipped[name] = 'development builds only'; return; }
       if (matches.length !== 1) { skipped[name] = `expected one match, found ${matches.length}`; return; }
       edits[file].push(edit(matches[0]));
       applied[name] = file;
@@ -675,11 +680,18 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       if (phases.length === 1 && phases[0].load && phases[0].electron) {
         const { load, electron } = phases[0];
         const volatile = '/^(SHLVL|_|PWD|OLDPWD|TMPDIR|TERM_SESSION_ID|SECURITYSESSIONID|SSH_AUTH_SOCK|__CF_USER_TEXT_ENCODING|COMMAND_MODE|XPC_[A-Z_]+|LaunchInstanceID)$/';
+        // Only variables on this allow-list (paths, locale, editors, toolchain
+        // directories) are ever written, and never a URL with credentials. Any
+        // other variable the shell sets keeps the original blocking load.
+        const cacheable = '/^(PATH|MANPATH|INFOPATH|FPATH|LANG|LC_[A-Z]+|EDITOR|VISUAL|PAGER|HOMEBREW_(PREFIX|CELLAR|REPOSITORY)|[A-Z][A-Z0-9_]*_(HOME|ROOT|DIR|PATH))$/';
         const sensitive = '/(KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL|COOKIE|SESSION|PRIVATE)/i';
+        const credentials = '/:\\/\\/[^\\/\\s@]*@/';
         edits.requirements.push({ start: load.start, end: load.end, text: `${marker}await(async ppLoad=>{const ppFs=require("fs"),` +
-          `ppFile=require("path").join(${electron}.app.getPath("userData"),"codexpp-shell-environment.json"),ppBefore={...process.env},` +
+          `ppFile=require("path").join(${electron}.app.getPath("userData"),"codexpp-shell-environment-v2.json"),ppBefore={...process.env},` +
+          // Caches written before the allow-list may hold values it now refuses.
+          `ppOld=(()=>{try{ppFs.unlinkSync(require("path").join(${electron}.app.getPath("userData"),"codexpp-shell-environment.json"))}catch{}})(),` +
           `ppSave=ppSavedAt=>{try{const ppEnv={},ppSensitive=[];for(const[ppName,ppValue]of Object.entries(process.env)){if(ppBefore[ppName]===ppValue||${volatile}.test(ppName))continue;` +
-          `${sensitive}.test(ppName)?ppSensitive.push(ppName):ppEnv[ppName]=ppValue}ppFs.writeFileSync(ppFile,JSON.stringify({env:ppEnv,sensitive:ppSensitive.length>0,savedAt:ppSavedAt}),{mode:0o600})}catch{}};` +
+          `!${cacheable}.test(ppName)||${sensitive}.test(ppName)||${credentials}.test(ppValue)?ppSensitive.push(ppName):ppEnv[ppName]=ppValue}ppFs.writeFileSync(ppFile,JSON.stringify({env:ppEnv,sensitive:ppSensitive.length>0,savedAt:ppSavedAt}),{mode:0o600})}catch{}};` +
           `let ppCached=null;try{ppCached=JSON.parse(ppFs.readFileSync(ppFile,"utf8"))}catch{}` +
           // A blocking load at least weekly drops variables removed from the
           // shell's configuration (background saves keep the old timestamp).
@@ -692,7 +704,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         if (mkdir) edits.requirements.push({ start: mkdir.start, end: mkdir.end,
           text: `${marker}(require("fs").mkdirSync(${src.slice(mkdir.argument.arguments[0].start, mkdir.argument.arguments[0].end)},{recursive:!0}),void 0)` });
       } else if (trees.requirements) skipped.shellEnvironmentCacheFirst = 'shell environment load not found';
-      if (phases.length === 1) {
+      if (phases.length === 1 && diagnostics) {
         const { first, request, validate } = phases[0];
         edits.requirements.push({ start: first.end, end: first.end, text: `${marker}${mark('environment')};` });
         edits.requirements.push({ start: request.start, end: request.start, text: `${marker}(${mark('policy-read')},0)||` });

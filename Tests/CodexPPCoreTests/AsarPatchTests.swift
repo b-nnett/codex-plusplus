@@ -128,7 +128,17 @@ final class AsarPatchTests: XCTestCase {
         XCTAssertTrue(text.contains("ppNativeBrowser.setEnabled(event, request.enabled)"))
         XCTAssertTrue(text.contains("type:'codexpp-browser-autofill-result'"))
         XCTAssertFalse(text.contains("shell:true"))
-        XCTAssertTrue(text.contains("enableCompileCache"))
+        // Development tools: the V8 compile cache and the startup tracer (debugger and heap probes).
+        XCTAssertEqual(text.contains("enableCompileCache"), PatchAdapter.experimentsEnabled)
+        XCTAssertEqual(text.contains("'trace.enable'"), PatchAdapter.experimentsEnabled)
+        // Code Codex++ loads comes from inside the signed app, not the helper's location.
+        XCTAssertTrue(text.contains("require(require('path').join(process.resourcesPath, 'codexpp', 'browser-native.node'))"))
+        XCTAssertTrue(text.contains("join(process.resourcesPath, 'codexpp', 'app-tools-parent.mjs')"))
+        XCTAssertFalse(text.contains("'Contents', 'Resources', 'browser-native.node'"))
+        // Debugging switches are removed before anything that can throw.
+        let removal = try XCTUnwrap(text.range(of: "removeSwitch('remote-debugging-port')"))
+        let firstTry = try XCTUnwrap(text.range(of: "try {"))
+        XCTAssertLessThan(removal.lowerBound, firstTry.lowerBound)
         // Benchmark experiments (script probes, injected CSS, V8 flags) ship only in dev builds.
         XCTAssertEqual(text.contains("experiments.json"), PatchAdapter.experimentsEnabled)
         XCTAssertEqual(text.contains("executeJavaScript(ppExperiments.perfProbe)"), PatchAdapter.experimentsEnabled)

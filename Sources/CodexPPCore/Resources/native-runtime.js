@@ -171,12 +171,12 @@
   }
 
   async function synchronize(contents, desired, key) {
-    const status = await trace.async('runtime.sync.status', () => contents.executeJavaScript(statusExpression, true));
+    const status = await trace.async('runtime.sync.status', () => contents.executeJavaScript(statusExpression, false));
     if (status?.key === key && Array.isArray(status.states)) return status.states;
     // The window is new, reloaded or out of date: deliver the full payload.
     const expression = trace.span('runtime.sync.prepare', () => `${rendererRuntime}\n${rendererBridge}\n` +
       `globalThis.__codexPP.sync([${desired.map(prepared).join(',')}],${literal(key)}${trace.enabled && trace.renderer !== false ? ',{trace:true}' : ''})`);
-    const states = await trace.async('runtime.sync.full', () => contents.executeJavaScript(expression, true));
+    const states = await trace.async('runtime.sync.full', () => contents.executeJavaScript(expression, false));
     return Array.isArray(states) ? states : [];
   }
 
@@ -197,7 +197,7 @@
     const key = digest(value);
     const expression = `(()=>{const r=globalThis.__codexPP;if(r?.protocol!==2||typeof r.status!=="function")return;` +
       `if(r.status().settingsKey!==${literal(key)})r.settings(${literal(value)},${literal(key)});})()`;
-    await withTimeout(contents.executeJavaScript(expression, true), 'An app window');
+    await withTimeout(contents.executeJavaScript(expression, false), 'An app window');
   }
 
   let lastDiagnostic = '', lastDiagnosticTime = 0;
@@ -337,7 +337,7 @@
   electron.app.on('web-contents-created', created);
   // Traced launches pull each window's extension timing report.
   trace.collector(() => Promise.all(appContents().map(contents => withTimeout(
-    contents.executeJavaScript('globalThis.__codexPP?.trace?.()??null', true), 'An app window'
+    contents.executeJavaScript('globalThis.__codexPP?.trace?.()??null', false), 'An app window'
   ).then(report => report && {webContentsId:contents.id, ...report, page:new URL(contents.mainFrame.url).pathname,
     route:(({search, hash}) => (search + hash).slice(0, 160))(new URL(contents.mainFrame.url)),
     pid:contents.getOSProcessId?.() ?? null,
@@ -369,7 +369,7 @@
       if (timer) clearInterval(timer);
       for (const watcher of watchers.splice(0)) { try { watcher.close(); } catch {} }
       electron.app.removeListener('web-contents-created', created);
-      for (const contents of appContents()) void contents.executeJavaScript('globalThis.__codexPP?.sync([]);globalThis.__codexPPBridge?.stop?.()', true).catch(() => {});
+      for (const contents of appContents()) void contents.executeJavaScript('globalThis.__codexPP?.sync([]);globalThis.__codexPPBridge?.stop?.()', false).catch(() => {});
     }
   });
 })

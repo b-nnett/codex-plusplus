@@ -82,8 +82,16 @@ public struct AppPatcher: Sendable {
         let info = try plist(app), asar = try AsarArchive(archive(app))
         try verifyHeader(app, info, asar)
         let version = info["CFBundleShortVersionString"] as! String, build = info["CFBundleVersion"] as! String
-        if verifySignature { try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path]) }
-        if let receipt = try receipt(app) {
+        let installed = try receipt(app)
+        if verifySignature {
+            // A patched reviewed app must carry this machine's pinned signer, not just any valid signature.
+            if installed != nil, adapter.isReviewed, let pin = LocalSigningIdentity.pinned(support: support) {
+                try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", "-R", "=anchor apple generic and certificate leaf = H\"\(pin)\" and identifier \"\(DesktopAppLocator.bundleIdentifier)\"", app.path])
+            } else {
+                try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", app.path])
+            }
+        }
+        if let receipt = installed {
             guard version == receipt.version, build == receipt.build,
                   receipt.patchedHeaderHash == asar.headerHash,
                   try fileSHA256(archive(app)) == receipt.patchedArchiveHash,
@@ -221,6 +229,22 @@ public struct AppPatcher: Sendable {
                     guard archiveHash(backup) == archiveHash(origin) else { throw PatchError.invalid("The original app backup failed verification.") }
                 }
                 try command("/usr/bin/ditto", [origin.path, stage.path], timeout: 120)
+                // The copy is what gets re-signed with this machine's identity, so
+                // it must itself be the vendor-signed app that was validated.
+                if adapter.isReviewed { try VendorUpdateAdapter.authenticate(stage) }
+                guard try AsarArchive(archive(stage)).headerHash == original.headerHash else { throw PatchError.invalid("The staged copy does not match the verified app.") }
+                // Code the patched app loads from Codex++ lives inside its own
+                // signed bundle, sealed by the signature below, never at the
+                // helper's (possibly user-writable) location.
+                let payload = stage.appendingPathComponent("Contents/Resources/codexpp")
+                try fm.createDirectory(at: payload, withIntermediateDirectories: true)
+                guard let parentScript = Bundle.module.url(forResource: "app-tools-parent", withExtension: "mjs") else { throw PatchError.invalid("The app-tools parent launcher is missing.") }
+                try fm.copyItem(at: parentScript, to: payload.appendingPathComponent("app-tools-parent.mjs"))
+                let addon = helper.appendingPathComponent("Contents/Resources/browser-native.node")
+                if fm.fileExists(atPath: addon.path) {
+                    try command("/usr/bin/codesign", ["--verify", "--strict", addon.path])
+                    try fm.copyItem(at: addon, to: payload.appendingPathComponent("browser-native.node"))
+                } else if adapter.isReviewed { throw PatchError.invalid("The helper's native addon is missing.") }
                 if adapter.isReviewed {
                     let updater = helper.appendingPathComponent("Contents/Resources/Sparkle.framework")
                     guard fm.fileExists(atPath: updater.path) else { throw PatchError.invalid("Build Codex++ with its authenticated updater framework before patching.") }

@@ -8,7 +8,8 @@ const load = name => fs.readFileSync(new URL(`../Sources/CodexPPCore/Resources/$
 const context = vm.createContext({});
 vm.runInContext(load('acorn'), context);
 vm.runInContext(load('startup-adapter'), context);
-const adapt = input => { context.input = input; return JSON.parse(JSON.stringify(vm.runInContext('CodexPPStartupAdapter.adapt(input)', context))); };
+// Development builds apply the diagnostic edits too; release builds pass diagnostics: false.
+const adapt = input => { context.input = {diagnostics: true, ...input}; return JSON.parse(JSON.stringify(vm.runInContext('CodexPPStartupAdapter.adapt(input)', context))); };
 
 // Minimal shapes of the vendor code the adapter targets (minified names vary).
 const shared = `export function r(e,r){let i=e(r),[a,o]=[!0,v=>{a=v,r.loading.push(v)}];` +
@@ -251,7 +252,7 @@ test('the shell environment is cached without sensitive variables and refreshed 
       process: {env}, performance, globalThis: {}, la: null, a: null, x() {}, i: {a: async () => ({})}, oa: () => ({}), ta: () => !0,
       c: {app: {getPath: () => '/data', getVersion: () => '1'}}, log, Date,
       Gi: () => { log.push(['spawn', {...env}]); return new Promise(resolve => setTimeout(() => { Object.assign(env, shellEnv); resolve({status: 'loaded'}); release(); }, delay)); },
-      require: name => name === 'path' ? {join: (...parts) => parts.join('/')} : {readFileSync: file => { if (!files.has(file)) throw Error('missing'); return files.get(file); }, writeFileSync: (file, text) => files.set(file, text)}
+      require: name => name === 'path' ? {join: (...parts) => parts.join('/')} : {readFileSync: file => { if (!files.has(file)) throw Error('missing'); return files.get(file); }, unlinkSync: file => files.delete(file), writeFileSync: (file, text) => files.set(file, text)}
     };
     sandbox.globalThis = sandbox;
     vm.runInNewContext(patched + ';globalThis.run=da;', sandbox);
@@ -261,16 +262,22 @@ test('the shell environment is cached without sensitive variables and refreshed 
   };
   const first = await run({PATH: '/usr/bin:/opt/bin', NVM_DIR: '/n'}, 30);
   assert.ok(first.waited >= 25, 'no cache: waits for the shell');
-  const saved = JSON.parse(files.get('/data/codexpp-shell-environment.json'));
+  const saved = JSON.parse(files.get('/data/codexpp-shell-environment-v2.json'));
   assert.deepEqual(saved.env, {PATH: '/usr/bin:/opt/bin', NVM_DIR: '/n'});
   const second = await run({PATH: '/usr/bin:/opt/bin:/new', NVM_DIR: '/n'}, 30);
   assert.ok(second.waited < 20, 'cache: continues at once');
   assert.equal(second.log[0][1].PATH, '/usr/bin', 'the real shell starts with the launch environment');
   assert.equal(second.env.PATH, '/usr/bin:/opt/bin:/new', 'fresh values win when they arrive');
   const third = await run({PATH: '/x', OPENAI_API_KEY: 'sk-secret'}, 30);
-  const withSecret = files.get('/data/codexpp-shell-environment.json');
+  const withSecret = files.get('/data/codexpp-shell-environment-v2.json');
   assert.ok(!withSecret.includes('sk-secret'), 'sensitive values are never written');
   assert.equal(JSON.parse(withSecret).sensitive, true);
+  for (const [name, value] of [['DATABASE_URL', 'postgres://me:pw@db/app'], ['JAVA_HOME', 'https://me:pw@host/jdk'], ['GH_PAT', 'ghp_x']]) {
+    await run({PATH: '/x', [name]: value}, 5);
+    const text = files.get('/data/codexpp-shell-environment-v2.json');
+    assert.ok(!text.includes(value), `${name} is never written`);
+    assert.equal(JSON.parse(text).sensitive, true, `${name} keeps the blocking load`);
+  }
   const fourth = await run({PATH: '/x', OPENAI_API_KEY: 'sk-secret'}, 30);
   assert.ok(fourth.waited >= 25, 'a shell that sets sensitive variables keeps the original wait');
 });
@@ -536,4 +543,13 @@ test('window resizes deliver new sizes of window-wide elements to their observer
   assert.equal(JSON.stringify(seen), '[[[900,880]]]', 'only the window-wide element, with border and content sizes');
   observer.disconnect(); resize();
   assert.equal(seen.length, 1, 'disconnected observers are left alone');
+});
+
+test('release builds skip the diagnostic edits', () => {
+  const requirements = 'async function da(){la=null,await Gi(),x();for(;;){let f=`home-creation`;try{f=`policy-read`;' +
+    'let{appServerVersion:o,response:p}=await i.a(a,c.app.getVersion(),{});f=`policy-validation`;let m=oa(o,p);return f=`node-permissions`,ta(m)?(la=m,!0):!1}catch(t){throw t}}}';
+  const release = adapt({requirements, diagnostics: false});
+  assert.equal(release.skipped.policyPhaseTimings, 'development builds only');
+  assert.ok(!release.requirements.includes('.policy??={}'), 'no phase marks');
+  assert.equal(release.applied.shellEnvironmentCacheFirst, 'requirements', 'speed-ups still apply');
 });

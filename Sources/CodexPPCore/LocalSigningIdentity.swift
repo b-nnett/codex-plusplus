@@ -33,6 +33,13 @@ public enum LocalSigningIdentity {
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         return fingerprint
     }
+    /// The pinned certificate fingerprint, without querying the Keychain.
+    public static func pinned(support: URL) -> String? {
+        guard let data = try? Data(contentsOf: support.appendingPathComponent("Patching/signing-identity.json")),
+              let saved = try? JSONDecoder().decode(Identity.self, from: data),
+              saved.fingerprint.range(of: "^[0-9A-F]{40}$", options: .regularExpression) != nil else { return nil }
+        return saved.fingerprint
+    }
     private static func validateHelper(_ helper: URL, fingerprint: String) throws {
         var code: SecStaticCode?
         var requirement: SecRequirement?
