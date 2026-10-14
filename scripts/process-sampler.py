@@ -11,7 +11,6 @@ to --out until --duration elapses or the app quits.
 """
 import argparse, json, os, re, subprocess, tempfile, time
 
-BUNDLE = "/Applications/ChatGPT.app/"
 
 
 def cpu_seconds(text):
@@ -36,13 +35,13 @@ def kind(cmd):
     return name or exe[:40]
 
 
-def tree():
+def tree(bundle):
     out = subprocess.run(["ps", "-axo", "pid=,ppid=,time=,rss=,command="], capture_output=True, text=True).stdout
     rows = {}
     for line in out.splitlines():
         pid, ppid, cpu, rss, cmd = line.split(None, 4)
         rows[int(pid)] = (int(ppid), cpu_seconds(cpu), int(rss), cmd)
-    roots = [pid for pid, row in rows.items() if row[3].startswith(BUNDLE + "Contents/MacOS/ChatGPT")]
+    roots = [pid for pid, row in rows.items() if row[3].startswith(bundle + "Contents/MacOS/ChatGPT")]
     keep, frontier = set(roots), list(roots)
     while frontier:
         parent = frontier.pop()
@@ -71,13 +70,15 @@ def main():
     ap.add_argument("--interval", type=float, default=0.5)
     ap.add_argument("--footprint", type=float, default=5)
     ap.add_argument("--duration", type=float, default=300)
+    ap.add_argument("--bundle", default="/Applications/ChatGPT.app", help="app bundle whose process tree to sample")
     args = ap.parse_args()
+    bundle = args.bundle.rstrip("/") + "/"
     start, last_fp = time.time(), 0.0
-    previous = tree()
+    previous = tree(bundle)
     with open(args.out, "w") as f:
         while time.time() - start < args.duration:
             time.sleep(args.interval)
-            now, current = time.time(), tree()
+            now, current = time.time(), tree(bundle)
             if not current:
                 break
             kinds, spawned = {}, []
