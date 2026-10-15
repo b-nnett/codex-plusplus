@@ -238,7 +238,20 @@ public struct PatchAdapter: Codable, Sendable {
               const temp = file + '.' + process.pid;
               fs.writeFileSync(temp, JSON.stringify({schema:1, adapter:\(try literal(id)), pid:process.pid, app:ppElectron.app.getAppPath(), port:\(port), electron:process.versions.electron, keychainInteractionAllowed:ppBrowserNative.keychainInteractionAllowed, time:new Date().toISOString()}), {mode:0o600});
               fs.renameSync(temp, file);
-              if (ppProbe) ppElectron.app.exit(0);
+              // Quitting the moment Electron is ready left Chromium's utility
+              // processes starting up with no parent, and one of them would
+              // trap and leave a crash report. Let processes launched in the
+              // last half second finish starting, then shut down in order.
+              if (ppProbe) {
+                const ppStarted = Date.now();
+                setTimeout(() => ppElectron.app.exit(0), 5000);
+                const ppSettle = () => {
+                  const ppYoung = ppElectron.app.getAppMetrics().some(m => m.type !== 'Browser' && Date.now() - m.creationTime < 500);
+                  if (ppYoung && Date.now() - ppStarted < 3000) { setTimeout(ppSettle, 100); return; }
+                  ppElectron.app.quit();
+                };
+                ppSettle();
+              }
             }).catch(error => { console.error('[Codex++] boot:', error); if (ppProbe) ppElectron.app.exit(1); });
             if (!ppProbe) {
               void ppElectron.app.whenReady().then(() => ppTrace.start(ppElectron));
