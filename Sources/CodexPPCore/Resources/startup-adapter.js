@@ -2406,6 +2406,102 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
 
     // ===== typing lane: per-keystroke work in the composer. =====
     // (Edits of this lane go between these markers.)
+
+    // composerSerializeOnce: every edit in the composer creates a new
+    // ProseMirror document, and each one is turned into markdown several times
+    // over: the draft store saves it (uYr: KYr().serialize(doc)), and the
+    // editor selectors that re-read the text on every document change (send
+    // button state, multiline layout, autocomplete; getText() and
+    // getChatGptPrompt(), which call the controller's serialize) run it again,
+    // some of them twice because useSyncExternalStore reads a snapshot when the
+    // store notifies and again when the component renders. The serialiser
+    // converts the whole document to a unist tree and stringifies it; its
+    // existing per-paragraph cache only applies when every top-level node is a
+    // paragraph, so a draft with a list or a code block is serialised in full
+    // each time (about 1.4 ms for 5,000 characters, 5.6 ms for 20,000, in a
+    // node benchmark of this build's serialiser). Documents are immutable and
+    // all of fJr's instances share one serialiser, so the markdown of a
+    // document is now kept in a WeakMap keyed by that document (one slot for
+    // each value of the only option it reads, preserveParagraphSpacing), shared
+    // by every instance: the first call for a document serialises it, later
+    // calls for the same document return the same string. Thrown errors are not
+    // cached. Anything that is not an object is passed straight through.
+    if (trees.initial) {
+      const serializers = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'ObjectExpression') return;
+        const props = new Map(node.properties.filter(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier').map(p => [p.key.name, p]));
+        if (!['pmu', 'pastePreferredHtml', 'pasteLiteralText', 'serialize', 'plugins'].every(k => props.has(k))) return;
+        const fn = props.get('serialize').value;
+        if (fn.type !== 'ArrowFunctionExpression' || fn.params.length !== 2 || fn.params.some(p => p.type !== 'Identifier')) return;
+        const text = sources.initial.slice(fn.start, fn.end);
+        if (!text.includes('preserveParagraphSpacing') || !text.includes('.serialize(')) return;
+        serializers.push(fn);
+      });
+      record('composerSerializeOnce', 'initial', serializers, fn => ({ start: fn.start, end: fn.end,
+        text: `${marker}((ppTypingSerializeRaw,ppTypingSerialized)=>(ppTypingDoc,ppTypingOptions)=>{` +
+          `if(ppTypingDoc==null||typeof ppTypingDoc!=="object")return ppTypingSerializeRaw(ppTypingDoc,ppTypingOptions);` +
+          `const ppTypingSlot=ppTypingOptions?.preserveParagraphSpacing?1:0;let ppTypingEntry=ppTypingSerialized.get(ppTypingDoc);` +
+          `if(ppTypingEntry!==void 0&&ppTypingEntry[ppTypingSlot]!==void 0)return ppTypingEntry[ppTypingSlot];` +
+          `const ppTypingText=ppTypingSerializeRaw(ppTypingDoc,ppTypingOptions);` +
+          `if(typeof ppTypingText==="string"){ppTypingEntry??=[void 0,void 0];ppTypingEntry[ppTypingSlot]=ppTypingText;ppTypingSerialized.set(ppTypingDoc,ppTypingEntry)}` +
+          `return ppTypingText})(${sources.initial.slice(fn.start, fn.end)},globalThis.__codexPPComposerMarkdown??=new WeakMap)` }));
+    } else skipped.composerSerializeOnce = 'module not found';
+
+    // composerLayoutPerFrame: the rich text input subscribes to every editor
+    // transaction (keystrokes, selection moves) and, inside the dispatch,
+    // reads scrollHeight and clientHeight to toggle data-overflowing, and on a
+    // document change also checks whether a code block touches the top or
+    // bottom edge (getBoundingClientRect and two elementFromPoint hit tests)
+    // to round the clip path. Reading layout right after ProseMirror changed
+    // the DOM forces a synchronous layout in the input handler, and the frame
+    // lays out again after React commits. In the multiline layout the check
+    // now runs once per animation frame, before that frame paints, for all the
+    // transactions since the last frame (the clip-path check when any of them
+    // changed the document); the clip path is also refreshed on keyup and
+    // scroll, as before. In the single-line layout (data-rich-text-layout on
+    // the input's root), where the same check decides synchronously whether to
+    // switch to the multiline layout, it stays synchronous, as it does when
+    // requestAnimationFrame is unavailable. Unmounting cancels a pending frame.
+    if (trees.initial) {
+      const codeBlockClips = new Set();
+      walk(trees.initial, node => {
+        if (node.type === 'FunctionDeclaration' && node.id && node.params.length === 1 &&
+            sources.initial.slice(node.start, node.end).includes('data-composer-code-block') &&
+            sources.initial.slice(node.start, node.end).includes('elementFromPoint')) codeBlockClips.add(node.id.name);
+      });
+      const subscriptions = [];
+      walk(trees.initial, (node, ancestors) => {
+        if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier' || node.arguments.length !== 2) return;
+        const [view, listener] = node.arguments;
+        if (view.type !== 'MemberExpression' || view.computed || view.property.name !== 'view' || view.object.type !== 'Identifier') return;
+        if (listener.type !== 'ArrowFunctionExpression' || listener.params.length !== 1 || listener.params[0].type !== 'Identifier' ||
+            listener.body.type !== 'BlockStatement' || listener.body.body.length !== 1) return;
+        const seq = listener.body.body[0].expression;
+        if (seq?.type !== 'SequenceExpression' || seq.expressions.length !== 2) return;
+        const [clip, measure] = seq.expressions;
+        if (clip.type !== 'LogicalExpression' || clip.operator !== '&&' || clip.left.type !== 'Identifier' || clip.left.name !== listener.params[0].name ||
+            clip.right.type !== 'CallExpression' || clip.right.callee.type !== 'Identifier' || !codeBlockClips.has(clip.right.callee.name) ||
+            clip.right.arguments.length !== 1 || clip.right.arguments[0].type !== 'Identifier') return;
+        if (measure.type !== 'CallExpression' || measure.callee.type !== 'Identifier' || measure.arguments.length !== 0) return;
+        const effect = [...ancestors].reverse().find(a => a.type === 'ArrowFunctionExpression' || a.type === 'FunctionExpression');
+        if (!effect || !sources.initial.slice(effect.start, effect.end).includes('`loadingdone`')) return;
+        subscriptions.push({ node, view, listener, root: clip.right.arguments[0].name });
+      });
+      record('composerLayoutPerFrame', 'initial', subscriptions, ({ node, view, listener, root }) => {
+        const src = sources.initial;
+        return { start: node.start, end: node.end,
+          text: `${marker}((ppTypingLayoutSync,ppTypingLayoutRoot)=>{let ppTypingLayoutFrame=null,ppTypingLayoutDocChanged=!1;` +
+            `const ppTypingLayoutStop=${src.slice(node.callee.start, node.callee.end)}(${src.slice(view.start, view.end)},ppTypingLayoutChanged=>{` +
+            `if(typeof requestAnimationFrame!=="function"||ppTypingLayoutRoot?.dataset?.richTextLayout==="single-line"){` +
+            `if(ppTypingLayoutFrame!=null){cancelAnimationFrame(ppTypingLayoutFrame);ppTypingLayoutFrame=null;ppTypingLayoutChanged=ppTypingLayoutChanged||ppTypingLayoutDocChanged;ppTypingLayoutDocChanged=!1}` +
+            `ppTypingLayoutSync(ppTypingLayoutChanged);return}` +
+            `ppTypingLayoutDocChanged=ppTypingLayoutDocChanged||!!ppTypingLayoutChanged;` +
+            `ppTypingLayoutFrame??=requestAnimationFrame(()=>{ppTypingLayoutFrame=null;const ppTypingLayoutAny=ppTypingLayoutDocChanged;ppTypingLayoutDocChanged=!1;ppTypingLayoutSync(ppTypingLayoutAny)})});` +
+            `return()=>{ppTypingLayoutFrame!=null&&cancelAnimationFrame(ppTypingLayoutFrame),ppTypingLayoutFrame=null,ppTypingLayoutStop()}})` +
+            `(${src.slice(listener.start, listener.end)},${root})` };
+      });
+    } else skipped.composerLayoutPerFrame = 'module not found';
     // ===== end of typing lane =====
 
 
