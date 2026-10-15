@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>upload bench</title>
+<body>
+<script>
+// Stubs for the vendor code's dependencies: the byte-copy gate (off in build 20398), its feature check, logger and base64 decoder.
+var vmn=()=>!1,Uc=()=>!1,gr={warning(...a){console.warn('vendor warning',a[0],a[1]?.sensitive?.error?.message)}},yf=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+</script>
+<script src="work/vendor.js"></script>
+<script src="work/patched.js"></script>
+<script>
+const variants={
+  orig:f=>fvn({},f,new AbortController().signal),
+  patched:f=>fvnPatched({},f,new AbortController().signal),
+  // The Codex composer's reader, and the same read in a worker (FileReaderSync), for comparison.
+  dataUrl:f=>fZn(f),
+  dataUrlWorker:f=>{const u=URL.createObjectURL(new Blob(['onmessage=({data})=>postMessage(new FileReaderSync().readAsDataURL(data))'],{type:'text/javascript'})),w=new Worker(u);return new Promise(ok=>{w.onmessage=e=>{ok(e.data);w.terminate()};w.postMessage(f)})},
+};
+let longTasks=[];new PerformanceObserver(l=>{for(const e of l.getEntries())longTasks.push(e.duration)}).observe({entryTypes:['longtask']});
+// 16 random bytes after the image's end marker make every run's bytes (and data URL) unique, so no decode is served from an earlier run.
+async function loadFile(name){const b=await (await fetch('work/img/'+name)).blob();return new File([b,crypto.getRandomValues(new Uint8Array(16))],name,{type:b.type})}
+let caseFile,caseOut;
+window.prepareCase=async name=>{caseFile=await loadFile(name);await new Promise(r=>setTimeout(r,100));return caseFile.size};
+// Runs one variant, watching the main thread: long tasks and the longest gap between animation frames.
+window.runCase=async variant=>{
+  longTasks=[];let maxGap=0,last=performance.now(),run=true;const tick=t=>{maxGap=Math.max(maxGap,t-last);last=t;if(run)requestAnimationFrame(tick)};requestAnimationFrame(t=>{last=t;requestAnimationFrame(tick)});
+  await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+  const t0=performance.now();caseOut=await variants[variant](caseFile);const wall=performance.now()-t0;
+  await new Promise(r=>setTimeout(r,30));run=false;
+  return{wall,maxFrameGap:maxGap,longTaskMax:Math.max(0,...longTasks),longTaskSum:longTasks.reduce((a,b)=>a+b,0)}};
+window.collectCase=async()=>{const out=caseOut,res={};
+  if(typeof out==='string'){res.length=out.length;res.sameAsOrig=out===await fZn(caseFile);return res}
+  Object.assign(res,{width:out.width,height:out.height,type:out.file.type,size:out.file.size,sameFile:out.file===caseFile});
+  const buf=new Uint8Array(await out.file.arrayBuffer());let s='';for(let i=0;i<buf.length;i+=32768)s+=String.fromCharCode(...buf.subarray(i,i+32768));res.b64=btoa(s);return res};
+// canvas.toBlob's default quality vs OffscreenCanvas.convertToBlob with the given qualities: 'same' or the other size.
+window.encoderCheck=async(type,qs)=>{const c=document.createElement('canvas');c.width=320;c.height=200;const x=c.getContext('2d'),d=x.createImageData(320,200);crypto.getRandomValues(d.data.subarray(0,65536));for(let i=3;i<d.data.length;i+=4)d.data[i]=255;x.putImageData(d,0,0);
+  const ref=new Uint8Array(await (await new Promise(r=>c.toBlob(r,type))).arrayBuffer()),px=x.getImageData(0,0,320,200);
+  const u=URL.createObjectURL(new Blob(['onmessage=async({data:{px,type,q}})=>{const c=new OffscreenCanvas(px.width,px.height);c.getContext("2d").putImageData(px,0,0);postMessage(new Uint8Array(await (await c.convertToBlob(q===null?{type}:{type,quality:q})).arrayBuffer()))}'],{type:'text/javascript'}));
+  const out={refSize:ref.length};for(const q of qs){const w=new Worker(u);const b=await new Promise(ok=>{w.onmessage=e=>ok(e.data);w.postMessage({px,type,q})});w.terminate();out[String(q)]=b.length===ref.length&&b.every((v,i)=>v===ref[i])?'same':b.length}
+  return out};
+window.gpuInfo=()=>{const c=document.createElement('canvas').getContext('webgl'),d=c&&c.getExtension('WEBGL_debug_renderer_info');return d?c.getParameter(d.UNMASKED_RENDERER_WEBGL):'no webgl'};
+</script>
