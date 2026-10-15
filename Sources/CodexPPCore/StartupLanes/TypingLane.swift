@@ -8,6 +8,8 @@ extension StartupAdapter {
 extension StartupStatus {
     static let typingLabels: [String: String] = [
         "composerSerializeOnce": "Composer drafts serialised once per edit",
+        "composerTextOnce": "Composer text read once per edit",
+        "composerPlainTextOnce": "Composer plain text converted once per edit",
         "composerLayoutPerFrame": "Composer overflow check once per frame",
     ]
 }

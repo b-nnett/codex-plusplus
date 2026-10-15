@@ -2407,6 +2407,37 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // ===== typing lane: per-keystroke work in the composer. =====
     // (Edits of this lane go between these markers.)
 
+    // The composer's text conversions all start from a copy of the document
+    // without its literalPaste marks (pasted text is marked so it is not
+    // re-read as markdown): `new Transform(vde(doc)).removeMark(0,
+    // doc.content.size, literalPaste).doc`, where vde first drops generated
+    // autolinks over pasted text. Without such marks the copy is the document
+    // itself; a pasted draft has them, so every call made a new copy. The
+    // three edits below share one WeakMap from a document to its copy
+    // (globalThis.__codexPPComposerStripped), so every caller gets the same
+    // copy object for the same document. The copy depends on the document
+    // only. typingStripSites finds the expression in a function and checks
+    // that it is exactly that shape, so it can be rebuilt for another name.
+    const typingStripSites = (source, fn) => {
+      const sites = [];
+      walk(fn, node => {
+        if (node.type !== 'MemberExpression' || node.computed || node.property.name !== 'doc') return;
+        const call = node.object;
+        if (!member(call, 'removeMark') || call.arguments.length !== 3 || call.callee.object.type !== 'NewExpression') return;
+        const make = call.callee.object, inner = make.arguments[0];
+        if (make.callee.type !== 'Identifier' || make.arguments.length !== 1 || inner?.type !== 'CallExpression' || inner.callee.type !== 'Identifier' ||
+            inner.arguments.length !== 1 || inner.arguments[0].type !== 'Identifier') return;
+        const doc = inner.arguments[0].name, transform = make.callee.name, autolinks = inner.callee.name;
+        const rebuilt = d => `new ${transform}(${autolinks}(${d})).removeMark(0,${d}.content.size,${d}.type.schema.marks.literalPaste).doc`;
+        if (source.slice(node.start, node.end) !== rebuilt(doc)) return;
+        sites.push({ node, doc, rebuilt });
+      });
+      return sites;
+    };
+    const typingStripped = (rebuilt, doc) => `((ppTypingStripDoc)=>{const ppTypingStrips=globalThis.__codexPPComposerStripped??=new WeakMap;` +
+      `let ppTypingStripped=ppTypingStrips.get(ppTypingStripDoc);if(ppTypingStripped===void 0){ppTypingStripped=${rebuilt('ppTypingStripDoc')};` +
+      `ppTypingStrips.set(ppTypingStripDoc,ppTypingStripped)}return ppTypingStripped})(${doc})`;
+
     // composerSerializeOnce: every edit in the composer creates a new
     // ProseMirror document, and each one is turned into markdown several times
     // over: the draft store saves it (uYr: KYr().serialize(doc)), and the
@@ -2419,13 +2450,16 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // existing per-paragraph cache only applies when every top-level node is a
     // paragraph, so a draft with a list or a code block is serialised in full
     // each time (about 1.4 ms for 5,000 characters, 5.6 ms for 20,000, in a
-    // node benchmark of this build's serialiser). Documents are immutable and
-    // all of fJr's instances share one serialiser, so the markdown of a
-    // document is now kept in a WeakMap keyed by that document (one slot for
-    // each value of the only option it reads, preserveParagraphSpacing), shared
-    // by every instance: the first call for a document serialises it, later
-    // calls for the same document return the same string. Thrown errors are not
-    // cached. Anything that is not an object is passed straight through.
+    // node benchmark of this build's serialiser). The serialiser's output is a
+    // function of the document's literalPaste-free copy (it serialises that
+    // copy) and of preserveParagraphSpacing, the only option it reads. It now
+    // takes the copy from the shared WeakMap, and keeps its markdown in a
+    // second WeakMap keyed by the copy, shared by all of fJr's instances (they
+    // share one serialiser): the draft store's call with the document and
+    // getText's call with the copy (which strips nothing more) hit the same
+    // entry, and later calls for the same document return the same string.
+    // Thrown errors are not cached. Anything that is not an object is passed
+    // straight through.
     if (trees.initial) {
       const serializers = [];
       walk(trees.initial, node => {
@@ -2436,17 +2470,90 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
         if (fn.type !== 'ArrowFunctionExpression' || fn.params.length !== 2 || fn.params.some(p => p.type !== 'Identifier')) return;
         const text = sources.initial.slice(fn.start, fn.end);
         if (!text.includes('preserveParagraphSpacing') || !text.includes('.serialize(')) return;
-        serializers.push(fn);
+        const sites = typingStripSites(sources.initial, fn);
+        if (sites.length !== 1 || sites[0].doc !== fn.params[0].name) return;
+        serializers.push({ fn, site: sites[0] });
       });
-      record('composerSerializeOnce', 'initial', serializers, fn => ({ start: fn.start, end: fn.end,
-        text: `${marker}((ppTypingSerializeRaw,ppTypingSerialized)=>(ppTypingDoc,ppTypingOptions)=>{` +
-          `if(ppTypingDoc==null||typeof ppTypingDoc!=="object")return ppTypingSerializeRaw(ppTypingDoc,ppTypingOptions);` +
-          `const ppTypingSlot=ppTypingOptions?.preserveParagraphSpacing?1:0;let ppTypingEntry=ppTypingSerialized.get(ppTypingDoc);` +
-          `if(ppTypingEntry!==void 0&&ppTypingEntry[ppTypingSlot]!==void 0)return ppTypingEntry[ppTypingSlot];` +
-          `const ppTypingText=ppTypingSerializeRaw(ppTypingDoc,ppTypingOptions);` +
-          `if(typeof ppTypingText==="string"){ppTypingEntry??=[void 0,void 0];ppTypingEntry[ppTypingSlot]=ppTypingText;ppTypingSerialized.set(ppTypingDoc,ppTypingEntry)}` +
-          `return ppTypingText})(${sources.initial.slice(fn.start, fn.end)},globalThis.__codexPPComposerMarkdown??=new WeakMap)` }));
+      record('composerSerializeOnce', 'initial', serializers, ({ fn, site }) => {
+        const src = sources.initial;
+        const raw = src.slice(fn.start, site.node.start) + typingStripped(site.rebuilt, site.doc) + src.slice(site.node.end, fn.end);
+        return { start: fn.start, end: fn.end,
+          text: `${marker}((ppTypingSerializeRaw,ppTypingSerialized)=>(ppTypingDoc,ppTypingOptions)=>{` +
+            `if(ppTypingDoc==null||typeof ppTypingDoc!=="object")return ppTypingSerializeRaw(ppTypingDoc,ppTypingOptions);` +
+            `const ppTypingKey=${typingStripped(site.rebuilt, 'ppTypingDoc')},ppTypingSlot=ppTypingOptions?.preserveParagraphSpacing?1:0;` +
+            `let ppTypingEntry=ppTypingSerialized.get(ppTypingKey);` +
+            `if(ppTypingEntry!==void 0&&ppTypingEntry[ppTypingSlot]!==void 0)return ppTypingEntry[ppTypingSlot];` +
+            `const ppTypingText=ppTypingSerializeRaw(ppTypingDoc,ppTypingOptions);` +
+            `if(typeof ppTypingText==="string"){ppTypingEntry??=[void 0,void 0];ppTypingEntry[ppTypingSlot]=ppTypingText;ppTypingSerialized.set(ppTypingKey,ppTypingEntry)}` +
+            `return ppTypingText})(${raw},globalThis.__codexPPComposerMarkdown??=new WeakMap)` };
+      });
     } else skipped.composerSerializeOnce = 'module not found';
+
+    // composerTextOnce: the composer controller's getText() (mJr(doc,
+    // serialize)), behind most editor selectors and getChatGptPrompt(), checks
+    // the whole document for markdown formatting, makes the literalPaste-free
+    // copy, serialises it and cleans the result, on every call; several
+    // selectors call it for each new document. Its result depends on the
+    // document and the serialize function only, so it is kept per document
+    // (WeakMap) and per serialize function (a Map; undefined in plain-text
+    // mode), and the copy comes from the shared WeakMap above. Errors are not
+    // cached; a non-object document goes to the original function.
+    if (trees.initial) {
+      const texts = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'FunctionDeclaration' || !node.id || node.params.length !== 2 || node.params.some(p => p.type !== 'Identifier')) return;
+        const text = sources.initial.slice(node.start, node.end);
+        if (!text.includes('.replace(/&#(?:x[\\da-f]+|\\d+);/gi,``)') || !text.includes('literalPaste')) return;
+        const sites = typingStripSites(sources.initial, node.body);
+        if (sites.length !== 1 || sites[0].doc !== node.params[0].name) return;
+        texts.push({ node, site: sites[0] });
+      });
+      record('composerTextOnce', 'initial', texts, ({ node, site }) => [
+        { start: node.start, end: node.id.end,
+          text: `${marker}function ${node.id.name}(ppTypingTextDoc,ppTypingTextSerialize){` +
+            `if(ppTypingTextDoc==null||typeof ppTypingTextDoc!=="object")return ppTypingTextRaw(ppTypingTextDoc,ppTypingTextSerialize);` +
+            `const ppTypingTexts=globalThis.__codexPPComposerText??=new WeakMap;let ppTypingTextEntry=ppTypingTexts.get(ppTypingTextDoc);` +
+            `if(ppTypingTextEntry?.has(ppTypingTextSerialize))return ppTypingTextEntry.get(ppTypingTextSerialize);` +
+            `const ppTypingTextValue=ppTypingTextRaw(ppTypingTextDoc,ppTypingTextSerialize);` +
+            `if(typeof ppTypingTextValue==="string"){ppTypingTextEntry===void 0&&ppTypingTexts.set(ppTypingTextDoc,ppTypingTextEntry=new Map);ppTypingTextEntry.set(ppTypingTextSerialize,ppTypingTextValue)}` +
+            `return ppTypingTextValue}function ppTypingTextRaw` },
+        { start: site.node.start, end: site.node.end, text: typingStripped(site.rebuilt, site.doc) },
+      ]);
+    } else skipped.composerTextOnce = 'module not found';
+
+    // composerPlainTextOnce: the composer's plain-text conversion (YB(doc,
+    // options), imported by app-primary as Cx) walks the whole document; it
+    // runs for the draft store in plain-text mode, for the main composer's
+    // plain-text listener on each edit, and in getText() for drafts without
+    // markdown. It returns a new {content} object built from the document and
+    // five boolean options. The content string is now kept per document
+    // (WeakMap) and per combination of those options, and each call still
+    // returns a new {content} object. Calls whose options are not undefined or
+    // booleans, or whose document is not an object, go to the original.
+    if (trees.initial) {
+      const names = ['forClipboard', 'preferFileMentionFsPath', 'preserveLinkMarkers', 'preserveTextLinkMarks', 'preserveUnresolvedSkillMentions'];
+      const plains = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'FunctionDeclaration' || !node.id || node.params.length !== 2 || node.params[0].type !== 'Identifier') return;
+        const options = node.params[1];
+        if (options.type !== 'AssignmentPattern' || options.left.type !== 'ObjectPattern' || options.right.type !== 'ObjectExpression' || options.right.properties.length !== 0) return;
+        const keys = options.left.properties.map(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier' ? p.key.name : null);
+        if (keys.length !== names.length || keys.some((k, i) => k !== names[i])) return;
+        const last = node.body.body.at(-1);
+        if (last?.type !== 'ReturnStatement' || !/\{content:[\w$]+\}\s*\)?$/.test(sources.initial.slice(last.start, last.end).replace(/;$/, ''))) return;
+        plains.push(node);
+      });
+      record('composerPlainTextOnce', 'initial', plains, node => ({ start: node.start, end: node.id.end,
+        text: `${marker}function ${node.id.name}(ppTypingPlainDoc,ppTypingPlainOptions){` +
+          `let ppTypingPlainKey=0;if(ppTypingPlainDoc==null||typeof ppTypingPlainDoc!=="object"||ppTypingPlainOptions!==void 0&&(ppTypingPlainOptions===null||typeof ppTypingPlainOptions!=="object"))return ppTypingPlainRaw(ppTypingPlainDoc,ppTypingPlainOptions);` +
+          `for(const ppTypingPlainName of ${JSON.stringify(names)}){const ppTypingPlainValue=ppTypingPlainOptions?.[ppTypingPlainName];` +
+          `if(ppTypingPlainValue!==void 0&&typeof ppTypingPlainValue!=="boolean")return ppTypingPlainRaw(ppTypingPlainDoc,ppTypingPlainOptions);ppTypingPlainKey=ppTypingPlainKey*2+(ppTypingPlainValue?1:0)}` +
+          `const ppTypingPlains=globalThis.__codexPPComposerPlain??=new WeakMap;let ppTypingPlainEntry=ppTypingPlains.get(ppTypingPlainDoc);` +
+          `const ppTypingPlainCached=ppTypingPlainEntry?.get(ppTypingPlainKey);if(ppTypingPlainCached!==void 0)return{content:ppTypingPlainCached};` +
+          `const ppTypingPlainResult=ppTypingPlainRaw(ppTypingPlainDoc,ppTypingPlainOptions);` +
+          `if(typeof ppTypingPlainResult?.content==="string"&&Object.keys(ppTypingPlainResult).length===1){ppTypingPlainEntry===void 0&&ppTypingPlains.set(ppTypingPlainDoc,ppTypingPlainEntry=new Map);ppTypingPlainEntry.set(ppTypingPlainKey,ppTypingPlainResult.content)}` +
+          `return ppTypingPlainResult}function ppTypingPlainRaw` }));
+    } else skipped.composerPlainTextOnce = 'module not found';
 
     // composerLayoutPerFrame: the rich text input subscribes to every editor
     // transaction (keystrokes, selection moves) and, inside the dispatch,
