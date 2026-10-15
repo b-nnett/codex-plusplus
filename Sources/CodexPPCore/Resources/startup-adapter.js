@@ -1811,6 +1811,39 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `!(ppLibraryTrashSeen.has(${cursor})||ppLibraryTrashSeen.add(${cursor}).size>=200));}` }));
     } else skipped.libraryTrashPaginationGuard = 'module not found';
 
+    // sharedMcpInventory: every MCP inventory request (mcpServerStatus/list)
+    // makes the app-server start each configured MCP server to list its tools.
+    // The shared helper merges an identical request already in flight, but its
+    // key includes the request options, so callers asking for the same
+    // inventory at different priorities each start the servers, and a result is
+    // forgotten the moment it arrives, so requests a second apart at launch run
+    // again (a median of 4 inventory requests per launch in one Mac's logs).
+    // The key is now the parameters and timeout, not the priority, and a
+    // completed inventory-wide result (no thread) is reused for 2 s. Callers that
+    // ask for a fresh result (coalesce: false) are unchanged, and a failed
+    // request is never reused.
+    if (trees.shared) {
+      const inventories = [];
+      walk(trees.shared, node => {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 5 || !node.params.every(p => p.type === 'Identifier')) return;
+        const text = sources.shared.slice(node.start, node.end);
+        if (!text.includes('sendRequest(`mcpServerStatus/list`') || !text.includes('coalesce!==!1')) return;
+        let key = null, cleanup = null;
+        walk(node.body, n => {
+          if (n.type === 'CallExpression' && n.callee.type === 'MemberExpression' && !n.callee.computed && n.callee.object.name === 'JSON' &&
+              n.callee.property.name === 'stringify' && n.arguments[0]?.type === 'ObjectExpression' &&
+              n.arguments[0].properties.map(q => q.key?.name).join() === 'options,params') key = n;
+          if (member(n, 'finally') && n.arguments.length === 1 && n.callee.object.type === 'Identifier') cleanup = n;
+        });
+        if (!key || !cleanup) return;
+        const [options, params] = key.arguments[0].properties.map(q => sources.shared.slice(q.value.start, q.value.end));
+        inventories.push({ key, cleanup, options, params, request: cleanup.callee.object.name, done: cleanup.arguments[0] });
+      });
+      record('sharedMcpInventory', 'shared', inventories, ({ key, cleanup, options, params, request, done }) => [
+        { start: key.start, end: key.end, text: `${marker}JSON.stringify({params:${params},timeoutMs:${options}?.timeoutMs??null})` },
+        { start: cleanup.start, end: cleanup.end, text: `(${request}.then(()=>{setTimeout(${sources.shared.slice(done.start, done.end)},${params}?.threadId==null?2e3:0)},` +
+          `${sources.shared.slice(done.start, done.end)}),${request})` }]);
+    } else skipped.sharedMcpInventory = 'module not found';
     // ===== end of hygiene lane =====
 
 
