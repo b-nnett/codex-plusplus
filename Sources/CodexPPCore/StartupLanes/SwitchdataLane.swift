@@ -6,5 +6,8 @@ extension StartupAdapter {
 }
 
 extension StartupStatus {
-    static let switchdataLabels: [String: String] = [:]
+    static let switchdataLabels: [String: String] = [
+        "parallelThreadConfigReads": "Parallel thread setup reads",
+        "keepUnsubscribedTurns": "Keep recent idle transcripts",
+    ]
 }

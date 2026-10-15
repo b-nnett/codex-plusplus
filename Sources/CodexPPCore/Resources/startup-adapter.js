@@ -2071,6 +2071,139 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
 
     // ===== switchdata lane: switching threads: requests and cached thread data. =====
     // (Edits of this lane go between these markers.)
+
+    // parallelThreadConfigReads: before a thread is started or resumed, the
+    // window builds its thread configuration with one read after another:
+    // config requirements (when a service tier is set), the Copilot proxy info,
+    // the MCP Codex config, the worktree shell environment (then a config/read
+    // for its policy), the dynamic tools, and the developer instructions. Each
+    // is a round trip to the main process or the app-server, and opening a
+    // thread that is not loaded waits for all of them. The proxy info, Codex
+    // config, shell environment and dynamic tools depend only on the thread's
+    // cwd and settings, which are known when the build starts, so they are now
+    // requested at once and each result is used where the original awaited it
+    // (an error surfaces at the same point as before; the developer
+    // instructions still wait for the dynamic tools they depend on). With
+    // 30 ms per request, the real builder took 224 ms stock and 96 ms
+    // patched. When a step throws before a later read would have been made,
+    // that read has already been sent and its result is dropped.
+    if (trees.shared) {
+      const builders = [];
+      const prefetched = new Set(['fetchProxyConfig', 'fetchCodexConfig', 'readShellEnvironment', 'readDynamicTools']);
+      const allowed = new Set([...prefetched, 'markPreparation', 'readDeveloperInstructions']);
+      walk(trees.shared, node => {
+        if (node.type !== 'FunctionDeclaration' || !node.async || node.params.length !== 3) return;
+        const [options, deps, priority] = node.params;
+        if (options.type !== 'Identifier' || deps.type !== 'Identifier' || priority.type !== 'AssignmentPattern' || priority.left.type !== 'Identifier') return;
+        const def = priority.right;
+        if (!(def.type === 'TemplateLiteral' && def.expressions.length === 0 && def.quasis[0].value.cooked === 'critical')) return;
+        const text = sources.shared.slice(node.body.start, node.body.end);
+        if (!['`request_parameters_started`', '`shell_environment_started`', '`dynamic_tools_started`', '`instructions_started`', '`configRequirements/read`']
+          .every(s => text.includes(s))) return;
+        // Every use of the deps parameter must be a plain read of one of its
+        // known members (or the leading destructuring); nested functions that
+        // rebind the name are skipped. Anything else and the edit is not made.
+        let ok = true;
+        const seen = new Set();
+        const check = (n, parent) => {
+          if (!ok || !n || typeof n.type !== 'string') return;
+          if (/Function/.test(n.type) && n !== node) {
+            const names = [];
+            const collect = p => { if (!p) return; if (p.type === 'Identifier') names.push(p.name); else if (p.type === 'AssignmentPattern') collect(p.left);
+              else if (p.type === 'ObjectPattern') p.properties.forEach(q => collect(q.type === 'RestElement' ? q.argument : q.value));
+              else if (p.type === 'ArrayPattern') p.elements.forEach(collect); else if (p.type === 'RestElement') collect(p.argument); };
+            n.params.forEach(collect);
+            if (names.includes(deps.name)) return;
+          }
+          if (n.type === 'Identifier' && n.name === deps.name) {
+            if (parent?.type === 'MemberExpression' && parent.object === n && !parent.computed && allowed.has(parent.property.name)) seen.add(parent.property.name);
+            else if (!(parent?.type === 'VariableDeclarator' && parent.init === n && parent.id.type === 'ObjectPattern')) ok = false;
+            return;
+          }
+          for (const [key, value] of Object.entries(n)) {
+            if (n.type === 'MemberExpression' && key === 'property' && !n.computed) continue;
+            if (n.type === 'Property' && key === 'key' && !n.computed) continue;
+            if (Array.isArray(value)) { for (const child of value) check(child, n); }
+            else if (value && typeof value.type === 'string') check(value, n);
+          }
+        };
+        check(node.body, node);
+        if (ok && [...prefetched].every(name => seen.has(name))) builders.push({ node, deps: deps.name, priority: priority.left.name });
+      });
+      record('parallelThreadConfigReads', 'shared', builders, ({ node, deps, priority }) => [
+        { start: node.start, end: node.start,
+          text: `${marker}function ppThreadConfigPrefetch(ppDeps,ppPriority){try{if(ppDeps==null||typeof ppDeps!=="object")return ppDeps;const ppCopy={...ppDeps};` +
+            `for(const [ppKey,ppArgs,ppBound] of [["fetchProxyConfig",[],!1],["fetchCodexConfig",[],!1],["readShellEnvironment",[ppPriority],!1],["readDynamicTools",[],!0]]){` +
+            `const ppFn=ppDeps[ppKey];if(typeof ppFn!=="function")continue;` +
+            `let ppEarly=new Promise(ppResolve=>ppResolve(ppFn.apply(ppBound?ppDeps:void 0,ppArgs)));ppEarly.catch(()=>{});` +
+            `ppCopy[ppKey]=function(...ppCallArgs){if(ppEarly!=null&&ppCallArgs.length===ppArgs.length&&ppCallArgs.every((ppArg,ppIndex)=>ppArg===ppArgs[ppIndex])){` +
+            `const ppPromise=ppEarly;ppEarly=null;return ppPromise}return ppFn.apply(this,ppCallArgs)}}return ppCopy}catch{return ppDeps}}` },
+        { start: node.body.start + 1, end: node.body.start + 1, text: `${deps}=ppThreadConfigPrefetch(${deps},${priority});` },
+      ]);
+
+      // keepUnsubscribedTurns: the window keeps at most 10 inactive threads
+      // subscribed on the app-server (and none idle for 3 hours); beyond that it
+      // unsubscribes the longest-idle ones and also drops their loaded turns, so
+      // reopening one shows an empty transcript until the resume and its turn
+      // pages return. The turns of the 10 most recently unsubscribed threads
+      // are now kept (the thread is still unsubscribed and marked needs_resume),
+      // so reopening one shows its transcript at once while it resumes; the
+      // resume merges the fresh turns into it by turn id, as it does after an
+      // app-server reconnect, which also keeps turns. When an 11th thread is
+      // unsubscribed, the oldest kept one has its turns dropped as before
+      // (unless it was reopened, resumed, or is being viewed meanwhile), so at
+      // most 10 unsubscribed threads hold turns.
+      const releases = [];
+      walk(trees.shared, node => {
+        if (node.type !== 'MethodDefinition' || node.key.type !== 'Identifier' || node.key.name !== 'unsubscribeInactiveConversation' || node.value.params.length !== 1 ||
+            node.value.params[0].type !== 'Identifier') return;
+        const id = node.value.params[0].name;
+        let clear = null;
+        walk(node.value.body, (inner, ancestors) => {
+          if (inner.type !== 'LogicalExpression' || inner.operator !== '&&' || inner.left.type !== 'Identifier' || inner.right.type !== 'SequenceExpression') return;
+          const [reset, pagination] = inner.right.expressions;
+          if (inner.right.expressions.length !== 2 || reset.type !== 'CallExpression' || reset.callee.type !== 'Identifier' || reset.arguments.length !== 3) return;
+          const [state, empty, flag] = reset.arguments;
+          if (state.type !== 'Identifier' || empty.type !== 'ArrayExpression' || empty.elements.length !== 0 || !isFalse(flag)) return;
+          if (pagination.type !== 'AssignmentExpression' || pagination.left.type !== 'MemberExpression' || pagination.left.object.name !== state.name ||
+              pagination.left.property.name !== 'turnsPagination' || pagination.right.type !== 'ObjectExpression') return;
+          const fn = ancestors.findLast(a => /Function/.test(a.type));
+          if (fn?.type !== 'ArrowFunctionExpression' || fn.params.length !== 1 || fn.params[0].name !== state.name) return;
+          // Only arrows between the method and the reset, so `this` is the manager.
+          if (ancestors.some(a => a.type === 'FunctionExpression' || a.type === 'FunctionDeclaration')) return;
+          clear = { flag: inner.left.name, state: state.name, reset: reset.callee.name, seq: inner.right };
+        });
+        if (!clear) return;
+        // const flag = !ephemeral && !this.hasActiveConversationView(id) && ... (in the method)
+        let decl = null, shadowed = false;
+        walk(node.value, inner => {
+          if (inner.type === 'VariableDeclarator' && inner.id.type === 'Identifier') {
+            if (inner.id.name === clear.reset) shadowed = true;
+            if (inner.id.name === clear.flag && inner.init?.type === 'LogicalExpression' && inner.init.operator === '&&' &&
+                sources.shared.slice(inner.init.start, inner.init.end).includes(`this.hasActiveConversationView(${id})`)) decl = inner;
+          }
+          if (/Function/.test(inner.type) && inner.params.some(p => p.type === 'Identifier' && p.name === clear.reset)) shadowed = true;
+        });
+        if (decl && !shadowed && sources.shared.slice(node.start, node.end).includes('`thread/unsubscribe`')) releases.push({ decl, id, ...clear });
+      });
+      record('keepUnsubscribedTurns', 'shared', releases, ({ decl, id, state, seq }) => {
+        const program = trees.shared.body.find(s => s.start <= decl.start && decl.end <= s.end);
+        return [
+          { start: program.start, end: program.start,
+            text: `${marker}var ppKeptUnsubscribedTurns=new Map;function ppKeepUnsubscribedTurns(ppManager,ppId,ppClear){try{const ppStore=ppManager?.params?.threadStore;` +
+              `if(ppId==null||typeof ppStore?.updateConversationState!=="function"||typeof ppStore.getConversation!=="function"||typeof ppManager.hasActiveConversationView!=="function"||` +
+              `typeof ppManager.hasOwnedStreamFollowers!=="function"||typeof ppManager.shouldKeepConversationLoaded!=="function")return!1;` +
+              `ppKeptUnsubscribedTurns.delete(ppId);ppKeptUnsubscribedTurns.set(ppId,{ppManager,ppClear});const ppEvicted=[];` +
+              `for(const ppEntry of ppKeptUnsubscribedTurns){if(ppKeptUnsubscribedTurns.size<=10)break;ppKeptUnsubscribedTurns.delete(ppEntry[0]);ppEvicted.push(ppEntry)}` +
+              `ppEvicted.length&&queueMicrotask(()=>{for(const [ppOld,{ppManager:ppOwner,ppClear:ppReset}] of ppEvicted)try{const ppOldStore=ppOwner.params.threadStore,ppConversation=ppOldStore.getConversation(ppOld);` +
+              `if(ppConversation==null||ppConversation.resumeState!=="needs_resume"||ppOwner.hasActiveConversationView(ppOld)||ppOwner.hasOwnedStreamFollowers(ppOld)||ppOwner.shouldKeepConversationLoaded(ppConversation))continue;` +
+              `ppOldStore.updateConversationState(ppOld,ppReset)}catch{}});return!0}catch{return!1}}` },
+          { start: decl.init.end, end: decl.init.end,
+            text: `&&!ppKeepUnsubscribedTurns(this,${id},${state}=>{${sources.shared.slice(seq.start, seq.end)}})` },
+        ];
+      });
+    } else skipped.parallelThreadConfigReads = skipped.keepUnsubscribedTurns = 'module not found';
+
     // ===== end of switchdata lane =====
 
 
