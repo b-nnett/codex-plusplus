@@ -13,7 +13,7 @@ public struct PatchAdapter: Codable, Sendable {
     public let vendorAuthenticated: Bool?
     /// Bump whenever the bootstrap, runtimes or renderer patches change, so
     /// installed receipts from an older revision are restored and repatched.
-    public static let revision = 146
+    public static let revision = 147
     /// Whether bootstraps carry the benchmark experiments (dev builds only).
     #if CODEXPP_EXPERIMENTS
     public static let experimentsEnabled = true

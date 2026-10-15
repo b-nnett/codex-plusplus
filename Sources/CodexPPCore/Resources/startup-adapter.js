@@ -1441,6 +1441,30 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       });
     } else skipped.cachedAutoHighlightLanguage = 'module not found';
 
+    // terminalWebglRenderer: the integrated terminal loads xterm's clipboard,
+    // fit and web-links addons but no renderer addon, so xterm 5.5 draws with
+    // its DOM renderer: every refresh rebuilds a row of <span>s for each
+    // changed line, which pins the renderer during heavy output (builds, logs,
+    // TUIs). The matching WebGL renderer (@xterm/addon-webgl 0.18.0, shipped
+    // unmodified with Codex++) is now loaded once per terminal after it opens.
+    // If WebGL is unavailable, the addon fails to load or the GPU context is
+    // lost, it is disposed and xterm goes back to the DOM renderer.
+    if (trees.terminalPanel && typeof input.webglAddon === 'string' && input.webglAddon.includes('WebglAddon')) {
+      const opens = [];
+      walk(trees.terminalPanel, node => {
+        if (!member(node, 'open') || node.arguments.length !== 1 || node.callee.object.type !== 'Identifier') return;
+        const term = node.callee.object.name, before = sources.terminalPanel.slice(Math.max(0, node.start - 2000), node.start);
+        if (before.includes(`${term}.loadAddon(`) && before.includes(`${term}.attachCustomKeyEventHandler(`)) opens.push({ node, term });
+      });
+      record('terminalWebglRenderer', 'terminalPanel', opens, ({ node, term }) => [
+        { start: 0, end: 0, text: `${marker}const ppWebgl=(()=>{let ppAddon=null;try{const ppModule={exports:{}};` +
+          `(function(module,exports){${input.webglAddon.replace(/\n?\/\/# sourceMappingURL=.*$/m, '')}\n}).call(globalThis,ppModule,ppModule.exports);` +
+          `ppAddon=typeof ppModule.exports.WebglAddon==="function"?ppModule.exports.WebglAddon:null}catch{}const ppLoaded=new WeakSet;` +
+          `return ppTerm=>{if(ppAddon==null||ppLoaded.has(ppTerm)||typeof WebGL2RenderingContext!=="function")return;ppLoaded.add(ppTerm);let ppGl=null;` +
+          `try{ppGl=new ppAddon;ppGl.onContextLoss(()=>{try{ppGl.dispose()}catch{}});ppTerm.loadAddon(ppGl)}catch{try{ppGl?.dispose()}catch{}}}})();\n` },
+        { start: node.end, end: node.end, text: `,ppWebgl(${term})` }]);
+    } else skipped.terminalWebglRenderer = trees.terminalPanel ? 'renderer addon not provided' : 'module not found';
+
     const result = { applied, skipped };
     if (result_html) result.html = result_html;
     if (input.css && typeof input.css === 'object') {

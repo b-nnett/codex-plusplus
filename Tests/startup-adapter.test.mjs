@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['ambientSuggestionsLowEffort', 'ambientSuggestionsOnDemand', 'appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'cachedAutoHighlightLanguage', 'capIdlePageSessions', 'catchUpPredictionWhenShown', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'gitStateWhenChanged', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'pubsubReconnectCap', 'queryTimings', 'queuedAppearanceChange', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'terminalOutputAppend', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['ambientSuggestionsLowEffort', 'ambientSuggestionsOnDemand', 'appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'cachedAutoHighlightLanguage', 'capIdlePageSessions', 'catchUpPredictionWhenShown', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'gitStateWhenChanged', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'pubsubReconnectCap', 'queryTimings', 'queuedAppearanceChange', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'terminalOutputAppend', 'terminalWebglRenderer', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -1187,4 +1187,32 @@ test('a streaming code block without a language reuses its detected language', a
   await replaced.show('def a():');
   await replaced.show('x');
   assert.deepEqual(replaced.calls, ['auto', 'auto']);
+});
+
+test('the integrated terminal loads the WebGL renderer once and falls back to the DOM renderer on failure', () => {
+  const terminalPanel = 'export function mount(e,c,O){let m=new c.Terminal({});m.loadAddon(new O.FitAddon);m.attachCustomKeyEventHandler(()=>!0),m.open(e);return m}';
+  const fakeAddon = '!function(e,t){"object"==typeof exports&&"object"==typeof module?module.exports=t():e.WebglAddon=t()}(self,(()=>({WebglAddon:class{' +
+    'constructor(){if(self.failNext)throw Error("no webgl");self.made.push(this);this.lost=[]}onContextLoss(f){this.lost.push(f)}dispose(){this.disposed=!0}}})));';
+  assert.equal(adapt({terminalPanel}).skipped.terminalWebglRenderer, 'renderer addon not provided');
+  const {terminalPanel: patched, applied} = adapt({terminalPanel, webglAddon: fakeAddon});
+  assert.equal(applied.terminalWebglRenderer, 'terminalPanel');
+  const self = {made: [], failNext: false};
+  const sandbox = {self, WeakSet, Error, WebGL2RenderingContext: function () {}};
+  sandbox.globalThis = sandbox;
+  vm.runInNewContext(patched.replace(/export /g, '') + ';this.mount=mount;', sandbox);
+  const term = () => ({addons: [], loadAddon(a) { this.addons.push(a); }, attachCustomKeyEventHandler() {}, open() {}});
+  const c = {Terminal: function () { return term(); }}, O = {FitAddon: class {}};
+  const first = sandbox.mount({}, c, O);
+  assert.equal(self.made.length, 1); assert.ok(first.addons.includes(self.made[0]));
+  self.made[0].lost[0]();
+  assert.equal(self.made[0].disposed, true, 'a lost GPU context disposes the addon, back to the DOM renderer');
+  self.failNext = true;
+  assert.doesNotThrow(() => sandbox.mount({}, c, O), 'a failing addon leaves the terminal on the DOM renderer');
+  // The vendored addon evaluates inside the wrapper and exposes its constructor.
+  const real = fs.readFileSync(new URL('../Sources/CodexPPCore/Resources/xterm-addon-webgl.js', import.meta.url), 'utf8');
+  const probe = {self: {}, WeakSet, WebGL2RenderingContext: undefined}; probe.globalThis = probe;
+  const {terminalPanel: withReal} = adapt({terminalPanel, webglAddon: real});
+  vm.runInNewContext(withReal.replace(/export /g, '') + ';this.mount=mount;this.ok=typeof ppWebgl;', probe);
+  assert.equal(probe.ok, 'function');
+  assert.doesNotThrow(() => probe.mount({}, c, O), 'without WebGL2 the terminal is left as it is');
 });

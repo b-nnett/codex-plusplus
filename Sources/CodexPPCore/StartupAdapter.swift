@@ -125,6 +125,9 @@ public enum StartupAdapter {
             if let appearance { input["appearance"] = appearance.1 }
             if let xtermOutput { input["xtermOutput"] = xtermOutput.1 }
             if let terminalPanel { input["terminalPanel"] = terminalPanel.1 }
+            // The xterm WebGL renderer addon, inlined into the terminal panel.
+            if terminalPanel != nil, let url = Bundle.module.url(forResource: "xterm-addon-webgl", withExtension: "js"),
+               let addon = try? String(contentsOf: url, encoding: .utf8) { input["webglAddon"] = addon }
             if let primary { input["primary"] = primary.1 }
             if let ambient { input["ambient"] = ambient.1 }
             if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
@@ -208,7 +211,7 @@ public struct StartupStatus: Equatable, Sendable {
         "stderrNotConnectionError": "App-server warnings not shown as connection errors", "remoteControlBackoff": "Remote-control reconnect backoff",
         "pubsubReconnectCap": "Prompt ChatGPT live-update reconnects", "resumeVisibleThreadFirst": "Open thread resumed first after reconnect",
         "remoteSettingsPollWhenVisible": "Remote Connections refresh only while visible", "quietSidebarRebind": "Quieter Browser sidebar log",
-        "terminalOutputAppend": "Background terminal output without rewrites", "coalescedTerminalResize": "One terminal refit per frame", "batchedPtyOutput": "Batched terminal output",
+        "terminalOutputAppend": "Background terminal output without rewrites", "coalescedTerminalResize": "One terminal refit per frame", "batchedPtyOutput": "Batched terminal output", "terminalWebglRenderer": "GPU terminal rendering",
         "ambientSuggestionsOnDemand": "Home suggestions only when visited", "ambientSuggestionsLowEffort": "Low-effort home suggestions",
         "catchUpPredictionWhenShown": "Catch-up predictions only when shown", "gitStateWhenChanged": "Git state only when changed",
         "cachedAutoHighlightLanguage": "Cached code language while streaming",
