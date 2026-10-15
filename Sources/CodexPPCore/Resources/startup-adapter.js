@@ -2411,6 +2411,104 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
 
     // ===== scrolling lane: per-frame work while scrolling long threads. =====
     // (Edits of this lane go between these markers.)
+
+    // stableScrollContext: ThreadScrollLayout keeps "is the transcript more
+    // than 24 px from the bottom" in React state and puts it in the value of
+    // the thread scroll context. Each time a scroll crosses that line (as soon
+    // as the reader scrolls up from the bottom, and again on returning) the
+    // layout re-renders with a new context object, so every consumer of the
+    // context re-renders and every effect keyed on it runs its cleanup and
+    // setup again (the turn list's anchoring and history-boundary effects, the
+    // response spacer's 101-threshold IntersectionObserver, ResizeObserver and
+    // listeners, the conversation's scroll-state save, the history loader's
+    // IntersectionObserver), in the frame where scrolling starts.
+    // The only reader of the flag is the layout's own scroll-to-bottom
+    // button, which reads it through a scroll-listener subscription
+    // (useSyncExternalStore). The flag now lives in an object held by the
+    // same useState hook; the context reads it through a getter, and it is
+    // updated just before the scroll listeners run, so the button's
+    // subscription sees the new value in the same scroll event and
+    // re-renders on its own.
+    // Some consumers do depend on a crossing: layout effects that mount in
+    // the same commit as the layout run before the scroll element's ref is
+    // attached, find no element and return, and (the response spacer's
+    // observers, for one) are only set up when the context next changes,
+    // that is at the first crossing. So getScrollElement() (same function
+    // identity as before) notes when it returned no element or a different
+    // element than before, and the next crossing after that still makes a new
+    // context object, exactly as before. Crossings after every consumer has
+    // seen the current element keep the context's identity.
+    if (trees.threadScrollLayout) {
+      const src = sources.threadScrollLayout, found = [];
+      const fnTypes = new Set(['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression']);
+      const isUseState = c => {
+        const callee = c?.type === 'CallExpression' ? (c.callee.type === 'SequenceExpression' ? c.callee.expressions.at(-1) : c.callee) : null;
+        return callee?.type === 'MemberExpression' && !callee.computed && callee.property.name === 'useState';
+      };
+      walk(trees.threadScrollLayout, (node, ancestors) => {
+        if (node.type !== 'ObjectExpression') return;
+        const props = node.properties.filter(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier');
+        const keys = new Set(props.map(p => p.key.name));
+        if (!['isScrolledFromBottom', 'responseSpacerController', 'getScrollElement', 'addScrollListener', 'compensateScrollToDistanceFromBottomPx'].every(k => keys.has(k))) return;
+        const prop = props.find(p => p.key.name === 'isScrolledFromBottom'), getter = props.find(p => p.key.name === 'getScrollElement');
+        if (prop.kind !== 'init' || prop.value.type !== 'Identifier' || getter.kind !== 'init' || getter.shorthand || getter.value.type !== 'Identifier') return;
+        const flag = prop.value.name, owner = [...ancestors].reverse().find(a => fnTypes.has(a.type));
+        if (!owner) return;
+        // [flag, setFlag] = useState(!1) in the same component.
+        const states = [], refs = [];
+        walk(owner.body, (n, chain) => {
+          if (n.type === 'VariableDeclarator' && n.id.type === 'ArrayPattern' && n.id.elements.length === 2 && n.id.elements.every(e => e?.type === 'Identifier') &&
+              n.id.elements[0].name === flag && isUseState(n.init) && n.init.arguments.length === 1 && isFalse(n.init.arguments[0])) states.push(n);
+          if (n.type === 'Identifier' && n.name === flag) refs.push({ n, parent: chain.at(-1) });
+        });
+        if (states.length !== 1) return;
+        const state = states[0], setter = state.id.elements[1].name;
+        // Every other read of the flag is the compiler's memo cache (t[i]!==flag, t[i]=flag).
+        const cacheOnly = refs.every(({ n, parent }) => n === state.id.elements[0] || n === prop.value ||
+          (parent?.type === 'BinaryExpression' && (parent.operator === '!==' || parent.operator === '===')) ||
+          (parent?.type === 'AssignmentExpression' && parent.right === n && parent.left.type === 'MemberExpression' && parent.left.computed));
+        if (!cacheOnly) return;
+        // The scroll handler: let t=e<=24; ...; for(... of listeners) ...; setFlag(!t)
+        const calls = [], setterRefs = [];
+        walk(owner.body, (n, chain) => {
+          if (n.type === 'Identifier' && n.name === setter) setterRefs.push(n);
+          if (n.type !== 'CallExpression' || n.callee.type !== 'Identifier' || n.callee.name !== setter || n.arguments.length !== 1) return;
+          const arg = n.arguments[0];
+          if (arg.type !== 'UnaryExpression' || arg.operator !== '!' || arg.argument.type !== 'Identifier') return;
+          const fn = [...chain].reverse().find(a => fnTypes.has(a.type));
+          if (fn?.body.type !== 'BlockStatement') return;
+          const body = fn.body.body, near = body.find(s => s.type === 'VariableDeclaration' && s.declarations.length === 1 &&
+            s.declarations[0].id.type === 'Identifier' && s.declarations[0].id.name === arg.argument.name &&
+            s.declarations[0].init?.type === 'BinaryExpression' && s.declarations[0].init.operator === '<=' && s.declarations[0].init.right.value === 24);
+          if (!near || !body.slice(body.indexOf(near) + 1).some(s => s.type === 'ForOfStatement')) return;
+          calls.push({ near, name: arg.argument.name });
+        });
+        if (calls.length !== 1 || setterRefs.length !== 2) return;
+        const top = ancestors.find(a => a.type === 'FunctionDeclaration' && trees.threadScrollLayout.body.includes(a));
+        if (top) found.push({ prop, getter, state, setter, flag, call: calls[0], top });
+      });
+      record('stableScrollContext', 'threadScrollLayout', found, ({ prop, getter, state, setter, flag, call, top }) => {
+        // The state is a token {ppScrolledFromBottomRoot: root}; root (one per
+        // layout) holds the flag. A new token, and so a new context object,
+        // is made only on a crossing while root.stale is set.
+        const runtime =
+          `function ppScrolledFromBottomCreate(){return{ppScrolledFromBottomRoot:{value:!1,stale:!1,seen:null,react:null,set:null,get:null}}}` +
+          `function ppScrolledFromBottomPair(ppPair){try{const ppRoot=ppPair[0]?.ppScrolledFromBottomRoot;if(ppRoot==null||typeof ppPair[1]!=="function")return ppPair;ppRoot.react=ppPair[1];` +
+          `return[ppPair[0],ppRoot.set??=ppValue=>{if(ppRoot.value===ppValue)return;ppRoot.value=ppValue;if(ppRoot.stale){ppRoot.stale=!1;ppRoot.react({ppScrolledFromBottomRoot:ppRoot})}}]}catch{return ppPair}}` +
+          `function ppScrolledFromBottomValue(ppToken){const ppRoot=ppToken?.ppScrolledFromBottomRoot;return ppRoot==null?ppToken:ppRoot.value}` +
+          `function ppScrolledFromBottomWatch(ppToken,ppGet){const ppRoot=ppToken?.ppScrolledFromBottomRoot;if(ppRoot==null)return ppGet;` +
+          `return ppRoot.get??=function(){const ppElement=ppGet.apply(this,arguments);try{if(ppElement==null)ppRoot.stale=!0;else{if(ppRoot.seen!=null&&ppRoot.seen!==ppElement)ppRoot.stale=!0;ppRoot.seen=ppElement}}catch{}return ppElement}}`;
+        const init = state.init, arg = init.arguments[0];
+        const semi = src[call.near.end - 1] === ';' ? '' : ';';
+        return [
+          { start: top.start, end: top.start, text: `${marker}${runtime}` },
+          { start: init.start, end: init.end, text: `ppScrolledFromBottomPair(${src.slice(init.start, arg.start)}ppScrolledFromBottomCreate${src.slice(arg.end, init.end)})` },
+          { start: call.near.end, end: call.near.end, text: `${semi}${setter}(!${call.name});` },
+          { start: getter.value.start, end: getter.value.end, text: `ppScrolledFromBottomWatch(${flag},${getter.value.name})` },
+          { start: prop.start, end: prop.end, text: `get isScrolledFromBottom(){return ppScrolledFromBottomValue(${flag})}` },
+        ];
+      });
+    } else skipped.stableScrollContext = 'module not found';
     // ===== end of scrolling lane =====
 
 
