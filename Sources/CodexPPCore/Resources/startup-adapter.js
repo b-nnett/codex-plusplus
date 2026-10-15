@@ -2208,7 +2208,144 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
 
 
     // ===== switchrender lane: switching threads: rebuilding the transcript (highlighting, markdown). =====
-    // (Edits of this lane go between these markers.)
+    // rememberedCodeHighlight: switching threads remounts the transcript, and
+    // every code block starts unhighlighted (its highlight state begins at
+    // null), loads the highlighter and highlights its whole content again
+    // (highlight.js auto-detection runs every registered grammar over blocks
+    // without a language), then renders a second time with the result. When a
+    // code block unmounts showing a highlight that the highlighter produced
+    // for exactly its current content and language, that result is kept in a
+    // module-level LRU (300 blocks, at most 4 million characters of code plus
+    // HTML, about 8 MB at worst; blocks over 1 million characters are not
+    // kept). A block that mounts with the same content and language starts
+    // from the kept result, so it paints highlighted on its first render and
+    // skips highlighting; any other block, and any later content change,
+    // highlights exactly as before. Results are kept only at unmount and only
+    // when they came straight from the highlighter for that content (not a
+    // partial result of a block still streaming), so the HTML is the same as
+    // a fresh highlight.
+    if (trees.shared) {
+      const owners = [];
+      walk(trees.shared, (node, ancestors) => {
+        if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier' || node.arguments.length !== 1) return;
+        const call = node.arguments[0];
+        if (!member(call, 'highlightCode') || call.arguments.length !== 2) return;
+        const owner = [...ancestors].reverse().find(a => a.type === 'FunctionDeclaration' || a.type === 'FunctionExpression');
+        if (owner) owners.push({ owner, set: node.callee.name });
+      });
+      const loaders = [];
+      walk(trees.shared, node => {
+        if (!member(node, 'catch')) return;
+        const load = node.callee.object, arrow = load?.arguments?.[0];
+        if (load?.type !== 'CallExpression' || arrow?.type !== 'ArrowFunctionExpression' || arrow.body.type !== 'ImportExpression') return;
+        const spec = arrow.body.source;
+        if (spec.type === 'TemplateLiteral' && spec.quasis.length === 1 && spec.quasis[0].value.cooked.startsWith('./highlight-code-')) loaders.push(load);
+      });
+      const blocks = [];
+      if (owners.length === 1 && owners[0].owner.type === 'FunctionDeclaration' && loaders.length === 1) {
+        const { owner, set } = owners[0], states = [], refs = [], guards = [], cleanups = [];
+        const isNull = n => n?.type === 'Literal' && n.value === null && n.raw === 'null';
+        walk(owner.body, n => {
+          if (n.type === 'VariableDeclarator' && n.id.type === 'ArrayPattern' && n.id.elements.length === 2 && n.id.elements.every(e => e?.type === 'Identifier') &&
+              n.id.elements[1].name === set && n.init?.type === 'CallExpression' && n.init.arguments.length === 1 && isNull(n.init.arguments[0])) {
+            const callee = n.init.callee.type === 'SequenceExpression' ? n.init.callee.expressions.at(-1) : n.init.callee;
+            if (callee.type === 'MemberExpression' && !callee.computed && callee.property.name === 'useState') states.push({ init: n.init, value: n.id.elements[0].name });
+          }
+          if (n.type === 'ObjectExpression') {
+            const props = new Map(n.properties.filter(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier').map(p => [p.key.name, p.value]));
+            if (props.has('disposed') && props.has('timeoutHandle') && props.get('latestContent')?.type === 'Identifier' && props.get('latestLanguage')?.type === 'Identifier') {
+              refs.push({ content: props.get('latestContent').name, language: props.get('latestLanguage').name });
+            }
+          }
+          if (n.type === 'IfStatement' && n.consequent.type === 'ReturnStatement' && n.consequent.argument == null) {
+            const test = n.test.type === 'SequenceExpression' ? n.test.expressions.at(-1) : n.test;
+            const right = test.type === 'LogicalExpression' && test.operator === '||' ? test.right : null;
+            if (right?.type === 'BinaryExpression' && right.operator === '!=' && isNull(right.right) && right.left.type === 'MemberExpression' &&
+                !right.left.computed && right.left.property.name === 'timeoutHandle') guards.push(test);
+          }
+          if (n.type === 'ArrowFunctionExpression' && n.params.length === 0 && n.body.type === 'BlockStatement' && n.body.body[0]?.type === 'ExpressionStatement') {
+            const first = n.body.body[0].expression, assign = first.type === 'SequenceExpression' ? first.expressions[0] : first;
+            if (assign.type === 'AssignmentExpression' && assign.operator === '=' && assign.left.type === 'MemberExpression' && !assign.left.computed &&
+                assign.left.property.name === 'disposed' && assign.left.object.type === 'Identifier' &&
+                assign.right.type === 'UnaryExpression' && assign.right.operator === '!' && assign.right.argument.value === 0) cleanups.push({ body: n.body, ref: assign.left.object.name });
+          }
+        });
+        if (states.length === 1 && refs.length === 1 && guards.length === 1 && cleanups.length === 1) {
+          blocks.push({ owner, set, state: states[0], ref: refs[0], guard: guards[0], cleanup: cleanups[0], loader: loaders[0] });
+        } else skipped.rememberedCodeHighlight = `code snippet shape: ${states.length} states, ${refs.length} refs, ${guards.length} guards, ${cleanups.length} cleanups`;
+      }
+      if (!skipped.rememberedCodeHighlight) record('rememberedCodeHighlight', 'shared', blocks, ({ owner, set, state, ref, guard, cleanup, loader }) => {
+        const { content, language } = ref, value = state.value;
+        const runtime =
+          `function ppRememberedHighlight(){return ppRememberedHighlight.ppRhStore??={entries:new Map,chars:0,fresh:new WeakMap,setters:new WeakMap}}` +
+          // Tags every result the highlighter returns with the language it was asked for.
+          `function ppRememberedHighlightModule(ppRhModule){try{if(ppRhModule==null||typeof ppRhModule.highlightCode!=="function")return ppRhModule;const ppRhStore=ppRememberedHighlight();` +
+          `return{...ppRhModule,highlightCode(ppRhCode,ppRhLanguage){const ppRhResult=ppRhModule.highlightCode(ppRhCode,ppRhLanguage);try{ppRhResult!=null&&typeof ppRhResult==="object"&&ppRhStore.fresh.set(ppRhResult,ppRhLanguage)}catch{}return ppRhResult}}}catch{return ppRhModule}}` +
+          `function ppRememberedHighlightFresh(ppRhValue,ppRhCode,ppRhLanguage){try{const ppRhStore=ppRememberedHighlight();return ppRhValue!=null&&typeof ppRhValue==="object"&&typeof ppRhCode==="string"&&ppRhValue.code===ppRhCode&&` +
+          `typeof ppRhValue.html==="string"&&ppRhStore.fresh.has(ppRhValue)&&ppRhStore.fresh.get(ppRhValue)===ppRhLanguage}catch{return!1}}` +
+          `function ppRememberedHighlightSeed(ppRhCode,ppRhLanguage){try{if(typeof ppRhCode!=="string")return null;const ppRhStore=ppRememberedHighlight(),ppRhEntry=ppRhStore.entries.get(ppRhCode);` +
+          `if(ppRhEntry==null||ppRhEntry.language!==ppRhLanguage||!ppRememberedHighlightFresh(ppRhEntry.result,ppRhCode,ppRhLanguage))return null;ppRhStore.entries.delete(ppRhCode);ppRhStore.entries.set(ppRhCode,ppRhEntry);return ppRhEntry.result}catch{return null}}` +
+          // The setter, wrapped once per block, notes the last result shown.
+          `function ppRememberedHighlightState(ppPair){try{const ppRhStore=ppRememberedHighlight(),ppRhSet=ppPair[1];let ppWrapped=ppRhStore.setters.get(ppRhSet);` +
+          `if(ppWrapped==null){ppWrapped=ppRhValue=>(ppWrapped.ppRhLast=ppRhValue,ppRhSet(ppRhValue));ppWrapped.ppRhLast=ppPair[0];ppRhStore.setters.set(ppRhSet,ppWrapped)}return[ppPair[0],ppWrapped]}catch{return ppPair}}` +
+          `function ppRememberedHighlightKeep(ppWrapped,ppRhCode,ppRhLanguage){try{const ppRhValue=ppWrapped?.ppRhLast;if(!ppRememberedHighlightFresh(ppRhValue,ppRhCode,ppRhLanguage))return;` +
+          `const ppRhStore=ppRememberedHighlight(),ppSize=ppRhCode.length+ppRhValue.html.length;if(ppSize>1e6)return;const ppRhOld=ppRhStore.entries.get(ppRhCode);` +
+          `ppRhOld!=null&&(ppRhStore.entries.delete(ppRhCode),ppRhStore.chars-=ppRhOld.size);ppRhStore.entries.set(ppRhCode,{language:ppRhLanguage,result:ppRhValue,size:ppSize});ppRhStore.chars+=ppSize;` +
+          `for(const[ppRhKey,ppRhEntry]of ppRhStore.entries){if(ppRhStore.entries.size<=300&&ppRhStore.chars<=4e6)break;ppRhStore.entries.delete(ppRhKey);ppRhStore.chars-=ppRhEntry.size}}catch{}}`;
+        const init = sources.shared.slice(state.init.start, state.init.end), argument = state.init.arguments[0];
+        return [
+          { start: owner.start, end: owner.start, text: `${marker}${runtime}` },
+          { start: loader.end, end: loader.end, text: '.then(ppRememberedHighlightModule)' },
+          { start: state.init.start, end: state.init.end,
+            text: `ppRememberedHighlightState(${init.slice(0, argument.start - state.init.start)}()=>ppRememberedHighlightSeed(${content},${language})${init.slice(argument.end - state.init.start)})` },
+          { start: guard.end, end: guard.end, text: `||ppRememberedHighlightFresh(${value},${content},${language})` },
+          { start: cleanup.body.start + 1, end: cleanup.body.start + 1, text: `ppRememberedHighlightKeep(${set},${cleanup.ref}.latestContent,${cleanup.ref}.latestLanguage);` },
+        ];
+      });
+    } else skipped.rememberedCodeHighlight = 'module not found';
+
+    // largerMarkdownLexCache: markdown is lexed through a shared cache of
+    // token lists keyed by the source text, which evicts its oldest entry
+    // while it holds more than 100 entries or more than 6 million characters
+    // of keys (sources over 1 million characters are not cached). Rendering a
+    // thread lexes each message, and background scans (directives, links,
+    // citations) lex the same and other texts, so three threads of 40
+    // messages already exceed 100 entries: switching back to one evicts its
+    // messages one by one as they are lexed again, and every message is
+    // lexed from scratch. Eviction now waits until the cache holds more than
+    // 1000 entries, or more than 2 million characters and the original limit
+    // is also exceeded. Every entry the original limits keep is still kept.
+    // Measured retained heap is about 13 bytes per cached character (token
+    // objects and the key), so the added entries cost at most about 26 MB
+    // per cache (stock: about 7 MB for 100 messages of 4 KB); the original
+    // limits already allowed about 75 MB with fewer, larger messages.
+    if (trees.shared) {
+      const loops = [];
+      walk(trees.shared, node => {
+        if (node.type !== 'ForStatement' || node.init || node.update || node.test?.type !== 'LogicalExpression' || node.test.operator !== '||') return;
+        const { left, right } = node.test;
+        if (left.type !== 'BinaryExpression' || left.operator !== '>' || left.left.type !== 'MemberExpression' || left.left.computed || left.left.property.name !== 'size' ||
+            left.left.object.type !== 'Identifier' || left.right.type !== 'Identifier' ||
+            right.type !== 'BinaryExpression' || right.operator !== '>' || right.left.type !== 'Identifier' || right.right.type !== 'Identifier') return;
+        if (!sources.shared.slice(node.start, node.end).includes('.keys().next().value')) return;
+        loops.push({ test: node.test, entries: left.right.name, chars: right.right.name });
+      });
+      const limits = [];
+      if (loops.length === 1) {
+        const assigned = name => {
+          const found = [];
+          walk(trees.shared, n => { if (n.type === 'AssignmentExpression' && n.operator === '=' && n.left.type === 'Identifier' && n.left.name === name) found.push(n.right); });
+          return found;
+        };
+        const entries = assigned(loops[0].entries), chars = assigned(loops[0].chars);
+        if (entries.length === 1 && entries[0].type === 'Literal' && entries[0].value === 100 && chars.length === 1 && chars[0].type === 'Literal' && chars[0].value === 6e6) limits.push(loops[0].test);
+        else skipped.largerMarkdownLexCache = 'cache limits are not 100 entries and 6e6 characters';
+      }
+      if (!skipped.largerMarkdownLexCache) record('largerMarkdownLexCache', 'shared', limits, test => {
+        const original = sources.shared.slice(test.start, test.end), size = sources.shared.slice(test.left.left.start, test.left.left.end), count = test.right.left.name;
+        return { start: test.start, end: test.end, text: `${marker}${size}>1e3||${count}>2e6&&(${original})` };
+      });
+    } else skipped.largerMarkdownLexCache = 'module not found';
     // ===== end of switchrender lane =====
 
 
