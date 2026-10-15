@@ -10,6 +10,11 @@ per variant (with a live CPU readout) plus a side-by-side.
   idle     the home screen with its composer focused and untouched for 20 s
   shimmer  a fixed "Thinking" shimmer (demoShimmer experiment): the original
            shimmer code against the compositor one, both on the patched app
+  terminal the integrated terminal printing 400,000 lines (seq 1 400000)
+  switch   four real threads opened one after another through codex:// links
+           (pass them with --threads; first opens, so each is resumed and drawn)
+  stream   the same long prompt sent in a new chat and its reply streamed in
+           full (one model reply per variant; pick the model in the composer)
 
     python3 scripts/evidence-video.py resize --thread codex://threads/... --out dist/evidence/resize
 """
@@ -175,6 +180,25 @@ def side_by_side(paths, out_path):
                     "-movflags", "+faststart", out_path], check=True)
 
 
+STREAM_PROMPT = ("Benchmark prompt, answer directly: do not run any commands, read files or use tools. Write a detailed "
+                 "~2,500-word technical guide to TCP congestion control (slow start, AIMD, fast retransmit, CUBIC, BBR). Use headings, "
+                 "nested bullet lists, a comparison table and three fenced code blocks (one Python, one C, one with no language).")
+
+
+def keystroke(text):
+    osa('tell application "System Events" to tell process "ChatGPT" to set frontmost to true',
+        f'tell application "System Events" to keystroke "{text}"')
+
+
+def menu(item):
+    osa(f'tell application "System Events" to tell process "ChatGPT" to click menu item "{item}" of menu "View" of menu bar 1')
+
+
+def click(bounds, fx, fy):
+    """Clicks at a fraction of the window's width and height."""
+    subprocess.run([tool("click"), str(bounds["x"] + bounds["width"] * fx), str(bounds["y"] + bounds["height"] * fy)], check=True)
+
+
 def resize_steps():
     return [round(1257 + 150 * math.cos(i * math.pi / 60)) for i in range(240)]
 
@@ -182,7 +206,7 @@ def resize_steps():
 def run(args):
     os.makedirs(args.out, exist_ok=True)
     stock = original_bundle()
-    if args.scenario in ("resize", "panel"):
+    if args.scenario in ("resize", "panel", "terminal", "switch", "stream"):
         variants = [("original", stock, None), ("patched", PATCHED, None)]
         if args.paused:
             variants.append(("patched-paused", PATCHED, None))
@@ -210,7 +234,17 @@ def run(args):
         if args.scenario == "panel" and panel_open(bounds):
             osa('tell application "System Events" to tell process "ChatGPT" to click menu item "Switch between Chat and tabs" of menu "View" of menu bar 1')
             time.sleep(2)
-        seconds = {"resize": 16, "panel": 15}.get(args.scenario, 24)
+        if args.scenario in ("terminal", "stream"):
+            subprocess.run(["open", "codex://threads/new"], check=True)
+            time.sleep(3)
+        if args.scenario == "terminal":
+            menu("Open Terminal")
+            time.sleep(3)
+            click(bounds, 0.6, 0.8)
+            keystroke("clear")
+            osa('tell application "System Events" to key code 36')
+            time.sleep(1)
+        seconds = {"resize": 16, "panel": 15, "terminal": 14, "switch": 26, "stream": 100}.get(args.scenario, 24)
         raw = os.path.join(args.out, f"{name}-raw.mov")
         recording = Recording(raw, seconds)
         sampler = Sampler(os.path.join(args.out, f"{name}-cpu.jsonl"), seconds, bundle)
@@ -223,6 +257,21 @@ def run(args):
                 'set size of window 1 to {w as integer, 950}', 'end repeat', 'end tell')
             record["resize_seconds"] = round(time.time() - began, 2)
             bounds["width"] = max(resize_steps())  # crop wide enough for the widest step
+        if args.scenario == "terminal":
+            keystroke("seq 1 400000")
+            osa('tell application "System Events" to key code 36')
+        if args.scenario == "switch":
+            record["opens"] = []
+            for url in args.threads:
+                record["opens"].append(round(time.time() - recording.start, 3))
+                subprocess.run(["open", url], check=True)
+                time.sleep(6)
+        if args.scenario == "stream":
+            click(bounds, 0.5, 0.9)
+            osa('tell application "System Events" to keystroke "a" using command down')
+            keystroke(STREAM_PROMPT)
+            osa('tell application "System Events" to key code 36')
+            record["sent"] = round(time.time() - recording.start, 3)
         if args.scenario == "panel":
             record["toggles"] = []
             for _ in range(6):
@@ -230,6 +279,9 @@ def run(args):
                 osa('tell application "System Events" to tell process "ChatGPT" to click menu item "Switch between Chat and tabs" of menu "View" of menu bar 1')
                 time.sleep(2)
         recording.wait()
+        if args.scenario == "terminal":
+            menu("Toggle Bottom Panel")  # the panel's state persists; leave the composer reachable
+            time.sleep(1)
         samples = sampler.samples()
         timeline, rows = cpu_timeline(samples, recording.start)
         skip = 1.0
@@ -261,7 +313,8 @@ def run(args):
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("scenario", choices=["resize", "idle", "shimmer", "panel"])
+    ap.add_argument("scenario", choices=["resize", "idle", "shimmer", "panel", "terminal", "switch", "stream"])
+    ap.add_argument("--threads", nargs="*", default=[], help="codex://threads/... URLs to open, in order, for the switch scenario")
     ap.add_argument("--thread", help="codex://threads/... URL to open for the resize scenario")
     ap.add_argument("--out", required=True)
     ap.add_argument("--paused", action="store_true", help="also film the patched app with extensions paused")

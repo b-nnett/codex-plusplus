@@ -1,47 +1,78 @@
 # Changelog
 
-## Unreleased
+## 2.1.0 — 2026-10-15
 
-- Waking the Mac no longer drops working remote connections. The websocket keep-alive dropped a socket once 60 s passed without a pong, and its timer stops while the Mac sleeps, so the first tick after a wake counted the whole sleep as silence and dropped the ChatGPT (`durable`) app-server connection even when it still worked; every open thread then resynced and its stream restarted. A tick that comes more than two intervals late now pings first and allows 5 s for the answer, so a dead socket is still dropped within about 10 s of a wake (it took 60 s before) and a live one is kept. In the logs of one Mac, 13 of 29 pong timeouts came within two minutes of a wake: 3 dropped the socket within 2 s of waking and 10 took 59–69 s to notice a dead one.
+Measured against stock ChatGPT on build 20398: streaming replies use about 28% less renderer CPU, heavy terminal output 3–4× less, opening a thread about 5× less app-server time, and thread descriptions an estimated 20× fewer uncached tokens. Side-by-side recordings: `scripts/evidence-video.py stream|terminal|switch`.
+
+### Measured results
+
+- Measured live with the same prompt on GPT-6.1 Sol Medium (three runs each, 18–19 KB replies): the renderer used a median of 3.03 CPU-seconds per 1,000 characters streamed on stock ChatGPT and 2.19 on Codex++ (−28%; ranges 2.33–3.07 and 1.90–2.61), and a median of 91% of a core against 56% over the last quarter of the reply.
+- Heavy terminal output, measured live (`seq 1 400000`, two runs each): the renderer peaked at 204–240% of a core and used about 1.3–2.1 CPU-seconds on stock ChatGPT, against 70–76% and 0.3–0.7 CPU-seconds with Codex++.
+
+### Streaming replies
+
 - Streaming replies render less per frame. Every word of a streaming reply was its own fading `<span>`, and every frame rebuilt and reconciled a span for every word of the message, so frames cost more the longer the reply got. Words whose fade has finished are now plain text; only the words still fading are elements.
 - While a reply streams, blocks above the one being written are reused instead of rebuilt and compared again every frame. In a 30 KB test reply (real chunks with React's own reconciler, without Chromium's layout and paint) render time per frame near the end of the reply fell from 7.5 to 3.1 ms, and the page is the same after every frame.
-- Measured live with the same prompt on GPT-6.1 Sol Medium (three runs each, 18–19 KB replies): the renderer used a median of 3.03 CPU-seconds per 1,000 characters streamed on stock ChatGPT and 2.19 on Codex++ (−28%; ranges 2.33–3.07 and 1.90–2.61), and a median of 91% of a core against 56% over the last quarter of the reply.
-- The startup adapter walks each module's syntax tree once instead of once per edit: 46 s fell to 12 s on build 20398, with byte-identical output. Past the 60 s discovery limit the patch had installed without any startup edits.
-- When startup discovery times out or crashes it is retried once with a 180 s deadline; if it still fails, the patch or upgrade stops and the installed app is unchanged, instead of installing without startup speed-ups. The helper menu warns "Startup Speed-ups: Not Applied" when the installed patch has no discovery report, and the report records how long discovery took.
-- `scripts/review-build.py` reviews a new ChatGPT build in one command through the same discovery code patching uses: every edit of every adapter applied or skipped with a diagnosis, timings, and a diff against the last reviewed build that fails when a release edit stops applying (docs/reviewing-a-new-build.md).
-- At startup ChatGPT listed every MCP server twice in a row: each window start replays the app-server's initialization message, and the replay made the app fetch the full MCP list again right after the first fetch. A replay that repeats what the window already has no longer triggers the second fetch.
-- Images attached to a ChatGPT conversation are sized, and above 2048 px or 1 MB scaled and re-encoded, in a worker instead of on the window's main thread (40–215 ms of main-thread work per 5K image fell to 2–10 ms in headless Chrome). Sizes, types and thresholds are unchanged; PNG output is byte-identical and JPEG output differs very slightly (46–51 dB PSNR).
-- Heavy terminal output, measured live (`seq 1 400000`, two runs each): the renderer peaked at 204–240% of a core and used about 1.3–2.1 CPU-seconds on stock ChatGPT, against 70–76% and 0.3–0.7 CPU-seconds with Codex++.
 - Output from a running command updates the thread as a change to that command only, as streamed reply text already does, instead of as a change to the whole conversation 20 times a second (about 0.39 to 0.04 ms per flush in a measured long thread).
-- The "Restart to update" pulse fades a pre-painted layer with opacity, which the compositor animates, instead of restyling and repainting the button every frame for as long as an update waits; it pauses while the window is in the background. The OpenAI-logo loading sweep slides a gradient painted once instead of animating its background position.
-- The pet window's "thinking" shimmers move again: that window can never take focus, so Codex++'s shimmer replacement treated it as permanently in the background. It now leaves that window's shimmers as stock.
-- When macOS denies access to Chrome's profile folder, the Chrome extension check retries after 1 minute, doubling up to 1 hour, and at once when the app becomes active again, instead of on every launch step and window focus; the warning is logged once per episode (900 lines in three days in one Mac's logs).
-- Token usage, goal and environment updates for a thread are applied only in windows that have it loaded, which stops "Conversation state not found" errors in hidden windows. IPC clients no longer log a warning for the router's client-status and connection-reset notices they receive by design (2,639 lines in three days), and the harmless ResizeObserver loop notice is no longer reported as a global error (296).
-- Empty Trash in the Library stops listing when the server repeats a cursor or after 200 pages, like Empty Trash in a Space.
-- Home suggestions are no longer generated each time ChatGPT goes to the background, and run at low reasoning effort instead of medium. The home view still refreshes them when you leave it, from its refresh button and after connecting a plugin.
-- Thread switching: opening a thread that is not loaded requests four independent setup reads together instead of one after another (224 → 96 ms with 30 ms per request in a harness); the last 10 threads ChatGPT unsubscribes keep their turns, so reopening one shows its transcript at once while it resumes; code blocks keep their highlighting and messages their parsed markdown when you switch back (up to 300 blocks and 1,000 messages). Measured live with scripted switches between four real threads (16–620 MB of history), first opens used about 0.5–1.5 s of app-server time against 5.5–6.3 s on stock; switching back to a loaded thread still costs about 300 ms of main-thread work on both, because ChatGPT rebuilds the whole transcript each time.
-- Development builds turn on ChatGPT's own page retention (built in but switched off by server config) to keep the last three threads mounted; it showed no measured gain yet and is not in release builds.
-- Typing: the composer converts a draft to markdown once per edit instead of about five times, including pasted text, and its text reads and plain-text conversion are kept per edit. Measured live with a pasted 5,000-character markdown draft: 10.0–10.6 ms of renderer time per keystroke against 11.0–11.9 ms on stock; most of the rest is ProseMirror's own DOM update, React and layout.
-- Space Pages: the Highlight-block check no longer walks into every paragraph and text node on each edit; sidebar search builds each query word's matcher once instead of once per page and field (about 40% less per keystroke in node); Library and Space grids keep one resize observer per grid and skip re-rendering animated grids when no card moved. Typing at the end of a 200-item list measured the same live on stock and Codex++ (about 12–13 ms of renderer time per keystroke), so a list-serialisation change that only helped in a node benchmark was left out.
-- Scrolling a thread across the "near the bottom" line no longer gives the scroll context a new identity, so the transcript's readers do not all re-render and re-register their observers each time; only the scroll-to-bottom button updates.
-- Thread descriptions (the keyword summaries an agent sees when it lists your threads, written when a thread is pinned, renamed or created with a title) are written from the thread's title, first request and latest four messages in a small fresh thread, instead of from a copy of the whole thread on another model, which missed the prompt cache: estimated at about 13k input tokens per description (3–5.5k uncached) instead of 99k (90k uncached) on one Mac. A thread with no new turn and the same title reuses its last description, and the full copy is still used when the summaries cannot be read. One Mac's logs also showed Home suggestions at about 314k input tokens per run (85% cached).
-- The composer's catch-up prediction is requested only while it can be shown, not while the composer holds attachments or queued messages or is dictating.
-- Each turn carries the repository's git state (up to 3.9 KB) only when it changed since the thread last received it, and again after the history is compacted or rolled back, instead of on every turn.
 - A streaming code block without a language reuses the language it detected instead of trying every grammar on each update (every 120 ms), detecting again as it grows and once more when it settles.
+
+### Terminal
+
 - The integrated terminal renders with WebGL instead of xterm's DOM renderer, which rebuilt a row of elements for every changed line and pinned the window during heavy output. Codex++ ships the matching renderer (`@xterm/addon-webgl` 0.18.0 for the bundled xterm 5.5) unmodified and loads it once per terminal; without WebGL, or if the GPU context is lost, the terminal goes back to the DOM renderer.
 - A background command's output terminal no longer resets and rewrites itself on every update once its output passes the 16–20 KB cap; only the new lines are written, so it stops flickering and keeps its scroll position.
 - Terminal output is sent from the main process to the window in batches of up to 8 ms instead of one message per pty chunk. The first output after a pause is still immediate, and output always arrives before the exit. The integrated terminal refits at most once per frame when several refits are requested together.
-- Idle Pages: ChatGPT keeps a closed Page's realtime connection for 2 minutes, with no limit on how many, so browsing many pages left many sockets open. At most four idle Page connections are kept; older ones close, and pages with unsaved edits or drafts are never closed early.
-- Expanded folders in the Space sidebar refreshed their child pages every 30 s even while a chat was showing; like the spaces list, they now poll only on Space routes.
-- Empty Trash stops listing deleted pages on a repeated cursor or after 200 pages, instead of following the server's cursor without a limit.
-- Changing a Space's icon or colour while a previous change was still saving lost the second change; it is now saved as soon as the first save succeeds.
+
+### Threads, typing and scrolling
+
+- Thread switching: opening a thread that is not loaded requests four independent setup reads together instead of one after another (224 → 96 ms with 30 ms per request in a harness); the last 10 threads ChatGPT unsubscribes keep their turns, so reopening one shows its transcript at once while it resumes; code blocks keep their highlighting and messages their parsed markdown when you switch back (up to 300 blocks and 1,000 messages). Measured live with scripted switches between four real threads (16–620 MB of history), first opens used about 0.5–1.5 s of app-server time against 5.5–6.3 s on stock; switching back to a loaded thread still costs about 300 ms of main-thread work on both, because ChatGPT rebuilds the whole transcript each time.
+- Typing: the composer converts a draft to markdown once per edit instead of about five times, including pasted text, and its text reads and plain-text conversion are kept per edit. Measured live with a pasted 5,000-character markdown draft: 10.0–10.6 ms of renderer time per keystroke against 11.0–11.9 ms on stock; most of the rest is ProseMirror's own DOM update, React and layout.
+- Scrolling a thread across the "near the bottom" line no longer gives the scroll context a new identity, so the transcript's readers do not all re-render and re-register their observers each time; only the scroll-to-bottom button updates.
+
+### Model usage
+
+- Home suggestions are no longer generated each time ChatGPT goes to the background, and run at low reasoning effort instead of medium. The home view still refreshes them when you leave it, from its refresh button and after connecting a plugin.
+- Thread descriptions (the keyword summaries an agent sees when it lists your threads, written when a thread is pinned, renamed or created with a title) are written from the thread's title, first request and latest four messages in a small fresh thread, instead of from a copy of the whole thread on another model, which missed the prompt cache: estimated at about 13k input tokens per description (3–5.5k uncached) instead of 99k (90k uncached) on one Mac. A thread with no new turn and the same title reuses its last description, and the full copy is still used when the summaries cannot be read. One Mac's logs also showed Home suggestions at about 314k input tokens per run (85% cached).
+- The composer's catch-up prediction is requested only while it can be shown, not while the composer holds attachments or queued messages or is dictating.
+- Each turn carries the repository's git state (up to 3.9 KB) only when it changed since the thread last received it, and again after the history is compacted or rolled back, instead of on every turn.
+
+### Remote connections
+
+- Waking the Mac no longer drops working remote connections. The websocket keep-alive dropped a socket once 60 s passed without a pong, and its timer stops while the Mac sleeps, so the first tick after a wake counted the whole sleep as silence and dropped the ChatGPT (`durable`) app-server connection even when it still worked; every open thread then resynced and its stream restarted. A tick that comes more than two intervals late now pings first and allows 5 s for the answer, so a dead socket is still dropped within about 10 s of a wake (it took 60 s before) and a live one is kept. In the logs of one Mac, 13 of 29 pong timeouts came within two minutes of a wake: 3 dropped the socket within 2 s of waking and 10 took 59–69 s to notice a dead one.
 - Warnings the app-server writes to stderr are no longer recorded as connection errors and broadcast to every window while the host stays connected (hundreds of times in two days in one Mac's logs); the last line is still reported if the process exits.
 - The remote-control websocket backs off between reconnect attempts (1 s doubling to 30 s, with jitter) instead of re-enrolling and retrying every second.
 - ChatGPT live updates reconnect sooner after an outage: the retry delay is capped at 60 s (it grew without limit), and focusing the window or the network coming back reconnects at once.
 - After a websocket reconnect, the conversation on screen starts resuming at once instead of waiting for the full recent-threads refresh.
 - The Remote Connections settings page no longer refreshes its connection lists every 15 s while the window is hidden.
+
+### Space
+
+- Empty Trash in the Library stops listing when the server repeats a cursor or after 200 pages, like Empty Trash in a Space.
+- Space Pages: the Highlight-block check no longer walks into every paragraph and text node on each edit; sidebar search builds each query word's matcher once instead of once per page and field (about 40% less per keystroke in node); Library and Space grids keep one resize observer per grid and skip re-rendering animated grids when no card moved. Typing at the end of a 200-item list measured the same live on stock and Codex++ (about 12–13 ms of renderer time per keystroke), so a list-serialisation change that only helped in a node benchmark was left out.
+- Idle Pages: ChatGPT keeps a closed Page's realtime connection for 2 minutes, with no limit on how many, so browsing many pages left many sockets open. At most four idle Page connections are kept; older ones close, and pages with unsaved edits or drafts are never closed early.
+- Expanded folders in the Space sidebar refreshed their child pages every 30 s even while a chat was showing; like the spaces list, they now poll only on Space routes.
+- Empty Trash stops listing deleted pages on a repeated cursor or after 200 pages, instead of following the server's cursor without a limit.
+- Changing a Space's icon or colour while a previous change was still saving lost the second change; it is now saved as soon as the first save succeeds.
+
+### Startup, MCP, plugins and graphics
+
+- At startup ChatGPT listed every MCP server twice in a row: each window start replays the app-server's initialization message, and the replay made the app fetch the full MCP list again right after the first fetch. A replay that repeats what the window already has no longer triggers the second fetch.
+- Images attached to a ChatGPT conversation are sized, and above 2048 px or 1 MB scaled and re-encoded, in a worker instead of on the window's main thread (40–215 ms of main-thread work per 5K image fell to 2–10 ms in headless Chrome). Sizes, types and thresholds are unchanged; PNG output is byte-identical and JPEG output differs very slightly (46–51 dB PSNR).
+- The "Restart to update" pulse fades a pre-painted layer with opacity, which the compositor animates, instead of restyling and repainting the button every frame for as long as an update waits; it pauses while the window is in the background. The OpenAI-logo loading sweep slides a gradient painted once instead of animating its background position.
+- The pet window's "thinking" shimmers move again: that window can never take focus, so Codex++'s shimmer replacement treated it as permanently in the background. It now leaves that window's shimmers as stock.
+- When macOS denies access to Chrome's profile folder, the Chrome extension check retries after 1 minute, doubling up to 1 hour, and at once when the app becomes active again, instead of on every launch step and window focus; the warning is logged once per episode (900 lines in three days in one Mac's logs).
+
+### Stability and logs
+
+- Token usage, goal and environment updates for a thread are applied only in windows that have it loaded, which stops "Conversation state not found" errors in hidden windows. IPC clients no longer log a warning for the router's client-status and connection-reset notices they receive by design (2,639 lines in three days), and the harmless ResizeObserver loop notice is no longer reported as a global error (296).
 - Re-registering a Browser sidebar window with the same owner no longer records a debug event and writes a log line on every browser-panel request (30,036 identical lines in two days in one Mac's logs, up to 138 a second).
 - The startup probe no longer exits the moment Electron is ready. Chromium's utility processes were still starting then, and one would trap without its parent and leave a "Codex (Service)" crash report (8 in two days on one Mac). It now lets them finish starting and quits in order.
+
+### Codex++
+
+- The startup adapter walks each module's syntax tree once instead of once per edit: 46 s fell to 12 s on build 20398, with byte-identical output. Past the 60 s discovery limit the patch had installed without any startup edits.
+- When startup discovery times out or crashes it is retried once with a 180 s deadline; if it still fails, the patch or upgrade stops and the installed app is unchanged, instead of installing without startup speed-ups. The helper menu warns "Startup Speed-ups: Not Applied" when the installed patch has no discovery report, and the report records how long discovery took.
+- `scripts/review-build.py` reviews a new ChatGPT build in one command through the same discovery code patching uses: every edit of every adapter applied or skipped with a diagnosis, timings, and a diff against the last reviewed build that fails when a release edit stops applying (docs/reviewing-a-new-build.md).
+- Development builds turn on ChatGPT's own page retention (built in but switched off by server config) to keep the last three threads mounted; it showed no measured gain yet and is not in release builds.
 
 ## 2.0.0 — 2026-10-14
 
