@@ -6,5 +6,7 @@ extension StartupAdapter {
 }
 
 extension StartupStatus {
-    static let turnsLabels: [String: String] = [:]
+    static let turnsLabels: [String: String] = [
+        "commandOutputItemContentOnly": "Lighter command output updates",
+    ]
 }

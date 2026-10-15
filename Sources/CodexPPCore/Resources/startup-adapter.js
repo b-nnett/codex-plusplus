@@ -1488,6 +1488,55 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
     // ===== turns lane: streaming turn state: rebuilding turn items and applying output deltas per frame. =====
     // (Edits of this lane go between these markers.)
+
+    // commandOutputItemContentOnly: a running command's output reaches the
+    // thread store in a batch every 50 ms (applyOutputDeltas). The batch is
+    // applied without saying what it changed, so the store records an Immer
+    // patch list for it, derives the invalidation from the patches, compares
+    // every subscribed thread and turn field, and reports a conversation-wide
+    // change: the window then bumps the conversation's version, and every
+    // selector over the whole conversation (all turns, the latest turn, item
+    // counts) runs again, twenty times a second for as long as the command
+    // prints. Streamed message text (applyFrameTextDeltas) already tells the
+    // store that only item content of the latest turn changed; command output
+    // now does the same: when the conversation has a loaded latest turn that
+    // holds every command in the batch, the update names that turn and those
+    // items. The store applies it without patches and notifies only those
+    // items and that turn (the transcript update, with its text edits, is the
+    // same as before). Any other batch is applied exactly as before.
+    if (trees.shared) {
+      const outputs = [];
+      walk(trees.shared, (node, ancestors) => {
+        if (!member(node, 'updateConversationState') || node.arguments.length !== 3) return;
+        const [id, update, options] = node.arguments;
+        if (id.type !== 'Identifier' || update.type !== 'ArrowFunctionExpression' || options.type !== 'ObjectExpression') return;
+        const keys = options.properties.map(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier' ? p.key.name : null);
+        if (keys.length !== 2 || !keys.includes('broadcastPatchesToFollowers') || !keys.includes('acceptedTranscriptText')) return;
+        const method = [...ancestors].reverse().find(a => a.type === 'MethodDefinition');
+        if (method?.key.type !== 'Identifier' || method.key.name !== 'applyOutputDeltas') return;
+        const body = sources.shared.slice(update.body.start, update.body.end);
+        if (!body.includes('`commandExecution`') || !body.includes('aggregatedOutput')) return;
+        // for (let [conversationId, deltas] of byConversation) { let conversation = this.threadStore.conversations.get(conversationId); ... }
+        const loop = [...ancestors].reverse().find(a => a.type === 'ForOfStatement');
+        const pattern = loop?.left.type === 'VariableDeclaration' ? loop.left.declarations[0]?.id : null;
+        if (pattern?.type !== 'ArrayPattern' || pattern.elements.length !== 2 || !pattern.elements.every(e => e?.type === 'Identifier')) return;
+        if (pattern.elements[0].name !== id.name || loop.body.type !== 'BlockStatement') return;
+        const first = loop.body.body[0]?.type === 'VariableDeclaration' ? loop.body.body[0].declarations[0] : null;
+        if (first?.id.type !== 'Identifier' || !member(first.init, 'get') || first.init.arguments[0]?.type !== 'Identifier' || first.init.arguments[0].name !== id.name ||
+            first.init.callee.object.type !== 'MemberExpression' || first.init.callee.object.property.name !== 'conversations') return;
+        outputs.push({ options, conversation: first.id.name, deltas: pattern.elements[1].name });
+      });
+      record('commandOutputItemContentOnly', 'shared', outputs, ({ options, conversation, deltas }) => ({ start: options.end - 1, end: options.end - 1,
+        text: `,${marker}...((ppOutputConversation,ppOutputDeltas)=>{try{const ppOutputHistory=ppOutputConversation?.turnHistory;` +
+          `if(ppOutputHistory?.kind!=="canonical"||!Array.isArray(ppOutputDeltas))return{};const ppOutputIsland=ppOutputHistory.history?.islands?.at(-1);` +
+          `if(ppOutputIsland?.newerBoundary?.status!=="exhausted")return{};const ppOutputKey=ppOutputIsland.entries?.at(-1)?.value,` +
+          `ppOutputTurn=ppOutputKey==null?null:ppOutputHistory.history.entitiesByKey?.[ppOutputKey];if(ppOutputTurn==null||!Array.isArray(ppOutputTurn.items))return{};` +
+          `const ppOutputItems=[];for(const ppOutputDelta of ppOutputDeltas){if(ppOutputDelta?.turnId!=null&&ppOutputDelta.turnId!==ppOutputTurn.turnId)return{};` +
+          `if(!ppOutputTurn.items.some(ppOutputItem=>ppOutputItem?.id===ppOutputDelta.itemId&&ppOutputItem.type==="commandExecution"))return{};` +
+          `ppOutputItems.push({entityKey:ppOutputKey,itemId:ppOutputDelta.itemId})}` +
+          `return ppOutputItems.length===0?{}:{knownHistoryInvalidation:{type:"entityKeys",entityKeys:[ppOutputKey]},knownChangedItems:ppOutputItems}}catch{return{}}})(${conversation},${deltas})` }));
+    } else skipped.commandOutputItemContentOnly = 'module not found';
+
     // ===== end of turns lane =====
 
 
