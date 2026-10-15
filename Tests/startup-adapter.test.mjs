@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'capIdlePageSessions', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'pubsubReconnectCap', 'queryTimings', 'queuedAppearanceChange', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'terminalOutputAppend', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['ambientSuggestionsLowEffort', 'ambientSuggestionsOnDemand', 'appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'cachedAutoHighlightLanguage', 'capIdlePageSessions', 'catchUpPredictionWhenShown', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'gitStateWhenChanged', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'pubsubReconnectCap', 'queryTimings', 'queuedAppearanceChange', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'terminalOutputAppend', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -1065,4 +1065,152 @@ test('pty output is batched per session, in order, and always delivered before t
   const early = new sandbox.M(); early.getSessionForBackend = () => null;
   const pending = early.make(); pending.onData('boot'); pending.onData(' log'); pending.onExit({code: 1, signal: null});
   assert.equal(early.log.length, 0);
+});
+
+test('home suggestions are no longer generated when the app goes to the background', () => {
+  const main = 'function Ste({appEvent:e,startupPhases:s,run:_}){let d,v=e.subscribe(e=>{switch(e.type){case`background`:if(!s.hasReached(`background_ready`)){' +
+    'd?.dispose(),d=ii({startupPhases:s,phase:`background_ready`,start:()=>{d=void 0,_(`background`)}});return}_(e.type);return;' +
+    'case`foreground`:d?.dispose(),d=void 0;return;case`turnComplete`:return}});return v}' +
+    'function Other(e,x){e.subscribe(e=>{switch(e.type){case`background`:x.handleBackground();break;case`foreground`:x.handleForeground()}})}';
+  const {main: patched, applied} = adapt({main});
+  assert.equal(applied.ambientSuggestionsOnDemand, 'main');
+  const run = source => {
+    const runs = [], handled = [], listeners = [];
+    const sandbox = {ii: ({start}) => (start(), {dispose() {}})};
+    vm.runInNewContext(source + ';this.Ste=Ste;this.Other=Other;', sandbox);
+    const appEvent = {subscribe: f => (listeners.push(f), {dispose() {}})};
+    sandbox.Ste({appEvent, startupPhases: {hasReached: () => true}, run: t => runs.push(t)});
+    sandbox.Other(appEvent, {handleBackground: () => handled.push('background'), handleForeground: () => handled.push('foreground')});
+    for (const type of ['background', 'foreground', 'turnComplete', 'background']) for (const f of listeners) f({type});
+    return {runs, handled};
+  };
+  assert.deepEqual(run(main).runs, ['background', 'background'], 'stock: every trip to the background generates');
+  const quiet = run(patched);
+  assert.deepEqual(quiet.runs, []);
+  assert.deepEqual(quiet.handled, ['background', 'foreground', 'background'], 'other background listeners are untouched');
+});
+
+test('home suggestions are generated at low reasoning effort', async () => {
+  const ambient = 'async function Or({mode:f=`default`},d,n){let o=f===`first-plugin-connect`?d.ephemeralGenerationModel:d.ambientSuggestionsModel,' +
+    'u=f===`first-plugin-connect`?`low`:n.pa;return{model:o,effort:u}}';
+  const {ambient: patched, applied} = adapt({ambient});
+  assert.equal(applied.ambientSuggestionsLowEffort, 'ambient');
+  const sandbox = {};
+  vm.runInNewContext(patched + ';this.Or=Or;', sandbox);
+  const routing = {ephemeralGenerationModel: 'eph', ambientSuggestionsModel: 'amb'}, n = {pa: 'medium'};
+  assert.deepEqual({...await sandbox.Or({}, routing, n)}, {model: 'amb', effort: 'low'});
+  assert.deepEqual({...await sandbox.Or({mode: 'first-plugin-connect'}, routing, n)}, {model: 'eph', effort: 'low'}, 'the model choice is unchanged');
+});
+
+test('the catch-up prediction query runs only while the composer can show a prediction', () => {
+  const primary = 'function ZXe(e){let{controller:n,canShowPrediction:r,hostId:i}=e,s=scope,c=target,u;u=[`cumberbatch`,c];let d=()=>fetches.push(c),f;' +
+    'f={queryKey:u,queryFn:d,staleTime:1/0,gcTime:0,retry:!1,networkMode:`always`,refetchOnWindowFocus:!0};let{data:p}=Sm(f,s.queryClient);return r?p??null:null}';
+  const {primary: patched, applied} = adapt({primary});
+  assert.equal(applied.catchUpPredictionWhenShown, 'primary');
+  const run = (source, canShowPrediction) => {
+    const fetches = [], seen = [];
+    // A minimal useQuery: a disabled query does not fetch.
+    const sandbox = {fetches, scope: {queryClient: {}}, target: 't1', Sm: options => (seen.push(options.enabled), options.enabled !== false && options.queryFn(), {data: 'next'})};
+    vm.runInNewContext(source + ';this.ZXe=ZXe;', sandbox);
+    const shown = sandbox.ZXe({canShowPrediction});
+    return {fetches: [...fetches], seen: [...seen], shown};
+  };
+  assert.deepEqual(run(primary, false).fetches, ['t1'], 'stock: fetched although it cannot be shown');
+  assert.deepEqual(run(patched, false), {fetches: [], seen: [false], shown: null});
+  assert.deepEqual(run(patched, true), {fetches: ['t1'], seen: [true], shown: 'next'});
+  assert.deepEqual(run(patched, undefined).fetches, ['t1'], 'without the flag the query runs as before');
+});
+
+test('git state is added to a turn only when it differs from the copy the thread already has', async () => {
+  const shared = 'async function pri(e,t,n,r){let a=t.getConversation(n);if(a==null)return r;let g=await e.read(n,r);' +
+    'return g==null?r:{...r,additionalContext:{...r.additionalContext,codex_git_state:{kind:`untrusted`,value:m3(g)}}}}' +
+    'function m3(e){return`<git>${e}</git>`}' +
+    'function compacted(e,t){e.updateConversationState(t,t=>{delete t.lastInjectedPassiveContextKey})}';
+  const {shared: patched, applied} = adapt({shared});
+  assert.equal(applied.gitStateWhenChanged, 'shared');
+  let branch = 'main', clock = 0;
+  const state = {latestTurnStartMessageId: null};
+  const manager = {getConversation: id => id === 'c' ? state : null, updateConversationState: (id, f) => f(state)};
+  const reader = {read: (n, r) => JSON.stringify({schemaVersion: 1, threadId: n, clientUserMessageId: r.clientUserMessageId, status: 'complete', capturedAt: `t${clock++}`, branch})};
+  const sandbox = {};
+  vm.runInNewContext(patched + ';this.pri=pri;this.compacted=compacted;', sandbox);
+  const send = async (id, started = true) => {
+    const request = await sandbox.pri(reader, manager, 'c', {threadId: 'c', clientUserMessageId: id, additionalContext: {other: 1}});
+    assert.equal(request.additionalContext.other, 1, 'other context is kept');
+    if (started) state.latestTurnStartMessageId = id;
+    return request.additionalContext.codex_git_state != null;
+  };
+  assert.equal(await send('m1'), true, 'the first turn carries it');
+  assert.equal(await send('m2'), false, 'unchanged (apart from its timestamp and message id)');
+  branch = 'feature';
+  assert.equal(await send('m3'), true, 'changed');
+  assert.equal(await send('m4'), false);
+  branch = 'main';
+  assert.equal(await send('m5', false), true);
+  assert.equal(await send('m6', false), true, 'again when the turn that carried it never started');
+  assert.equal(await send('m6'), true, 'and when the same message is prepared again');
+  assert.equal(await send('m7'), false);
+  sandbox.compacted(manager, 'c');
+  assert.equal(await send('m8'), true, 'after a compaction or rollback');
+  assert.equal(await send('m9'), false);
+  delete sandbox.__codexPPGitStateSession;
+  assert.equal(await send('m10'), true, 'after a reload');
+  // Without the state API, or with an unreadable value, every turn carries it as before.
+  const bare = {getConversation: manager.getConversation};
+  for (let i = 0; i < 2; i++) assert.ok((await sandbox.pri(reader, bare, 'c', {clientUserMessageId: `b${i}`})).additionalContext.codex_git_state);
+  const odd = {read: () => 'not json'};
+  for (let i = 0; i < 2; i++) assert.ok((await sandbox.pri(odd, manager, 'c', {clientUserMessageId: `o${i}`})).additionalContext.codex_git_state);
+});
+
+test('a streaming code block without a language reuses its detected language', async () => {
+  const shared = 'function Mqi(fe,Rqi,me){return()=>{let e=me.current;let t=e.latestContent,n=e.latestLanguage;e.lastStartedAtMs=0,' +
+    'Rqi().then(r=>{e.disposed||r==null||fe(r.highlightCode(t,n))})}}';
+  const {shared: patched, applied} = adapt({shared});
+  assert.equal(applied.cachedAutoHighlightLanguage, 'shared');
+  const run = source => {
+    const calls = [], results = [], timers = [];
+    const module = {highlightCode: (code, language) => {
+      const named = language?.trim().toLowerCase();
+      calls.push(named || 'auto');
+      return {code, html: `<${named || 'auto'}>`, language: named || (code.startsWith('?') ? undefined : 'python')};
+    }};
+    const sandbox = {Promise, setTimeout: f => timers.push(f), clearTimeout: () => timers.splice(0)};
+    vm.runInNewContext(source + ';this.Mqi=Mqi;', sandbox);
+    const ref = {current: {disposed: false, latestContent: '', latestLanguage: undefined}};
+    const highlight = sandbox.Mqi(result => results.push(result), () => Promise.resolve(module), ref);
+    return {calls, results, timers, ref, async show(content, language) {
+      ref.current.latestContent = content; ref.current.latestLanguage = language; highlight(); await new Promise(resolve => setTimeout(resolve, 0));
+    }};
+  };
+  const stock = run(shared);
+  for (const content of ['def a', 'def a():', 'def a():\n  pass']) await stock.show(content);
+  assert.deepEqual(stock.calls, ['auto', 'auto', 'auto']);
+  const cached = run(patched);
+  await cached.show('def a');
+  await cached.show('def a():');
+  assert.deepEqual(cached.calls, ['auto', 'python'], 'the second pass uses the detected grammar');
+  assert.equal(cached.results[1].language, 'python');
+  await cached.show('def a():\n  pass', '');
+  assert.deepEqual(cached.calls, ['auto', 'python', 'auto'], 'detected again once the content doubled');
+  await cached.show('def a():\n  pass\n');
+  assert.equal(cached.timers.length, 1);
+  cached.timers[0]();
+  assert.deepEqual(cached.calls, ['auto', 'python', 'auto', 'python', 'auto'], 'and once more when the content settles');
+  assert.equal(cached.results.at(-1).html, '<auto>');
+  // An explicit language is highlighted exactly as before.
+  const named = run(patched);
+  for (const content of ['fn a', 'fn a()', 'fn a() {}']) await named.show(content, 'Rust');
+  assert.deepEqual(named.calls, ['rust', 'rust', 'rust']);
+  assert.equal(named.timers.length, 0);
+  // Content that auto-detection left as plain text stays plain text.
+  const plain = run(patched);
+  await plain.show('? a');
+  await plain.show('? a b');
+  assert.deepEqual(plain.calls, ['auto', 'plaintext']);
+  assert.equal(plain.results[1].language, undefined);
+  // A block replaced by different content is detected afresh.
+  const replaced = run(patched);
+  await replaced.show('def a():');
+  await replaced.show('x');
+  assert.deepEqual(replaced.calls, ['auto', 'auto']);
 });

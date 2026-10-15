@@ -11,7 +11,7 @@ public enum StartupAdapter {
         public let applied: [String: String]
         public let skipped: [String: String]
     }
-    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let appServer: String?; let remoteSettings: String?; let xtermOutput: String?; let terminalPanel: String?; let css: [String: String]? }
+    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let appServer: String?; let remoteSettings: String?; let xtermOutput: String?; let terminalPanel: String?; let primary: String?; let ambient: String?; let css: [String: String]? }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
         do {
@@ -35,7 +35,7 @@ public enum StartupAdapter {
             let remoteSettings = try module("remote-connections-settings-")
             // The app-server connection and remote-control websocket live in one
             // of several .vite/build/src-* chunks.
-            let appServer: (String, String)? = try {
+            func buildModule(containing markers: [String]) throws -> (String, String)? {
                 let paths = try archive.packedFiles(in: ".vite/build").filter {
                     let name = URL(fileURLWithPath: $0).lastPathComponent
                     return name.hasPrefix("src-") && name.hasSuffix(".js")
@@ -43,11 +43,18 @@ public enum StartupAdapter {
                 let matches = try paths.compactMap { path -> (String, String)? in
                     let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
                     guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
-                          source.contains("(`AppServerConnection`)") else { return nil }
+                          markers.allSatisfy(source.contains) else { return nil }
                     return (path, source)
                 }
                 return matches.count == 1 ? matches[0] : nil
-            }()
+            }
+            let appServer = try buildModule(containing: ["(`AppServerConnection`)"])
+            // The composer (its catch-up prediction query).
+            let primary = try module("app-primary-")
+            // The main-process ambient suggestions generator, in one of the src-* chunks.
+            // When it is the app-server chunk, its edit is made through that input.
+            let ambientCandidate = try buildModule(containing: ["ambientSuggestionsModel", "first-plugin-connect"])
+            let ambient = ambientCandidate?.0 == appServer?.0 ? nil : ambientCandidate
             // The background-command output terminal, and the integrated terminal
             // (two chunks share its prefix; only one holds the panel).
             let xtermOutput = try module("xterm-output-panel-")
@@ -118,6 +125,8 @@ public enum StartupAdapter {
             if let appearance { input["appearance"] = appearance.1 }
             if let xtermOutput { input["xtermOutput"] = xtermOutput.1 }
             if let terminalPanel { input["terminalPanel"] = terminalPanel.1 }
+            if let primary { input["primary"] = primary.1 }
+            if let ambient { input["ambient"] = ambient.1 }
             if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
             // Every stylesheet, for the viewport container-query rewrite.
             var stylesheets: [String: String] = [:]
@@ -141,6 +150,8 @@ public enum StartupAdapter {
             if let source = output.appearance, let appearance { result.append((appearance.0, Data(source.utf8))) }
             if let source = output.xtermOutput, let xtermOutput { result.append((xtermOutput.0, Data(source.utf8))) }
             if let source = output.terminalPanel, let terminalPanel { result.append((terminalPanel.0, Data(source.utf8))) }
+            if let source = output.primary, let primary { result.append((primary.0, Data(source.utf8))) }
+            if let source = output.ambient, let ambient { result.append((ambient.0, Data(source.utf8))) }
             for (path, source) in output.css ?? [:] where stylesheets[path] != nil { result.append((path, Data(source.utf8))) }
             return Result(replacements: result, applied: output.applied, skipped: output.skipped)
         } catch {
@@ -198,6 +209,9 @@ public struct StartupStatus: Equatable, Sendable {
         "pubsubReconnectCap": "Prompt ChatGPT live-update reconnects", "resumeVisibleThreadFirst": "Open thread resumed first after reconnect",
         "remoteSettingsPollWhenVisible": "Remote Connections refresh only while visible", "quietSidebarRebind": "Quieter Browser sidebar log",
         "terminalOutputAppend": "Background terminal output without rewrites", "coalescedTerminalResize": "One terminal refit per frame", "batchedPtyOutput": "Batched terminal output",
+        "ambientSuggestionsOnDemand": "Home suggestions only when visited", "ambientSuggestionsLowEffort": "Low-effort home suggestions",
+        "catchUpPredictionWhenShown": "Catch-up predictions only when shown", "gitStateWhenChanged": "Git state only when changed",
+        "cachedAutoHighlightLanguage": "Cached code language while streaming",
     ]
     public let active: [String]
     /// Speed-ups that did not match this build, with the adapter's reason.
