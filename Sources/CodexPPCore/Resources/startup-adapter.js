@@ -1486,6 +1486,11 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     // ===== end of turns lane =====
 
 
+    // ===== gpu lane: visual work done on the CPU that the compositor can do (animations, sprites, masks). =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of gpu lane =====
+
+
     // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
     // (Edits of this lane go between these markers.)
     // ===== end of hygiene lane =====
