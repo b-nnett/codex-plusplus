@@ -1478,6 +1478,181 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
     // ===== streaming lane: streaming replies: per-frame rendering of the message being streamed and its turn. =====
     // (Edits of this lane go between these markers.)
+
+    // streamingBlockCache: while a reply streams, every frame (up to 60 a
+    // second) turns the whole markdown token list back into React elements,
+    // one plain function call per token, and React then compares the whole
+    // tree again, so a frame costs more the longer the reply gets. Blocks
+    // before the last blank-line boundary are already reused as the same token
+    // objects from frame to frame (the streaming lexer's prefix cache). The
+    // top-level loop of the markdown renderer now keeps, for the message being
+    // streamed, the elements it built for such a block and hands back the very
+    // same elements while nothing that went into them has changed; React skips
+    // an identical element without rendering or comparing anything below it.
+    // "Nothing changed" means: the same token object, the same React key and
+    // code-block number, the same renderer options and components, the same
+    // fade inputs of every token inside it (segment keys, start indices,
+    // segment parts), and every word of the block has finished fading in (a
+    // block whose words are still fading is rebuilt every frame as before).
+    // Blocks with directives, the last block and anything rendered after the
+    // stream ends (the reply is lexed afresh) are always rebuilt.
+    if (trees.initial) {
+      const src = sources.initial;
+      const names = node => node.type === 'Identifier' ? node.name : null;
+      // Inserted at the top level before the renderer's loop.
+      // - ppStreamBlockMark tags the streaming view's renderText function (a new
+      //   one each frame) with that frame's tokens, fade data, fade timeline and
+      //   the values its text renderers were memoised on. The block cache lives
+      //   per fade timeline (one per mounted view) and is dropped when the view
+      //   renders without streaming.
+      // - ppStreamBlockFade checks a block's fade inputs. The fade data numbers
+      //   every word of the message in order and keys them in one array (msl
+      //   now returns it as ppSegmentKeys); a block's words are one contiguous
+      //   run of it, and everything else the fade renderers read (start indices,
+      //   per-token keys, list-bullet keys, delays of settled words) follows from
+      //   that run, the token and the fade timeline. A cached block is valid while
+      //   its first word has the same index and the run holds the same keys,
+      //   all of which had settled when it was cached (settling is one-way and a
+      //   settled word's delay never changes).
+      // - ppStreamBlock is the loop's per-token render call.
+      const streamingBlockCacheRuntime = String.raw`function ppStreamBlockStore(){return ppStreamBlockStore.s??={views:new WeakMap,caches:new WeakMap,last:null,
+skip:new Set(["lastBlockToken","nextCodeBlockIndex","nextDirectiveId","renderTokens","renderInlineTokens","renderText","getListItemDecorationProps","streamingTokenKeys","openCodeFenceToken","trailingContent"]),
+shallow:new Set(["components","directives"])}}
+function ppStreamBlockMark(ppRender,ppOn,ppTokens,ppFade,ppTimeline,ppDeps){try{let ppS=ppStreamBlockStore();if(typeof ppRender!="function"||ppTimeline==null||typeof ppTimeline!="object")return ppRender;
+if(ppOn&&Array.isArray(ppTokens)){let ppCache=ppS.caches.get(ppTimeline);ppCache==null&&ppS.caches.set(ppTimeline,ppCache=new WeakMap);
+ppS.views.set(ppRender,{cache:ppCache,ctx:null,deps:ppDeps,desc:null,fade:ppFade??null,timeline:ppTimeline,tokens:ppTokens})}else ppS.views.delete(ppRender),ppS.caches.delete(ppTimeline)}catch{}return ppRender}
+function ppStreamBlockDescribe(ppCtx,ppDeps){let ppS=ppStreamBlockStore(),ppD=[];for(let ppK of Object.keys(ppCtx)){if(ppS.skip.has(ppK))continue;let ppV=ppCtx[ppK];ppD.push(ppK);
+if(ppS.shallow.has(ppK)&&ppV!=null&&typeof ppV=="object"){for(let ppC of Object.keys(ppV))ppD.push(ppC,ppV[ppC]);ppD.push(ppS)}else ppD.push(ppV)}ppD.push(...ppDeps);
+let ppP=ppS.last;if(ppP!=null&&ppP.length===ppD.length){let ppI=0;for(;ppI<ppD.length&&Object.is(ppP[ppI],ppD[ppI]);)ppI++;if(ppI===ppD.length)return ppP}return ppS.last=ppD}
+function ppStreamBlockScan(ppToken,ppView){let ppF=ppView.fade,ppStack=[ppToken],ppFirst=1/0,ppAnchor=null,ppCount=0,ppBullets=[];for(;ppStack.length;){let ppD=ppStack.pop();if(ppD==null||typeof ppD!="object")continue;
+if(ppD.type==="codexDirective")return{never:!0};if(ppF!=null){let ppX=ppF.textByToken?.get(ppD);if(ppX!=null){if(typeof ppX.startIndex!="number"||typeof ppX.segmentCount!="number")return null;
+ppCount+=ppX.segmentCount;ppX.segmentCount>0&&ppX.startIndex<ppFirst&&(ppFirst=ppX.startIndex,ppAnchor=ppD)}let ppL=ppF.listItemDecorationByToken?.get(ppD);ppL!=null&&ppBullets.push(ppL.startIndex)}
+for(let ppList of[ppD.tokens,ppD.items])if(Array.isArray(ppList))for(let ppI=ppList.length-1;ppI>=0;ppI--)ppStack.push(ppList[ppI]);
+if(ppD.type==="table"){if(Array.isArray(ppD.rows))for(let ppI=ppD.rows.length-1;ppI>=0;ppI--)Array.isArray(ppD.rows[ppI])&&ppStack.push(...ppD.rows[ppI]);Array.isArray(ppD.header)&&ppStack.push(...ppD.header)}}
+if(ppF==null)return{fade:!1};if(ppCount===0)return ppBullets.length?null:{count:0,fade:!0};let ppAll=ppF.ppSegmentKeys,ppT=ppView.timeline;
+if(!Array.isArray(ppAll)||ppFirst+ppCount>ppAll.length||typeof ppT.settledKeys?.has!="function")return null;for(let ppB of ppBullets)if(!(ppB>=ppFirst&&ppB<ppFirst+ppCount))return null;
+let ppKeys=ppAll.slice(ppFirst,ppFirst+ppCount);for(let ppK of ppKeys)if(ppK==null||!ppT.settledKeys.has(ppK))return null;return{anchor:ppAnchor,count:ppCount,fade:!0,first:ppFirst,keys:ppKeys}}
+function ppStreamBlockFade(ppInfo,ppView){let ppF=ppView.fade;if(ppF==null)return ppInfo.fade===!1;if(ppInfo.fade!==!0)return!1;if(ppInfo.count===0)return!0;
+if(ppF.textByToken?.get(ppInfo.anchor)?.startIndex!==ppInfo.first)return!1;let ppAll=ppF.ppSegmentKeys,ppKeys=ppInfo.keys,ppFirst=ppInfo.first;
+if(!Array.isArray(ppAll)||ppAll.length<ppFirst+ppKeys.length)return!1;for(let ppI=0;ppI<ppKeys.length;ppI++)if(ppAll[ppFirst+ppI]!==ppKeys[ppI])return!1;return!0}
+function ppStreamBlock(ppRender,ppList,ppToken,ppKey,ppCtx){let ppView=null,ppEntry=null,ppStart=0;try{ppView=typeof ppCtx?.renderText=="function"?ppStreamBlockStore().views.get(ppCtx.renderText)??null:null;
+if(ppView!=null&&ppView.tokens===ppList&&ppToken!=null&&typeof ppToken=="object"&&ppToken!==ppCtx.lastBlockToken&&(ppView.fade==null||ppCtx.streamingTokenKeys===ppView.fade.streamingTokenKeys)&&typeof ppCtx.nextCodeBlockIndex=="number"){
+ppView.ctx!==ppCtx&&(ppView.ctx=ppCtx,ppView.desc=ppStreamBlockDescribe(ppCtx,ppView.deps));ppStart=ppCtx.nextCodeBlockIndex;ppEntry=ppView.cache.get(ppToken)??null;
+if(ppEntry?.never)ppView=null;else if(ppEntry!=null&&!ppStreamBlockFade(ppEntry.info,ppView))ppEntry=null;
+else if(ppEntry!=null&&ppEntry.key===ppKey&&ppEntry.desc===ppView.desc&&ppEntry.start===ppStart&&ppEntry.open===(ppCtx.openCodeFenceToken===ppToken)&&ppEntry.out!==void 0)return ppCtx.nextCodeBlockIndex=ppStart+ppEntry.codes,ppEntry.out}else ppView=null}catch{ppView=null}
+let ppOut=ppRender(ppToken,ppKey,ppCtx);if(ppView!=null)try{let ppInfo=ppEntry?.info??ppStreamBlockScan(ppToken,ppView);
+ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,ppInfo):typeof ppCtx.nextCodeBlockIndex=="number"&&ppView.cache.set(ppToken,{codes:ppCtx.nextCodeBlockIndex-ppStart,desc:ppView.desc,info:ppInfo,key:ppKey,open:ppCtx.openCodeFenceToken===ppToken,out:ppOut,start:ppStart})}catch{}return ppOut}
+`;
+      // The markdown renderer's top-level loop:
+      // function h(e,t){let n=[],r=new Map;for(let i=0;i<e.length;i+=1){let a=e[i],o=key(a,`root`,r,t.streamingTokenKeys);...;n.push(...arr(render(a,o,t)))}return n}
+      const loops = [];
+      for (const node of trees.initial.body) {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 2 || !node.params.every(p => p.type === 'Identifier')) continue;
+        const [list, ctx] = node.params.map(p => p.name), body = node.body.body;
+        const loop = body.find(s => s.type === 'ForStatement');
+        if (!loop || loop.body.type !== 'BlockStatement' || body.at(-1)?.type !== 'ReturnStatement') continue;
+        const first = loop.body.body[0], last = loop.body.body.at(-1);
+        if (first?.type !== 'VariableDeclaration' || first.declarations.length !== 2) continue;
+        const [tokenDecl, keyDecl] = first.declarations, keyCall = keyDecl.init;
+        if (tokenDecl.init?.type !== 'MemberExpression' || !tokenDecl.init.computed || names(tokenDecl.init.object) !== list ||
+            keyCall?.type !== 'CallExpression' || keyCall.arguments.length !== 4) continue;
+        const [k0, k1, , k3] = keyCall.arguments;
+        if (names(k0) !== names(tokenDecl.id) || !((k1.type === 'Literal' && k1.value === 'root') || (k1.type === 'TemplateLiteral' && k1.quasis.length === 1 && k1.quasis[0].value.cooked === 'root')) ||
+            k3.type !== 'MemberExpression' || names(k3.object) !== ctx || k3.property.name !== 'streamingTokenKeys') continue;
+        const push = last?.type === 'ExpressionStatement' ? last.expression : null;
+        if (!member(push, 'push') || push.arguments.length !== 1 || push.arguments[0].type !== 'SpreadElement') continue;
+        const wrap = push.arguments[0].argument, render = wrap?.arguments?.[0];
+        if (wrap?.type !== 'CallExpression' || wrap.arguments.length !== 1 || render?.type !== 'CallExpression' || render.callee.type !== 'Identifier' ||
+            render.arguments.length !== 3 || render.arguments.map(names).join() !== [names(tokenDecl.id), names(keyDecl.id), ctx].join()) continue;
+        loops.push({ node, render, list, ctx, token: names(tokenDecl.id), key: names(keyDecl.id) });
+      }
+      // The streaming markdown component: memo(function(e){let t=c(103),{adaptiveStreaming:n,...,isStreaming:i,...}=e,...;
+      //   ... (0,jsx)(Root,{...,renderText:Te,streamingTokenKeys:Ae,tokens:fe,...})})
+      const views = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'FunctionExpression' || node.params.length !== 1 || node.params[0].type !== 'Identifier') return;
+        const head = node.body.body[0];
+        const pattern = head?.type === 'VariableDeclaration' ? head.declarations.find(d => d.id.type === 'ObjectPattern' && names(d.init) === node.params[0].name)?.id : null;
+        if (!pattern) return;
+        const prop = Object.fromEntries(pattern.properties.filter(p => p.type === 'Property' && p.key.type === 'Identifier').map(p => [p.key.name, p.value]));
+        if (!prop.adaptiveStreaming || !prop.fadeSegmentMaxDelayMs || prop.isStreaming?.type !== 'Identifier') return;
+        // Names declared at the top level of the component.
+        const top = new Set();
+        for (const p of pattern.properties) {
+          const v = p.type === 'RestElement' ? p.argument : p.value;
+          if (v.type === 'Identifier') top.add(v.name); else if (v.type === 'AssignmentPattern' && v.left.type === 'Identifier') top.add(v.left.name);
+        }
+        for (const s of node.body.body) if (s.type === 'VariableDeclaration') for (const d of s.declarations) if (d.id.type === 'Identifier') top.add(d.id.name);
+        let props = [], textFns = [], listFns = [];
+        walk(node.body, (inner, ancestors) => {
+          if (inner.type === 'ObjectExpression') {
+            const map = Object.fromEntries(inner.properties.filter(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier').map(p => [p.key.name, p]));
+            if (map.renderText && map.streamingTokenKeys && map.tokens && map.getListItemDecorationProps && map.openCodeFenceToken) props.push(map);
+          }
+          if (inner.type === 'ArrowFunctionExpression') {
+            const text = src.slice(inner.start, inner.end);
+            if (/^\([\w$]+,[\w$]+,[\w$]+,[\w$]+\)=>/.test(text) && text.includes('.textByToken.get(') && text.includes('fadeSegmentTimeline:')) textFns.push({ fn: inner, ancestors: [...ancestors] });
+            if (/^[\w$]+=>/.test(text) && text.includes('.listItemDecorationByToken.get(')) listFns.push({ fn: inner, ancestors: [...ancestors] });
+          }
+        });
+        if (props.length !== 1 || textFns.length !== 1 || listFns.length !== 1) return;
+        const [map] = props;
+        if (map.renderText.value.type !== 'Identifier' || map.tokens.value.type !== 'Identifier' || !top.has(map.tokens.value.name)) return;
+        // The fade data (`x?.textByToken.get(n)`) and the fade timeline the renderer passes on.
+        let fade = null, timeline = null;
+        walk(textFns[0].fn.body, n => {
+          if (n.type === 'MemberExpression' && !n.computed && n.property.name === 'textByToken' && n.object.type === 'Identifier') fade = n.object.name;
+          if (n.type === 'Property' && !n.computed && n.key.name === 'fadeSegmentTimeline' && n.value.type === 'Identifier') timeline = n.value.name;
+        });
+        if (!fade || !timeline || !top.has(fade) || !top.has(timeline)) return;
+        // What each fade renderer was memoised on (React Compiler: `t[64]!==P||t[65]!==I||...?(build):reuse`), minus the per-frame fade maps.
+        const depsOf = ({ fn, ancestors }) => {
+          const cond = [...ancestors].reverse().find(a => a.type === 'ConditionalExpression' && a.consequent.start <= fn.start && fn.end <= a.consequent.end);
+          if (!cond) return null;
+          const out = [];
+          const flat = t => {
+            if (t.type === 'LogicalExpression' && t.operator === '||') return flat(t.left) && flat(t.right);
+            if (t.type !== 'BinaryExpression' || t.operator !== '!==' || t.left.type !== 'MemberExpression' || !t.left.computed) return false;
+            let root = t.right.type === 'ChainExpression' ? t.right.expression : t.right;
+            while (root.type === 'MemberExpression' && !root.computed) root = root.object;
+            if (root.type !== 'Identifier' || !top.has(root.name)) return false;
+            const text = src.slice(t.right.start, t.right.end);
+            if (root.name !== fade) out.push(text); else if (!/^[\w$]+\?\.(textByToken|listItemDecorationByToken)$/.test(text)) return false;
+            return true;
+          };
+          return flat(cond.test) && out.length ? out : null;
+        };
+        const textDeps = depsOf(textFns[0]), listDeps = depsOf(listFns[0]);
+        if (!textDeps || !listDeps || !src.slice(listFns[0].fn.start, listFns[0].fn.end).includes(`timeline:${timeline}`)) return;
+        views.push({ renderText: map.renderText.value, tokens: map.tokens.value.name, streaming: prop.isStreaming.name, fade, timeline, deps: [...textDeps, ...listDeps] });
+      });
+      // The fade data builder: function m(e,t,n){let r={listItemDecorationByToken:...,segmentContents:[],...};...;
+      //   let i=keys(r.segmentContents,n);...;return{listItemDecorationByToken:...,streamingTokenKeys:...,textByToken:...}}
+      const fades = [];
+      for (const node of trees.initial.body) {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 3) continue;
+        const body = node.body.body, ret = body.at(-1)?.argument;
+        const state = body[0]?.type === 'VariableDeclaration' && body[0].declarations[0]?.init;
+        const keysOf = o => o?.type === 'ObjectExpression' ? o.properties.map(p => p.key?.name).sort().join() : '';
+        if (body.at(-1)?.type !== 'ReturnStatement' || keysOf(ret) !== 'listItemDecorationByToken,streamingTokenKeys,textByToken' ||
+            keysOf(state) !== 'listItemDecorationByToken,listItemDecorationEntries,segmentContents,streamingTokenKeys,textByToken,textEntries,tokenSegmentEntries') continue;
+        const keyed = body.flatMap(s => s.type === 'VariableDeclaration' ? s.declarations : []).filter(d => d.id.type === 'Identifier' &&
+          d.init?.type === 'CallExpression' && d.init.arguments[0]?.type === 'MemberExpression' && d.init.arguments[0].property.name === 'segmentContents');
+        if (keyed.length === 1) fades.push({ ret, keys: keyed[0].id.name });
+      }
+      if (loops.length === 1 && views.length !== 1) skipped.streamingBlockCache = `expected one streaming markdown view, found ${views.length}`;
+      else if (loops.length === 1 && fades.length !== 1) skipped.streamingBlockCache = `expected one fade data builder, found ${fades.length}`;
+      else record('streamingBlockCache', 'initial', views.length === 1 ? loops : [], ({ node, render, list, ctx, token, key }) => {
+        const [view] = views, [fade] = fades;
+        return [
+          { start: fade.ret.end - 1, end: fade.ret.end - 1, text: `,ppSegmentKeys:${fade.keys}` },
+          { start: node.start, end: node.start, text: `${marker}${streamingBlockCacheRuntime}` },
+          { start: render.start, end: render.end, text: `ppStreamBlock(${render.callee.name},${list},${token},${key},${ctx})` },
+          { start: view.renderText.start, end: view.renderText.end,
+            text: `ppStreamBlockMark(${view.renderText.name},${view.streaming},${view.tokens},${view.fade},${view.timeline},[${view.deps.join(',')}])` }];
+      });
+    } else skipped.streamingBlockCache = 'module not found';
+
     // ===== end of streaming lane =====
 
 
