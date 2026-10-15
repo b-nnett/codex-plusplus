@@ -2717,6 +2717,316 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
 
     // ===== space lane: the Space page editor, page navigation, Library grid and sidebar search. =====
     // (Edits of this lane go between these markers.)
+
+    // commentHighlightsMapped: on a Page with any comment thread (or a draft
+    // comment), a layout effect keyed on the editor's change count rebuilt every
+    // comment highlight after each keystroke: it resolved each thread's Yjs
+    // relative positions to editor positions, walked the whole document for its
+    // text blocks, built a new decoration set and dispatched an extra
+    // transaction (every plugin's apply and a view update) to install it, then
+    // re-rendered the highlight layer. The decoration plugin already maps its
+    // set through each transaction. A rebuilt set is now kept as "exact", and a
+    // mapped set stays a candidate only through a local edit of plain text
+    // inside one non-empty paragraph (the app's own HM test, one step, not a
+    // projection of the shared document) whose changed range, widened to every
+    // position the same text change could be placed at (runs of equal
+    // characters), touches no highlight's start, end or marker. The effect
+    // then still resolves every thread's range from the shared document, as
+    // the rebuild does (an edit can change the block's markdown so that a
+    // range resolves differently or not at all), and keeps the mapped set only
+    // when each thread's range is exactly its mapped highlight; the threads,
+    // drafts, document, markdown converter and view must be those the set was
+    // built for. Then the walk, the new set, the extra transaction and the
+    // view update are skipped, and the highlight layer re-renders as before.
+    // Anything else (structural edits, formatting, remote revisions, thread
+    // changes, a range that resolves differently) rebuilds as before.
+    if (trees.pageContent) {
+      const src = sources.pageContent;
+      let key = null, mapping = null, effect = null, rebuild = null, textOnly = null;
+      walk(trees.pageContent, node => {
+        if (node.type === 'AssignmentExpression' && node.left.type === 'Identifier' && node.right.type === 'NewExpression' && node.right.arguments.length === 1 &&
+            src.slice(node.right.arguments[0].start, node.right.arguments[0].end) === '`spacePageCommentDecorations`') key = key == null ? node.left.name : false;
+        // The app's "edit only changed text in one paragraph" test: (transaction, filter) => steps.every(...).
+        if (node.type === 'FunctionDeclaration' && node.params.length === 2 && node.params.every(p => p.type === 'Identifier')) {
+          const text = src.slice(node.body.start, node.body.end);
+          if (text.startsWith(`{return ${node.params[0].name}.steps.every(`) && text.includes('.slice.openStart!==0||') && text.includes('.slice.content.content.every(') &&
+              text.includes('.parent.isTextblock||') && text.includes('.sameParent(') && text.includes('.nodesBetween(')) textOnly = textOnly == null ? node.id.name : false;
+        }
+      });
+      if (typeof key === 'string') {
+        for (const top of trees.pageContent.body) walk(top, node => {
+          // state: {init: () => DecorationSet.empty, apply(tr, set) { let m = tr.getMeta(KEY); return m instanceof DecorationSet ? m : tr.docChanged ? set.map(tr.mapping, tr.doc) : set }}
+          if (node.type === 'Property' && !node.computed && node.key.type === 'Identifier' && node.key.name === 'apply' && node.value.type === 'FunctionExpression' && node.value.params.length === 2) {
+            const [tr, set] = node.value.params, body = node.value.body.body;
+            if (tr.type !== 'Identifier' || set.type !== 'Identifier' || body.length !== 2 || body[1].type !== 'ReturnStatement') return;
+            if (src.slice(body[0].start, body[0].end).replace(/;$/, '') !== `let ${body[0].declarations?.[0]?.id?.name}=${tr.name}.getMeta(${key})`) return;
+            const choice = body[1].argument?.alternate;
+            if (choice?.type !== 'ConditionalExpression' || src.slice(choice.test.start, choice.test.end) !== `${tr.name}.docChanged` ||
+                src.slice(choice.consequent.start, choice.consequent.end) !== `${set.name}.map(${tr.name}.mapping,${tr.name}.doc)` ||
+                choice.alternate.type !== 'Identifier' || choice.alternate.name !== set.name) return;
+            if (top.type === 'FunctionDeclaration') mapping = mapping == null ? { call: choice.consequent, tr: tr.name, set: set.name, top } : false;
+          }
+          // KO(view, document, pmu, threads, drafts = new Map) builds and dispatches the highlight decorations.
+          if (node.type === 'FunctionDeclaration' && node.params.length === 5 && node.params[4].type === 'AssignmentPattern') {
+            const text = src.slice(node.start, node.end);
+            if (text.includes('`page-comment-highlight`') && text.includes(`${key}.getState(`) && text.includes(`.setMeta(${key},`)) rebuild = rebuild == null ? node : false;
+          }
+        });
+        // Inside KO: threads.filter(t => t.state === `open` && BF(t)) and RESOLVE(view, document, pmu, targets.map(...)).
+        if (rebuild) {
+          const [v, d, m, list] = rebuild.params.map(p => p.type === 'Identifier' ? p.name : null), text = src.slice(rebuild.start, rebuild.end);
+          const open = list && new RegExp(`${list.replace(/\$/g, '\\$')}\\.filter\\(([A-Za-z_$][\\w$]*)=>\\1\\.state===\`open\`&&([A-Za-z_$][\\w$]*)\\(\\1\\)\\)`).exec(text);
+          const resolvers = [];
+          walk(rebuild.body, inner => {
+            if (inner.type === 'CallExpression' && inner.callee.type === 'Identifier' && inner.arguments.length === 4 && member(inner.arguments[3], 'map') &&
+                inner.arguments.slice(0, 3).every((a, i) => a.type === 'Identifier' && a.name === [v, d, m][i])) resolvers.push(inner.callee.name);
+          });
+          // RESOLVE(view, document, pmu, targets), exactly: one target resolves on its own (ONE(view, document,
+          // pmu, target)); several share the canonical block ids (CANON(document).order), their editor positions
+          // (ANCHORS(doc, pmu, count)) and a text-position cache. The check below resolves a subset the same way.
+          let shape = null;
+          walk(trees.pageContent, fn => {
+            if (fn.type !== 'FunctionDeclaration' || fn.id?.name !== resolvers[0] || fn.params.length !== 4 || !fn.params.every(p => p.type === 'Identifier')) return;
+            const [E, T, N, R] = fn.params.map(p => p.name), fixed = { E, T, N, R };
+            const template = '{let I=new Map,A=R[0];if(A==null)return I;if(R.every(X=>X===A))return I.set(A,ONE(E,T,N,A));let O=CANON(T).order.toArray(),' +
+              'S={ids:O,indexes:new Map(O.map((Y,Z)=>[Y,Z])),anchors:ANCHORS(E.state.doc,N,O.length),textPositions:new Map};for(let B of R)I.has(B)||I.set(B,ONE(E,T,N,B,S));return I}';
+            const seen = new Set, pattern = template.split(/\b([A-Z]+)\b/).map((part, i) => {
+              if (i % 2 === 0) return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              if (part === 'Map') return part;
+              if (fixed[part]) return fixed[part].replace(/\$/g, '\\$');
+              if (seen.has(part)) return `\\k<${part}>`;
+              seen.add(part); return `(?<${part}>[A-Za-z_$][\\w$]*)`;
+            }).join('');
+            const m = new RegExp(`^${pattern}$`).exec(src.slice(fn.body.start, fn.body.end));
+            if (m) shape = m.groups;
+          });
+          rebuild = open && resolvers.length === 1 && shape ? { name: rebuild.id.name, threadFilter: open[2], resolve: resolvers[0], one: shape.ONE, canon: shape.CANON, anchors: shape.ANCHORS } : false;
+        }
+        if (rebuild) walk(trees.pageContent, node => {
+          // The layout effect: () => { setHighlights(KO(view, document, pmu, threads, drafts)) }
+          if (node.type !== 'ArrowFunctionExpression' || node.params.length !== 0 || node.body.type !== 'BlockStatement' || node.body.body.length !== 1) return;
+          const call = node.body.body[0].expression;
+          if (call?.type !== 'CallExpression' || call.callee.type !== 'Identifier' || call.arguments.length !== 1) return;
+          const inner = call.arguments[0];
+          if (inner.type !== 'CallExpression' || inner.callee.type !== 'Identifier' || inner.callee.name !== rebuild.name || inner.arguments.length !== 5 ||
+              !inner.arguments.every(a => a.type === 'Identifier')) return;
+          effect = effect == null ? { node, set: call.callee.name, args: inner.arguments.map(a => a.name) } : false;
+        });
+      }
+      const sites = typeof key === 'string' && typeof textOnly === 'string' && mapping && effect && rebuild ? [{ key, textOnly, mapping, effect, rebuild }] : [];
+      record('commentHighlightsMapped', 'pageContent', sites, ({ key, textOnly, mapping, effect, rebuild }) => {
+        const [view, document, pmu, threads, drafts] = effect.args;
+        // Whether a mapped set is as exact as the set it was mapped from (see the comment above).
+        const helper = `function ppCommentHighlightsMapped(ppTr,ppOld,ppMapped){try{const ppTags=globalThis.__codexPPCommentHighlights,ppTag=ppTags?.get(ppOld);` +
+          `if(ppTag==null)return ppMapped;if(ppMapped===ppOld){ppTags.delete(ppOld);return ppMapped}if(ppTr.steps.length!==1||ppTr.getMeta("spacePageEditorProjection")||ppTr.getMeta("appendedTransaction")?.getMeta?.("spacePageEditorProjection")||!${textOnly}(ppTr))return ppMapped;` +
+          `const ppStep=ppTr.steps[0],ppFrom=ppTr.docs[0].resolve(ppStep.from),ppTo=ppTr.docs[0].resolve(ppStep.to),ppParent=ppFrom.parent;let ppPlain=!0;` +
+          `ppParent.forEach(ppChild=>{ppPlain&&=ppChild.isText||ppChild.isLeaf});if(!ppPlain||ppParent.content.size===0||ppTr.doc.resolve(ppTr.mapping.map(ppStep.from)).parent.content.size===0)return ppMapped;` +
+          `const ppOldText=ppParent.textBetween(0,ppParent.content.size,"","\\uFFFC"),ppA=ppFrom.parentOffset,ppB=ppTo.parentOffset,` +
+          `ppNewText=ppOldText.slice(0,ppA)+ppStep.slice.content.textBetween(0,ppStep.slice.content.size)+ppOldText.slice(ppB);let ppPre=0,ppSuf=0;` +
+          `for(;ppPre<ppOldText.length&&ppPre<ppNewText.length&&ppOldText[ppPre]===ppNewText[ppPre];)ppPre++;` +
+          `for(;ppSuf<ppOldText.length&&ppSuf<ppNewText.length&&ppOldText[ppOldText.length-1-ppSuf]===ppNewText[ppNewText.length-1-ppSuf];)ppSuf++;` +
+          `const ppShrink=Math.max(0,ppOldText.length-ppNewText.length),ppStart=ppFrom.start(),` +
+          `ppLow=ppStart+Math.max(0,Math.min(ppA,ppOldText.length-ppSuf-ppShrink)),ppHigh=ppStart+Math.min(ppOldText.length,Math.max(ppB,ppPre+ppShrink));` +
+          // The mapped set carries the positions of the edits made since it was built (at most 64).
+          `for(const ppDeco of ppOld.find())if(ppDeco.from>=ppLow&&ppDeco.from<=ppHigh||ppDeco.to>=ppLow&&ppDeco.to<=ppHigh)return ppMapped;` +
+          `ppTag.touched.length<64&&ppTags.set(ppMapped,{...ppTag,touched:[...ppTag.touched.map(ppPos=>ppTr.mapping.map(ppPos)),ppTr.mapping.map(ppStep.from)]})}catch{}return ppMapped}` +
+          // Whether the range of each thread anchored in an edited top-level block (or the block after one), resolved
+          // as KO resolves it, is exactly its highlight in the set. The canonical block ids must be those the set was
+          // built with; threads anchored only in other blocks then resolve from the same block text, markdown and
+          // neighbours as before, at positions the mapping moved by the same amount.
+          `function ppCommentHighlightsResolved(ppView,ppDocument,ppPmu,ppThreads,ppDrafts,ppSet,ppTag){const ppTargets=ppThreads.filter(ppThread=>ppThread.state==="open"&&${rebuild.threadFilter}(ppThread)).map(ppThread=>[ppThread.id,ppThread.target]);` +
+          `for(const ppDraft of ppDrafts)ppTargets.push(ppDraft);const ppIds=new Set(ppTargets.map(ppTarget=>ppTarget[0]));if(ppIds.size!==ppTargets.length)return!1;` +
+          `const ppRanges=new Map;for(const ppDeco of ppSet.find()){if(ppDeco.spec.highlight!=null)continue;const ppId=ppDeco.spec.commentThreadId,ppRange=ppRanges.get(ppId);if(ppId==null||!ppIds.has(ppId))return!1;` +
+          `ppRanges.set(ppId,ppRange==null?[ppDeco.from,ppDeco.to]:[Math.min(ppRange[0],ppDeco.from),Math.max(ppRange[1],ppDeco.to)])}if(ppTag.touched.length===0)return!0;` +
+          `const ppDoc=ppView.state.doc,ppOrder=${rebuild.canon}(ppDocument).order.toArray();if(ppOrder.length!==ppTag.order.length||ppOrder.some((ppId,ppIndex)=>ppId!==ppTag.order[ppIndex]))return!1;` +
+          `const ppAnchors=${rebuild.anchors}(ppDoc,ppPmu,ppOrder.length),ppEdited=new Set;if(ppAnchors.length!==ppOrder.length||ppAnchors.some(ppAnchor=>ppAnchor==null))return!1;` +
+          `for(const ppPos of ppTag.touched){const ppAt=ppDoc.resolve(ppPos);if(ppAt.depth<1)return!1;const ppLow=ppAt.before(1),ppHigh=ppAt.after(1);let ppLast=-1;` +
+          `ppAnchors.forEach((ppAnchor,ppIndex)=>{ppAnchor.from>=ppLow&&ppAnchor.from<ppHigh&&(ppEdited.add(ppOrder[ppIndex]),ppLast=ppIndex)});ppLast>=0&&ppLast+1<ppOrder.length&&ppEdited.add(ppOrder[ppLast+1])}` +
+          `const ppCheck=ppTargets.filter(([,ppTarget])=>ppTarget?.kind==="block"?ppEdited.has(ppTarget.blockId):ppTarget?.kind!=="selection"||ppEdited.has(ppTarget.anchor?.blockId)||ppEdited.has(ppTarget.head?.blockId));` +
+          `if(ppCheck.length===0)return!0;const ppFirst=ppTargets[0][1],ppAlone=ppTargets.every(ppTarget=>ppTarget[1]===ppFirst),` +
+          `ppShared={ids:ppOrder,indexes:new Map(ppOrder.map((ppId,ppIndex)=>[ppId,ppIndex])),anchors:ppAnchors,textPositions:new Map};` +
+          `for(const[ppId,ppTarget]of ppCheck){const ppRange=ppAlone?${rebuild.one}(ppView,ppDocument,ppPmu,ppTarget):${rebuild.one}(ppView,ppDocument,ppPmu,ppTarget,ppShared),ppMapped=ppRanges.get(ppId);` +
+          `if(ppRange!=null&&ppRange.from<ppRange.to?ppMapped==null||ppMapped[0]!==ppRange.from||ppMapped[1]!==ppRange.to:ppMapped!=null)return!1}return!0}`;
+        const original = src.slice(effect.node.body.start + 1, effect.node.body.end - 1);
+        const same = `ppTag.view===${view}&&ppTag.document===${document}&&ppTag.pmu===${pmu}&&ppTag.threads===${threads}&&ppTag.drafts===${drafts}`;
+        return [
+          { start: mapping.top.start, end: mapping.top.start, text: `${marker}${helper}` },
+          { start: mapping.call.start, end: mapping.call.end, text: `ppCommentHighlightsMapped(${mapping.tr},${mapping.set},${src.slice(mapping.call.start, mapping.call.end)})` },
+          { start: effect.node.body.start, end: effect.node.body.end,
+            text: `{let ppTags=null,ppBefore=null,ppDoc=null;try{ppTags=globalThis.__codexPPCommentHighlights??=new WeakMap;ppBefore=${key}.getState(${view}.state)??null;ppDoc=${view}.state.doc;` +
+              `const ppTag=ppBefore==null?null:ppTags.get(ppBefore);if(ppTag!=null&&${same}&&ppCommentHighlightsResolved(${view},${document},${pmu},${threads},${drafts},ppBefore,ppTag)){` +
+              `ppTag.touched.length>0&&ppTags.set(ppBefore,{...ppTag,touched:[]});${effect.set}(ppPrevious=>ppPrevious.slice());return}}catch{}${original};` +
+              // A new, non-empty set (an empty one is a shared singleton) for the same document is exact.
+              `try{const ppAfter=${key}.getState(${view}.state);ppTags!=null&&ppAfter!=null&&ppAfter!==ppBefore&&${view}.state.doc===ppDoc&&ppAfter.find().length>0&&` +
+              `ppTags.set(ppAfter,{view:${view},document:${document},pmu:${pmu},threads:${threads},drafts:${drafts},touched:[],order:${rebuild.canon}(${document}).order.toArray()})}catch{}}` },
+        ];
+      });
+
+      // calloutFilterSkipsText: a filter on every editor transaction that
+      // changes the document checks that no nested Highlight (callout) block
+      // was split. It walked the whole document with descendants() and its
+      // callback returned undefined for every node that is not a callout, so
+      // it also descended into every paragraph and visited each text node,
+      // on each keystroke. Callouts are block nodes and ProseMirror content
+      // cannot mix inline and block nodes, so nothing with inline content (and
+      // no leaf) can contain one; the walk now stops at those nodes. The
+      // callouts it checks, and the result, are the same.
+      const filters = [];
+      walk(trees.pageContent, node => {
+        if (node.type !== 'Property' || node.computed || node.key.type !== 'Identifier' || node.key.name !== 'filterTransaction' || node.value.type !== 'FunctionExpression') return;
+        walk(node.value.body, inner => {
+          if (!member(inner, 'descendants') || inner.arguments.length !== 1) return;
+          const visit = inner.arguments[0];
+          if (visit.type !== 'ArrowFunctionExpression' || visit.params.length !== 2 || visit.params[0].type !== 'Identifier' || visit.body.type !== 'BlockStatement') return;
+          const n = visit.params[0].name;
+          const skip = visit.body.body.find(s => s.type === 'IfStatement' && src.slice(s.test.start, s.test.end) === `${n}.type.name!==\`callout\`` &&
+            s.consequent.type === 'ReturnStatement' && s.consequent.argument == null && s.alternate == null);
+          if (skip) filters.push({ ret: skip.consequent, n });
+        });
+      });
+      record('calloutFilterSkipsText', 'pageContent', filters, ({ ret, n }) => ({ start: ret.start, end: ret.end,
+        text: `${marker}return ${n}.inlineContent||${n}.isLeaf?!1:void 0${src[ret.end - 1] === ';' ? ';' : ''}` }));
+    } else skipped.commentHighlightsMapped = skipped.calloutFilterSkipsText = 'module not found';
+
+    // sidebarSearchScorerOnce: the Space sidebar's page search scores every
+    // loaded page against each word of the query on every keystroke, and for
+    // each page, word and field (title, location, preview) it compiled the
+    // word's fuzzy matcher again (the app's IntelliJ-style matcher: pattern
+    // arrays, a fallback matcher and a closure). Compiling it once per word
+    // gives the same scores: the matcher keeps no state between calls (its
+    // failed-state set is cleared at the start of each match). Compiled
+    // matchers are kept for up to 256 distinct words.
+    if (trees.spaceSidebar) {
+      const src = sources.spaceSidebar, calls = [];
+      walk(trees.spaceSidebar, (node, ancestors) => {
+        if (node.type !== 'VariableDeclaration' || node.declarations.length < 2) return;
+        const [first, second] = node.declarations, init = first.init;
+        if (first.id.type !== 'Identifier' || init?.type !== 'CallExpression' || init.callee.type !== 'Identifier' || init.arguments.length !== 1 || init.arguments[0].type !== 'Identifier') return;
+        const score = second.init && src.slice(second.init.start, second.init.end);
+        if (!score?.startsWith('Math.max(0,...') || !new RegExp(`\\.map\\(([A-Za-z_$][\\w$]*)=>${first.id.name.replace(/\$/g, '\\$')}\\(\\1\\)\\)\\)$`).test(score)) return;
+        const loop = ancestors.at(-2);
+        if (loop?.type !== 'ForOfStatement' || src.slice(loop.right.start, loop.right.end) !== '[`title`,`location`,`preview`]') return;
+        calls.push(init);
+      });
+      record('sidebarSearchScorerOnce', 'spaceSidebar', calls, call => ({ start: call.start, end: call.end,
+        text: `${marker}((ppScorers,ppWord)=>{let ppScorer=ppScorers.get(ppWord);if(ppScorer===void 0){ppScorers.size>=256&&ppScorers.clear();ppScorer=${call.callee.name}(ppWord);` +
+          `ppScorers.set(ppWord,ppScorer)}return ppScorer})(globalThis.__codexPPSearchScorers??=new Map,${call.arguments[0].name})` }));
+    } else skipped.sidebarSearchScorerOnce = 'module not found';
+
+    // masonrySteadyObserver, masonryUnchangedPositions: the Library and Space
+    // grids (masonry layout) measure every card in a layout effect keyed on
+    // the item list. Each time the list changed, the effect disconnected its
+    // ResizeObserver and observed the container and every card again, and a
+    // new observer reports every element once, so each change laid the grid
+    // out a second time in the next frame (offsetHeight of every card) for
+    // nothing. The container now keeps one observer: a new list observes only
+    // cards it has not seen and unobserves removed ones (the effect still lays
+    // out at once, as before), and the observer is closed only when the effect
+    // is torn down without being set up again (unmount). In animated grids
+    // (pinned pages) each layout pass also set a new position map, re-rendering
+    // the grid and every card even when nothing moved; positions that did not
+    // change keep their objects, and an unchanged map is not set again.
+    if (trees.libraryMasonry) {
+      const src = sources.libraryMasonry, observers = [], updates = [];
+      walk(trees.libraryMasonry, (node, ancestors) => {
+        if (node.type !== 'BlockStatement' || node.body.length < 4) return;
+        const decl = node.body.at(-4), observe = node.body.at(-3), loop = node.body.at(-2), ret = node.body.at(-1);
+        if (decl.type !== 'VariableDeclaration' || decl.declarations.length < 4) return;
+        const ds = decl.declarations, frame = ds.at(-2), observer = ds.at(-1), layout = ds.at(-3), items = ds.at(-4);
+        if (frame.init != null || frame.id.type !== 'Identifier' || observer.id.type !== 'Identifier' || observer.init?.type !== 'NewExpression' ||
+            src.slice(observer.init.callee.start, observer.init.callee.end) !== 'ResizeObserver' || layout.id.type !== 'Identifier' || layout.init?.type !== 'ArrowFunctionExpression' ||
+            items.id.type !== 'Identifier') return;
+        const o = observer.id.name, f = frame.id.name, s = layout.id.name;
+        const callback = src.slice(observer.init.arguments[0]?.start, observer.init.arguments[0]?.end);
+        if (callback !== `()=>{${f}!=null&&cancelAnimationFrame(${f}),${f}=requestAnimationFrame(${s})}`) return;
+        const first = src.slice(node.start, node.end).match(/^\{let ([A-Za-z_$][\w$]*)=[A-Za-z_$][\w$]*\.current;if\(!\1\)return;/);
+        if (!first || src.slice(observe.start, observe.end).replace(/;$/, '') !== `${o}.observe(${first[1]})` ||
+            src.slice(loop.start, loop.end).replace(/;$/, '') !== `for(let ${first[1]} of ${items.id.name})${o}.observe(${first[1]})` ||
+            src.slice(ret.start, ret.end).replace(/;$/, '') !== `return ${s}(),()=>{${o}.disconnect(),${f}!=null&&cancelAnimationFrame(${f})}`) return;
+        const top = ancestors[1];
+        if (ancestors[0]?.type === 'Program' && top?.type === 'FunctionDeclaration') observers.push({ frame, ret, container: first[1], items: items.id.name, s, top });
+        // In the layout function: if (animate) { ...; setPositions(new Map(ids.map(...))); return }
+        walk(layout.init.body, inner => {
+          if (inner.type !== 'CallExpression' || inner.callee.type !== 'Identifier' || inner.arguments.length !== 1) return;
+          const map = inner.arguments[0];
+          if (map.type === 'NewExpression' && map.callee.type === 'Identifier' && map.callee.name === 'Map' && map.arguments.length === 1 &&
+              /\{x:[^]*,y:[^]*,animate:[^]*\}\]\)\)$/.test(src.slice(map.start, map.end))) updates.push({ call: inner, map, top });
+        });
+      });
+      record('masonrySteadyObserver', 'libraryMasonry', observers, ({ frame, ret, container, items, s, top }) => [
+        { start: top.start, end: top.start, text: `${marker}function ppMasonryObserve(ppContainer,ppItems,ppLayout){const ppRecords=ppMasonryObserve.records??=new WeakMap;let ppRecord=ppRecords.get(ppContainer);` +
+          `if(ppRecord==null||ppRecord.closed){const ppNew={run:null,frame:null,observed:new Set,closed:!1,releasing:!1};` +
+          `ppNew.observer=new ResizeObserver(()=>{ppNew.frame!=null&&cancelAnimationFrame(ppNew.frame),ppNew.frame=requestAnimationFrame(ppTime=>{ppNew.frame=null,ppNew.run?.(ppTime)})});ppRecords.set(ppContainer,ppRecord=ppNew)}` +
+          `ppRecord.releasing=!1;ppRecord.run=ppLayout;const ppNext=new Set([ppContainer,...ppItems]);` +
+          `for(const ppElement of ppRecord.observed)ppNext.has(ppElement)||ppRecord.observer.unobserve(ppElement);for(const ppElement of ppNext)ppRecord.observed.has(ppElement)||ppRecord.observer.observe(ppElement);` +
+          `ppRecord.observed=ppNext;return ppRecord}` +
+          // Torn down: cancel the pending pass; close the observer unless the effect is set up again in the same commit.
+          `function ppMasonryRelease(ppRecord){ppRecord.frame!=null&&(cancelAnimationFrame(ppRecord.frame),ppRecord.frame=null);ppRecord.releasing=!0;` +
+          `queueMicrotask(()=>{ppRecord.releasing&&!ppRecord.closed&&(ppRecord.closed=!0,ppRecord.observer.disconnect())})}` },
+        { start: frame.start, end: ret.end, text: `ppMasonryRecord=ppMasonryObserve(${container},${items},${s});return ${s}(),()=>ppMasonryRelease(ppMasonryRecord)${src[ret.end - 1] === ';' ? ';' : ''}` },
+      ]);
+      record('masonryUnchangedPositions', 'libraryMasonry', updates, ({ call, map, top }) => [
+        { start: top.end, end: top.end, text: `${marker}function ppMasonryPositions(ppPrevious,ppNext){try{let ppSame=ppPrevious instanceof Map&&ppPrevious.size===ppNext.size;` +
+          `for(const[ppId,ppPosition]of ppNext){const ppOld=ppPrevious instanceof Map?ppPrevious.get(ppId):void 0;` +
+          `ppOld!=null&&ppOld.x===ppPosition.x&&ppOld.y===ppPosition.y&&ppOld.animate===ppPosition.animate?ppNext.set(ppId,ppOld):ppSame=!1}` +
+          `if(ppSame){const ppKeys=[...ppPrevious.keys()];let ppIndex=0;for(const ppId of ppNext.keys())if(ppKeys[ppIndex++]!==ppId){ppSame=!1;break}}return ppSame?ppPrevious:ppNext}catch{return ppNext}}` },
+        { start: call.start, end: call.end, text: `${src.slice(call.callee.start, call.callee.end)}(((ppNext)=>ppPrevious=>ppMasonryPositions(ppPrevious,ppNext))(${src.slice(map.start, map.end)}))` },
+      ]);
+    } else skipped.masonrySteadyObserver = skipped.masonryUnchangedPositions = 'module not found';
+
+    // pageBlockSerializedOnce: for each edit of a Page, the writer that turns
+    // the editor document into the shared markdown blocks serialises the
+    // edited top-level block to markdown (P$, which keeps the result per node
+    // object), and also serialises a fresh copy of the block as it was before
+    // the edit (a copy, so that the comparison sees a fresh serialisation and
+    // not the canonical markdown kept for the node). For a list or table that
+    // is the whole list again on every keystroke: about 5 ms per keystroke in
+    // a 50-item list in node. The copy has the same content, attributes and
+    // marks as the block the previous keystroke serialised freshly; that
+    // fresh result is now reused (looked up by the block's content fragment,
+    // type, attributes, marks, the wrapper document and the converter). Only
+    // fresh serialisations are kept, never the canonical markdown, so the
+    // result is the one a new serialisation would give.
+    if (trees.initial) {
+      const src = sources.initial, sites = [];
+      for (const top of trees.initial.body) (node => {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 2 || node.params[0].type !== 'Identifier' || node.params[1].type !== 'AssignmentPattern') return;
+        const [doc, pmu] = [node.params[0].name, node.params[1].left.name], body = node.body.body;
+        if (!src.slice(node.params[1].right.start, node.params[1].right.end).includes('isRichTableCellSupportEnabled:') || body.length !== 4) return;
+        const head = src.slice(node.body.start, body[3].start), cache = /^\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.get\(/.exec(head);
+        if (!cache || head !== `{let ${cache[1]}=${cache[2]}.get(${doc})?.get(${pmu});if(${cache[1]}!=null)return ${cache[1]}.slice();let ${body[2].declarations?.[0]?.id?.name}=[];`) return;
+        const store = cache[2], out = body[2].declarations[0].id.name, seq = body[3].argument;
+        if (seq?.type !== 'SequenceExpression' || seq.expressions.length !== 3 || !member(seq.expressions[0], 'forEach') || src.slice(seq.expressions[0].callee.object.start, seq.expressions[0].callee.object.end) !== doc) return;
+        const each = seq.expressions[0].arguments[0];
+        if (each?.type !== 'ArrowFunctionExpression' || each.params.length !== 1 || each.params[0].type !== 'Identifier' || each.body.type !== 'BlockStatement') return;
+        const child = each.params[0].name, steps = each.body.body;
+        const hit = steps[1], last = steps.at(-1), keep = steps.at(-2);
+        if (src.slice(steps[0].start, steps[0].end).replace(/;$/, '') !== `let ${steps[0].declarations?.[0]?.id?.name}=${store}.get(${child})?.get(${pmu})`) return;
+        const cached = steps[0].declarations[0].id.name;
+        if (hit?.type !== 'IfStatement' || src.slice(hit.start, hit.end) !== `if(${cached}!=null){${out}.push(...${cached});return}`) return;
+        const m = /^let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.get\(([A-Za-z_$][\w$]*)\);?$/.exec(src.slice(keep?.start, keep?.end));
+        if (!m || m[2] !== store || m[3] !== child) return;
+        const units = new RegExp(`^${m[1].replace(/\$/g, '\\$')}\\?\\?\\(${m[1].replace(/\$/g, '\\$')}=new WeakMap,${store.replace(/\$/g, '\\$')}\\.set\\(${child},${m[1].replace(/\$/g, '\\$')}\\)\\),` +
+          `${m[1].replace(/\$/g, '\\$')}\\.set\\(${pmu},([A-Za-z_$][\\w$]*)\\),${out}\\.push\\(\\.\\.\\.\\1\\)$`).exec(src.slice(last.start, last.end));
+        const fresh = src.slice(hit.end, keep.start);
+        if (!units || !fresh.includes(`${pmu}.serialize(`) || !fresh.startsWith(`let `) || !fresh.includes(`${doc}.type.createChecked(${doc}.attrs,`)) return;
+        sites.push({ node, hit, keep, doc, pmu, store, out, child, units: units[1] });
+      })(top);
+      record('pageBlockSerializedOnce', 'initial', sites, ({ node, hit, keep, doc, pmu, store, out, child, units }) => [
+        { start: node.start, end: node.start, text: `${marker}function ppPageBlockSame(ppA,ppB){if(ppA===ppB)return!0;if(ppA==null||ppB==null)return!1;const ppKeys=Object.keys(ppA);` +
+          `return ppKeys.length===Object.keys(ppB).length&&ppKeys.every(ppKey=>Object.prototype.hasOwnProperty.call(ppB,ppKey)&&Object.is(ppA[ppKey],ppB[ppKey]))}` +
+          `function ppPageBlockRecall(ppNode,ppWrapper,ppPmu){try{const ppList=ppPageBlockRecall.memo?.get(ppNode.content);if(ppList!=null)for(const ppEntry of ppList)` +
+          `if(ppEntry.pmu===ppPmu&&ppEntry.type===ppNode.type&&ppEntry.wrapper===ppWrapper.type&&ppPageBlockSame(ppEntry.attrs,ppNode.attrs)&&ppPageBlockSame(ppEntry.wrapperAttrs,ppWrapper.attrs)&&` +
+          `ppEntry.marks.length===ppNode.marks.length&&ppEntry.marks.every((ppMark,ppIndex)=>ppMark===ppNode.marks[ppIndex]))return ppEntry.units}catch{}return null}` +
+          `function ppPageBlockRemember(ppNode,ppWrapper,ppPmu,ppUnits){try{const ppMemo=ppPageBlockRecall.memo??=new WeakMap;let ppList=ppMemo.get(ppNode.content);` +
+          `ppList==null&&ppMemo.set(ppNode.content,ppList=[]);ppList.length>=4&&ppList.shift();ppList.push({pmu:ppPmu,type:ppNode.type,wrapper:ppWrapper.type,attrs:ppNode.attrs,` +
+          `wrapperAttrs:ppWrapper.attrs,marks:ppNode.marks.slice(),units:ppUnits.slice()})}catch{}}` },
+        // A fresh serialisation of an equal block: stored for this node and used as the original does.
+        { start: hit.end, end: hit.end, text: `{const ppKnown=ppPageBlockRecall(${child},${doc},${pmu});if(ppKnown!=null){let ppStore=${store}.get(${child});` +
+          `ppStore??(ppStore=new WeakMap,${store}.set(${child},ppStore)),ppStore.set(${pmu},ppKnown.slice()),${out}.push(...ppKnown);return}}` },
+        { start: keep.start, end: keep.start, text: `ppPageBlockRemember(${child},${doc},${pmu},${units});` },
+      ]);
+    } else skipped.pageBlockSerializedOnce = 'module not found';
     // ===== end of space lane =====
 
 
