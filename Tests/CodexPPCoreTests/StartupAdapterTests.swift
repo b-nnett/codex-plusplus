@@ -32,7 +32,6 @@ final class StartupAdapterTests: XCTestCase {
     func testStartupStatusCountsSpeedupsAndListsMisses() throws {
         let app = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: app) }
-        XCTAssertNil(StartupStatus.read(app: app))
         let report = app.appendingPathComponent(StartupStatus.reportPath)
         try FileManager.default.createDirectory(at: report.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(StartupDiscoveryReport(applied: ["deferDockIcon": "main", "queryTimings": "shared"],
@@ -41,6 +40,82 @@ final class StartupAdapterTests: XCTestCase {
         XCTAssertEqual(status.active, ["Deferred Dock icon"], "diagnostic edits are not counted")
         XCTAssertEqual(status.missing.map(\.name), ["Cached settings"])
         XCTAssertEqual(status.missing.first?.reason, "expected one match, found 0")
+        XCTAssertNil(status.failure)
+    }
+
+    /// A patched app without a report never ran discovery to completion; the
+    /// menu shows that as a failure, not as an app with no speed-ups to apply.
+    func testStartupStatusReportsAMissingOrUnreadableReportAsAFailure() throws {
+        let app = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: app) }
+        let missing = StartupStatus.read(app: app)
+        XCTAssertTrue(missing.active.isEmpty)
+        XCTAssertTrue(missing.failure?.contains("no startup discovery report") == true, "\(missing)")
+        let report = app.appendingPathComponent(StartupStatus.reportPath)
+        try FileManager.default.createDirectory(at: report.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{".utf8).write(to: report)
+        XCTAssertNotNil(StartupStatus.read(app: app).failure)
+        // A build where nothing matched is not a failure.
+        try JSONEncoder().encode(StartupDiscoveryReport(applied: [:], skipped: ["settingsCacheFirst": "expected one match, found 0"], duration: 11.8)).write(to: report)
+        let unmatched = StartupStatus.read(app: app)
+        XCTAssertNil(unmatched.failure)
+        XCTAssertEqual(unmatched.missing.map(\.name), ["Cached settings"])
+    }
+
+    func testReportRecordsDurationAndReadsOlderReportsWithoutIt() throws {
+        let encoded = try JSONEncoder().encode(StartupDiscoveryReport(applied: ["deferDockIcon": "main"], skipped: [:], duration: 12.5))
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: encoded) as? NSDictionary, ["applied": ["deferDockIcon": "main"], "skipped": [:], "duration": 12.5] as NSDictionary)
+        let older = try JSONDecoder().decode(StartupDiscoveryReport.self, from: Data(#"{"applied":{},"skipped":{}}"#.utf8))
+        XCTAssertNil(older.duration)
+    }
+
+    /// A discovery that cannot run throws instead of returning an empty result.
+    func testDiscoveryThatCannotRunThrowsAFailure() throws {
+        let (path, _, _) = try AsarPatchTests.fixture()
+        defer { try? FileManager.default.removeItem(at: path.deletingLastPathComponent()) }
+        var ran = false
+        XCTAssertThrowsError(try StartupAdapter.discover(archive: AsarArchive(path), replacements: [], timeout: 1, runner: { _, _, _ in ran = true; throw PatchError.invalid("unreachable") })) {
+            XCTAssertTrue($0 is StartupAdapter.Failure, "\($0)")
+        }
+        XCTAssertFalse(ran, "an unauthenticated archive is never adapted")
+    }
+
+    private func result(_ applied: [String: String] = [:]) -> StartupAdapter.Result {
+        StartupAdapter.Result(replacements: [], applied: applied, skipped: [:], duration: 1)
+    }
+
+    /// A timeout on a busy machine is retried once with the longer deadline.
+    func testFailedDiscoveryIsRetriedWithALongerDeadline() throws {
+        var deadlines: [TimeInterval] = [], retries: [String] = []
+        let output = try StartupAdapter.retrying(deadlines: StartupAdapter.deadlines, onRetry: { retries.append($0.reason) }) { deadline in
+            deadlines.append(deadline)
+            if deadlines.count == 1 { throw StartupAdapter.Failure(reason: "Code discovery timed out after 60 s; the app was not patched.") }
+            return result(["deferDockIcon": "main"])
+        }
+        XCTAssertEqual(deadlines, [60, 180])
+        XCTAssertEqual(retries, ["Code discovery timed out after 60 s; the app was not patched."])
+        XCTAssertEqual(output.applied, ["deferDockIcon": "main"])
+    }
+
+    /// A second failure fails the patch with the reason; nothing degraded is installed.
+    func testRepeatedDiscoveryFailureFailsThePatch() {
+        var attempts = 0
+        XCTAssertThrowsError(try StartupAdapter.retrying(deadlines: StartupAdapter.deadlines, onRetry: { _ in }) { _ in
+            attempts += 1; throw StartupAdapter.Failure(reason: "Code discovery failed: parser crashed")
+        }) { error in
+            XCTAssertTrue(error is PatchError)
+            XCTAssertTrue(error.localizedDescription.contains("parser crashed"), error.localizedDescription)
+            XCTAssertTrue(error.localizedDescription.contains("ChatGPT was left as it was"), error.localizedDescription)
+        }
+        XCTAssertEqual(attempts, 2)
+    }
+
+    /// No matches (an unrecognised build) is a result, not a failure: it is not retried.
+    func testUnmatchedDiscoveryIsNotRetried() throws {
+        var attempts = 0
+        let output = try StartupAdapter.retrying(deadlines: StartupAdapter.deadlines, onRetry: { _ in XCTFail("retried") }) { _ in attempts += 1; return result() }
+        XCTAssertEqual(attempts, 1)
+        XCTAssertTrue(output.applied.isEmpty)
     }
 
     /// Against a real stock ChatGPT archive (CODEXPP_ORIGINAL_ASAR): every release
@@ -51,7 +126,12 @@ final class StartupAdapterTests: XCTestCase {
         }
         let archive = try AsarArchive(URL(fileURLWithPath: path))
         let (browserPath, browserSource) = try NativeBrowserAdapter.patch(archive: archive)
-        let result = try XCTUnwrap(StartupAdapter.discover(archive: archive, replacements: [(browserPath, browserSource)]), "discovery failed")
+        let started = Date()
+        let result = try StartupAdapter.discover(archive: archive, replacements: [(browserPath, browserSource)])
+        // Time budget: discovery must leave ample headroom under its 60 s
+        // first deadline on a busy machine (it took 46 s before an optimisation).
+        XCTAssertLessThan(Date().timeIntervalSince(started), 25, "startup discovery is too slow")
+        XCTAssertLessThanOrEqual(result.duration, Date().timeIntervalSince(started))
         let developmentOnly: Set<String> = ["queryTimings", "appGateReasons", "loadingGateTimings", "policyPhaseTimings", "opaqueSurfaceExperiment"]
         XCTAssertEqual(Set(result.skipped.keys), PatchAdapter.experimentsEnabled ? [] : developmentOnly, "\(result.skipped)")
         for name in StartupStatus.labels.keys where !developmentOnly.contains(name) { XCTAssertNotNil(result.applied[name], name) }
@@ -63,5 +143,24 @@ final class StartupAdapterTests: XCTestCase {
             try process.run(); process.waitUntilExit()
             XCTAssertEqual(process.terminationStatus, 0, "\(path) does not parse")
         }
+    }
+
+    /// Against the real archive, a crashing runner is a failure while a runner
+    /// that matches nothing still yields a (speed-up-free) result.
+    func testRealArchiveDistinguishesRunnerFailureFromNoMatches() throws {
+        guard let path = ProcessInfo.processInfo.environment["CODEXPP_ORIGINAL_ASAR"] else {
+            throw XCTSkip("Set CODEXPP_ORIGINAL_ASAR to the reviewed original app archive for the startup adapter check.")
+        }
+        let archive = try AsarArchive(URL(fileURLWithPath: path))
+        var timeouts: [TimeInterval] = []
+        XCTAssertThrowsError(try StartupAdapter.discoverForPatch(archive: archive, replacements: [], runner: { _, _, timeout in
+            timeouts.append(timeout); throw PatchError.invalid("Code discovery timed out after \(Int(timeout)) s; the app was not patched.")
+        })) { XCTAssertTrue($0.localizedDescription.contains("timed out after 180 s"), $0.localizedDescription) }
+        XCTAssertEqual(timeouts, [60, 180])
+        let unmatched = try StartupAdapter.discoverForPatch(archive: archive, replacements: [], runner: { _, _, _ in
+            try JSONDecoder().decode(StartupAdapter.Output.self, from: Data(#"{"applied":{},"skipped":{"statsigCacheFirst":"expected one match, found 0"}}"#.utf8))
+        })
+        XCTAssertTrue(unmatched.applied.isEmpty)
+        XCTAssertTrue(unmatched.replacements.isEmpty)
     }
 }

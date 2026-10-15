@@ -4,13 +4,28 @@ import JavaScriptCore
 /// Startup fast path for the renderer: cache-first Statsig gating and a
 /// deferred dictation-cue preload. Optional by design: each edit applies only
 /// when its code shape matches exactly once, and an unrecognised build starts
-/// exactly as it does unpatched instead of blocking the patch.
+/// exactly as it does unpatched instead of blocking the patch. Discovery that
+/// fails to run (a timeout or a parser crash) is not a mismatch: it throws a
+/// `Failure`, and a patch never installs without the speed-ups it would match.
 public enum StartupAdapter {
     public struct Result: Sendable {
         public let replacements: [(String, Data)]
         public let applied: [String: String]
         public let skipped: [String: String]
+        /// Seconds the discovery took, recorded in the report.
+        public let duration: TimeInterval
     }
+    /// Discovery did not run to completion, so nothing is known about which edits match.
+    public struct Failure: LocalizedError {
+        public let reason: String
+        public var errorDescription: String? { reason }
+    }
+    /// Runs the adapter on its input within a deadline: the app's signed Node
+    /// runtime, or JavaScriptCore without it. Replaced in tests.
+    typealias Runner = (_ input: [String: Any], _ archive: AsarArchive, _ timeout: TimeInterval) throws -> Output
+    /// The first deadline fits an idle machine (about 12 s); the retry allows
+    /// for a busy one.
+    static let deadlines: [TimeInterval] = [60, 180]
     /// The adapter's result: which edits applied or were skipped, and the
     /// rewritten source for each input chunk it changed, by chunk key.
     struct Output: Decodable {
@@ -71,7 +86,31 @@ public enum StartupAdapter {
     /// Every chunk, including those the edit lanes add (StartupLanes/*.swift).
     static var chunks: [StartupChunk] { coreChunks + streamingChunks + turnsChunks + gpuChunks + hygieneChunks + pluginChunks }
 
-    public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
+    /// Discovery for a patch: a failed run is retried once with a longer
+    /// deadline, then fails the patch so the installed app stays as it is.
+    static func discoverForPatch(archive: AsarArchive, replacements: [(String, Data)], deadlines: [TimeInterval] = deadlines,
+                                 onRetry: (Failure) -> Void = { _ in }, runner: Runner = adapt) throws -> Result {
+        try retrying(deadlines: deadlines, onRetry: onRetry) { try discover(archive: archive, replacements: replacements, timeout: $0, runner: runner) }
+    }
+
+    static func retrying(deadlines: [TimeInterval], onRetry: (Failure) -> Void, _ attempt: (TimeInterval) throws -> Result) throws -> Result {
+        var failure = Failure(reason: "Startup discovery did not run.")
+        for (index, deadline) in deadlines.enumerated() {
+            if index > 0 { onRetry(failure) }
+            do { return try attempt(deadline) }
+            catch let error as Failure { failure = error }
+        }
+        throw PatchError.invalid("Startup discovery failed (\(failure.reason)). ChatGPT was left as it was; retry the patch when the Mac is less busy.")
+    }
+
+    /// Edits that do not match are listed in `skipped`; a discovery that does
+    /// not complete throws `Failure`.
+    public static func discover(archive: AsarArchive, replacements: [(String, Data)], timeout: TimeInterval = 60) throws -> Result {
+        try discover(archive: archive, replacements: replacements, timeout: timeout, runner: adapt)
+    }
+
+    static func discover(archive: AsarArchive, replacements: [(String, Data)], timeout: TimeInterval, runner: Runner) throws -> Result {
+        let started = Date()
         do {
             try PatchAdapter.approveArchive(archive)
             func source(at path: String) throws -> String? {
@@ -125,21 +164,23 @@ public enum StartupAdapter {
                 if data.count <= 8 * 1024 * 1024, let text = String(data: data, encoding: .utf8) { stylesheets[path] = text }
             }
             input["css"] = stylesheets
-            let output = try adapt(input: input, archive: archive)
+            let output = try runner(input, archive, timeout)
             var result: [(String, Data)] = []
             if let source = output["html"] { result.append((htmlPath, Data(source.utf8))) }
             for (key, chunk) in resolved.sorted(by: { $0.key < $1.key }) {
                 if let source = output[key] { result.append((chunk.0, Data(source.utf8))) }
             }
             for (path, source) in output.css ?? [:] where stylesheets[path] != nil { result.append((path, Data(source.utf8))) }
-            return Result(replacements: result, applied: output.applied, skipped: output.skipped)
+            return Result(replacements: result, applied: output.applied, skipped: output.skipped, duration: Date().timeIntervalSince(started))
+        } catch let error as Failure {
+            throw error
         } catch {
-            return nil
+            throw Failure(reason: error.localizedDescription)
         }
     }
 
-    private static func adapt(input: [String: Any], archive: AsarArchive) throws -> Output {
-        if let output = try JavaScriptDiscovery.run(archive: archive, adapter: "startup", input: input) {
+    static func adapt(input: [String: Any], archive: AsarArchive, timeout: TimeInterval) throws -> Output {
+        if let output = try JavaScriptDiscovery.run(archive: archive, adapter: "startup", input: input, timeout: timeout) {
             return try JSONDecoder().decode(Output.self, from: output)
         }
         return try adaptInProcess(input: input)
@@ -166,6 +207,11 @@ public enum StartupAdapter {
 struct StartupDiscoveryReport: Codable {
     let applied: [String: String]
     let skipped: [String: String]
+    /// Seconds discovery took; absent in older reports.
+    let duration: Double?
+    init(applied: [String: String], skipped: [String: String], duration: Double? = nil) {
+        self.applied = applied; self.skipped = skipped; self.duration = duration
+    }
 }
 
 /// Which startup speed-ups matched the installed ChatGPT build, read from the
@@ -196,10 +242,23 @@ public struct StartupStatus: Equatable, Sendable {
     public let active: [String]
     /// Speed-ups that did not match this build, with the adapter's reason.
     public let missing: [(name: String, reason: String)]
+    /// Why none of the speed-ups are known to be applied: the installed patch
+    /// has no readable discovery report (discovery did not complete when it
+    /// was made). Repatching fixes it.
+    public let failure: String?
 
-    public static func read(app: URL) -> StartupStatus? {
-        guard let data = try? Data(contentsOf: app.appendingPathComponent(reportPath)),
-              let report = try? JSONDecoder().decode(StartupDiscoveryReport.self, from: data) else { return nil }
+    init(active: [String], missing: [(name: String, reason: String)], failure: String? = nil) {
+        self.active = active; self.missing = missing; self.failure = failure
+    }
+
+    /// The status of a patched app, whose discovery report is written at patch time.
+    public static func read(app: URL) -> StartupStatus {
+        guard let data = try? Data(contentsOf: app.appendingPathComponent(reportPath)) else {
+            return StartupStatus(active: [], missing: [], failure: "This patch has no startup discovery report: discovery did not complete when ChatGPT was patched.")
+        }
+        guard let report = try? JSONDecoder().decode(StartupDiscoveryReport.self, from: data) else {
+            return StartupStatus(active: [], missing: [], failure: "This patch's startup discovery report is unreadable.")
+        }
         let active = report.applied.keys.filter { !diagnostics.contains($0) }.map(label).sorted()
         let missing = report.skipped.filter { !diagnostics.contains($0.key) }.map { (name: label($0.key), reason: $0.value) }.sorted { $0.name < $1.name }
         return StartupStatus(active: active, missing: missing)
@@ -207,6 +266,6 @@ public struct StartupStatus: Equatable, Sendable {
     static func label(_ key: String) -> String { labels[key] ?? key }
 
     public static func == (a: StartupStatus, b: StartupStatus) -> Bool {
-        a.active == b.active && a.missing.map(\.name) == b.missing.map(\.name) && a.missing.map(\.reason) == b.missing.map(\.reason)
+        a.active == b.active && a.missing.map(\.name) == b.missing.map(\.name) && a.missing.map(\.reason) == b.missing.map(\.reason) && a.failure == b.failure
     }
 }

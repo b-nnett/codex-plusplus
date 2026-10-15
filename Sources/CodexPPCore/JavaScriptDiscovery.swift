@@ -4,7 +4,7 @@ import Darwin
 
 /// Vendor source is JSON data for a parser, never executable JavaScript.
 enum JavaScriptDiscovery {
-    static func run(archive: AsarArchive, adapter: String, input: [String: Any]) throws -> Data? {
+    static func run(archive: AsarArchive, adapter: String, input: [String: Any], timeout: TimeInterval = 60) throws -> Data? {
         let resources = archive.url.deletingLastPathComponent()
         let node = resources.appendingPathComponent("cua_node/bin/node")
         guard FileManager.default.fileExists(atPath: node.path) else { return nil }
@@ -40,13 +40,13 @@ enum JavaScriptDiscovery {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = errors; process.standardError = errors
         try process.run()
-        let deadline = Date().addingTimeInterval(60)
+        let deadline = Date().addingTimeInterval(timeout)
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         if process.isRunning {
             process.terminate(); Thread.sleep(forTimeInterval: 0.2)
             if process.isRunning { kill(process.processIdentifier, SIGKILL) }
             process.waitUntilExit()
-            throw PatchError.invalid("Code discovery timed out; the app was not patched.")
+            throw PatchError.invalid("Code discovery timed out after \(Int(timeout)) s; the app was not patched.")
         }
         process.waitUntilExit()
         guard process.terminationStatus == 0 else {

@@ -310,6 +310,7 @@ public struct AppPatcher: Sendable {
                     onProgress("Preparing extensions…")
                     replacements += try recipe.patches(in: original)
                     try JSONEncoder().encode(recipe.settingsReport).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-settings-discovery.json"), options: .atomic)
+                    if let report = recipe.startupReport { try JSONEncoder().encode(report).write(to: stage.appendingPathComponent(StartupStatus.reportPath), options: .atomic) }
                 } else if adapter.isReviewed {
                     let resources = helper.appendingPathComponent("Contents/Resources")
                     let bundles = try fm.contentsOfDirectory(at: resources, includingPropertiesForKeys: nil).filter { $0.pathExtension == "bundle" }
@@ -333,12 +334,13 @@ public struct AppPatcher: Sendable {
                     // on the browser adapter's output rather than replacing it.
                     let (browserPath, browserSource) = try NativeBrowserAdapter.patch(archive: original)
                     renderers = renderers.filter({ $0.0 != browserPath }) + [(browserPath, browserSource)]
-                    // Optional startup fast path: unmatched code stays unpatched.
-                    if let startup = StartupAdapter.discover(archive: original, replacements: renderers) {
-                        let paths = Set(startup.replacements.map { $0.0 })
-                        renderers = renderers.filter({ !paths.contains($0.0) }) + startup.replacements
-                        try JSONEncoder().encode(StartupDiscoveryReport(applied: startup.applied, skipped: startup.skipped)).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-startup-discovery.json"), options: .atomic)
-                    }
+                    // Optional startup fast path: unmatched code stays unpatched,
+                    // but a discovery that cannot finish (a busy machine) fails
+                    // the patch rather than installing it without speed-ups.
+                    let startup = try StartupAdapter.discoverForPatch(archive: original, replacements: renderers, onRetry: { _ in self.onProgress("Retrying startup discovery…") })
+                    let paths = Set(startup.replacements.map { $0.0 })
+                    renderers = renderers.filter({ !paths.contains($0.0) }) + startup.replacements
+                    try JSONEncoder().encode(StartupDiscoveryReport(applied: startup.applied, skipped: startup.skipped, duration: startup.duration)).write(to: stage.appendingPathComponent(StartupStatus.reportPath), options: .atomic)
                     replacements += renderers
                 }
                 let headerHash = try AsarArchive(stagedArchive).replacing(replacements, output: temporary)
