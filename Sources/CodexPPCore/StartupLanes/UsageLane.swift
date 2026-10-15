@@ -6,5 +6,7 @@ extension StartupAdapter {
 }
 
 extension StartupStatus {
-    static let usageLabels: [String: String] = [:]
+    static let usageLabels: [String: String] = [
+        "compactThreadDescription": "Lighter thread descriptions",
+    ]
 }
