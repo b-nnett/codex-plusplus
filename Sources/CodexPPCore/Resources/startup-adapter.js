@@ -2715,6 +2715,11 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // ===== end of scrolling lane =====
 
 
+    // ===== space lane: the Space page editor, page navigation, Library grid and sidebar search. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of space lane =====
+
+
     // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
     // (Edits of this lane go between these markers.)
 
