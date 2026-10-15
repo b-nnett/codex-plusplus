@@ -6,5 +6,7 @@ extension StartupAdapter {
 }
 
 extension StartupStatus {
-    static let streamingLabels: [String: String] = [:]
+    static let streamingLabels: [String: String] = [
+        "streamingBlockCache": "Lighter long streaming replies",
+    ]
 }
