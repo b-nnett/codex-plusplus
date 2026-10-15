@@ -2089,6 +2089,61 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
         ];
       });
     } else skipped.chromeProfileScanBackoff = 'module not found';
+
+    // repeatInitSnapshotNoRefetch (initial bundle): each time a window reports
+    // `ready` (twice at startup: once for initialization only, then fully), the
+    // main process replays a `codex-app-server-initialized` snapshot for every
+    // host (isSnapshot: true). The window handles it like a real
+    // initialization: it invalidates all of the host's MCP status queries and,
+    // for any that is still fetching, invalidates it again once that fetch
+    // ends. At startup the second replay lands while the first MCP inventory
+    // (mcpServerStatus/list, which makes the app-server start every configured
+    // MCP server) is in flight, so the inventory is fetched a second time as
+    // soon as the first returns: on three launches of build 20398, the second
+    // request was sent 13-26 ms after the first catalog load was processed,
+    // and the two took 1.2-1.7 s each. Nothing changed between them: a replay
+    // only repeats the state this window already received. A snapshot whose
+    // host, transport and versions equal the last initialization this window
+    // saw now only invalidates (as before, joining fetches in flight) without
+    // the second pass. A real initialization (no isSnapshot), the first one a
+    // window sees, or one with different values behaves as before.
+    if (trees.initial) {
+      const initCases = [];
+      const caseLabel = c => c.test?.type === 'TemplateLiteral' && c.test.quasis.length === 1 ? c.test.quasis[0].value.cooked : c.test?.type === 'Literal' ? c.test.value : null;
+      walk(trees.initial, node => {
+        if (node.type !== 'SwitchStatement' || node.discriminant.type !== 'MemberExpression' || node.discriminant.computed ||
+            node.discriminant.object.type !== 'Identifier' || node.discriminant.property.name !== 'type') return;
+        const message = node.discriminant.object.name;
+        const init = node.cases.find(c => caseLabel(c) === 'codex-app-server-initialized');
+        if (!init) return;
+        // ml(queryClient, {queryKey: [...mcpStatusKey, e.hostId]}, {cancelRefetch: !1})
+        const calls = [];
+        for (const statement of init.consequent) walk(statement, inner => {
+          if (inner.type !== 'CallExpression' || inner.callee.type !== 'Identifier' || inner.arguments.length !== 3) return;
+          const [client, filters, options] = inner.arguments;
+          if (client.type !== 'Identifier' || filters.type !== 'ObjectExpression' || options.type !== 'ObjectExpression') return;
+          if (filters.properties.length !== 1 || options.properties.length !== 1) return;
+          const [keyProp] = filters.properties, [cancelProp] = options.properties;
+          if (keyProp.type !== 'Property' || keyProp.computed || keyProp.key.name !== 'queryKey' || keyProp.value.type !== 'ArrayExpression') return;
+          if (cancelProp.type !== 'Property' || cancelProp.computed || cancelProp.key.name !== 'cancelRefetch' || !isFalse(cancelProp.value)) return;
+          const [prefix, host] = keyProp.value.elements;
+          if (keyProp.value.elements.length !== 2 || prefix?.type !== 'SpreadElement' || prefix.argument.type !== 'Identifier' ||
+              host?.type !== 'MemberExpression' || host.computed || host.object.type !== 'Identifier' || host.object.name !== message ||
+              host.property.name !== 'hostId') return;
+          calls.push({ node: inner, client: client.name, filters, options, message });
+        });
+        if (calls.length === 1) initCases.push(calls[0]);
+      });
+      record('repeatInitSnapshotNoRefetch', 'initial', initCases, ({ node, client, filters, options, message }) => {
+        const src = n => sources.initial.slice(n.start, n.end);
+        const seen = `(globalThis.__codexPPAppServerInitSeen??=(()=>{const ppAppServerInitSeen=new Map;return ppAppServerInitMessage=>{try{` +
+          `const ppAppServerInitValue=JSON.stringify([ppAppServerInitMessage.transport,ppAppServerInitMessage.appServerVersion,ppAppServerInitMessage.installedCodexVersion]),` +
+          `ppAppServerInitRepeat=ppAppServerInitMessage.isSnapshot===!0&&ppAppServerInitSeen.get(ppAppServerInitMessage.hostId)===ppAppServerInitValue;` +
+          `ppAppServerInitSeen.set(ppAppServerInitMessage.hostId,ppAppServerInitValue);return ppAppServerInitRepeat}catch{return!1}}})())`;
+        return { start: node.start, end: node.end,
+          text: `${marker}(${seen}(${message})?${client}.invalidateQueries(${src(filters)},${src(options)}):${src(node)})` };
+      });
+    } else skipped.repeatInitSnapshotNoRefetch = 'module not found';
     // ===== end of plugin lane =====
 
 

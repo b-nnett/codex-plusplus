@@ -27,6 +27,8 @@ struct ReviewedPatchRecipe: Decodable {
     let version: String
     let build: String
     let settingsReport: NativeSettingsAdapter.Discovery
+    /// The startup discovery report of the patch the recipe was taken from.
+    let startupReport: StartupDiscoveryReport?
     let replacements: [Replacement]
 
     /// Caller verifies the complete helper signature before reading its resources.

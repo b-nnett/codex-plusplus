@@ -11,6 +11,8 @@ struct RendererPipeline {
         let required: Bool
         let seconds: Double
         let error: String?
+        /// Why each earlier attempt failed, when the step was retried (startup).
+        var retries: [String] = []
     }
     struct Output {
         /// Every rewritten archive file, by path, in the order they were produced.
@@ -27,13 +29,15 @@ struct RendererPipeline {
     /// Keep going after a required adapter fails (build reviews only).
     var continuesAfterFailure = false
 
-    func run(archive original: AsarArchive, settingsRuntime runtime: String) throws -> Output {
+    func run(archive original: AsarArchive, settingsRuntime runtime: String, onRetry: (String) -> Void = { _ in }) throws -> Output {
         var output = Output()
+        var retries: [String] = []
         func step<T>(_ name: String, required: Bool, _ body: () throws -> T) throws -> T? {
             let start = DispatchTime.now().uptimeNanoseconds
             func record(_ error: Error?) {
                 let seconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1e9
-                output.steps.append(Step(adapter: name, required: required, seconds: seconds, error: error?.localizedDescription))
+                output.steps.append(Step(adapter: name, required: required, seconds: seconds, error: error?.localizedDescription, retries: retries))
+                retries = []
             }
             do { let value = try body(); record(nil); return value }
             catch { record(error); if required && !continuesAfterFailure { throw error }; return nil }
@@ -65,8 +69,12 @@ struct RendererPipeline {
             output.browserPath = browser.0
             renderers = renderers.filter({ $0.0 != browser.0 }) + [browser]
         }
-        // Optional startup fast path: unmatched code stays unpatched.
-        if let startup = try step("startup", required: false, { try StartupAdapter.diagnose(archive: original, replacements: renderers) }) {
+        // Startup fast path: unmatched code stays unpatched, but a discovery
+        // that cannot finish even when retried with a longer deadline (a busy
+        // machine) fails the patch rather than installing it without speed-ups.
+        if let startup = try step("startup", required: true, {
+            try StartupAdapter.diagnoseForPatch(archive: original, replacements: renderers, onRetry: { failure in retries.append(failure.reason); onRetry(failure.reason) })
+        }) {
             output.startup = startup
             let paths = Set(startup.result.replacements.map { $0.0 })
             renderers = renderers.filter({ !paths.contains($0.0) }) + startup.result.replacements

@@ -94,6 +94,7 @@ public enum BuildReview {
         for step in pipeline.steps {
             var entry: [String: Any] = ["name": step.adapter, "required": step.required, "seconds": step.seconds, "status": step.error == nil ? "ok" : "failed"]
             if let error = step.error { entry["error"] = error }
+            if !step.retries.isEmpty { entry["retries"] = step.retries }
             var edits: [[String: Any]] = []
             switch step.adapter {
             case "settings":
@@ -143,6 +144,8 @@ public enum BuildReview {
                         return row
                     }
                     if let entryPath = startup.entry { entry["entry"] = entryPath }
+                    // The adapter's own measure, as the patch's discovery report records it.
+                    entry["duration"] = startup.result.duration
                 }
             default: break
             }
@@ -154,7 +157,7 @@ public enum BuildReview {
         return [
             "schema": 1,
             "generatedAt": ISO8601DateFormatter().string(from: Date()),
-            "tool": ["patchRevision": PatchAdapter.revision, "experiments": PatchAdapter.experimentsEnabled, "discoveryTimeoutSeconds": 60],
+            "tool": ["patchRevision": PatchAdapter.revision, "experiments": PatchAdapter.experimentsEnabled, "discoveryDeadlines": StartupAdapter.deadlines],
             "app": appInfo,
             "identity": identity,
             "native": native,

@@ -9,7 +9,7 @@ import {spawnSync} from 'node:child_process';
 const script = new URL('../scripts/review-build.py', import.meta.url).pathname;
 const chunk = (key, prefix, path, prefixMatches = path ? 1 : 0) =>
   ({key, directory:'webview/assets', prefix, markers:[], prefixMatches, ...(path ? {path} : {})});
-function review({build, startupEdits, chunks, settings = {status:'ok'}}) {
+function review({build, startupEdits, chunks, settings = {status:'ok'}, startup = {}}) {
   return {
     schema:1, generatedAt:'2026-10-15T00:00:00Z', tool:{patchRevision:150, experiments:false},
     app:{requested:'/Applications/ChatGPT.app', original:'/Applications/.ChatGPT.codexpp-original-X.app'},
@@ -17,7 +17,7 @@ function review({build, startupEdits, chunks, settings = {status:'ok'}}) {
     native:[{name:'bootstrapEntry', status:'applied', target:'.vite/build/early-bootstrap.js'}],
     adapters:[
       {name:'settings', required:true, seconds:2, edits:settings.status === 'ok' ? [{name:'page', status:'applied', target:'settings-page-1.js (a)'}] : [], ...settings},
-      {name:'startup', required:false, seconds:25, status:'ok', edits:startupEdits, chunks},
+      {name:'startup', required:true, seconds:25, status:'ok', edits:startupEdits, chunks, ...startup},
     ],
   };
 }
@@ -56,7 +56,7 @@ test('a release edit that applied before and now skips fails the review, with a 
   assert.match(edits.cachedFlags.hint, /chunk `initial` not found \(prefix `app-initial-` in webview\/assets matched 2 file\(s\); needs exactly one\)/);
   assert.match(edits.liveUpdates.hint, /code shape is gone from `shared` \(app-shared-2\.js\)/);
   assert.equal(edits.queryTimings.hint, 'diagnostic edit; release helpers never apply it');
-  assert.match(report.summary.warnings[0], /startup discovery took 25\.0 s \(over 20 s; the hard limit is 60 s\)/);
+  assert.match(report.summary.warnings[0], /startup discovery took 25\.0 s \(over 20 s; the first deadline is 60 s, then one retry at 180 s\)/);
   assert.match(md, /\*\*Regressions\*\* .*`startup\.cachedFlags` \(module not found\)/);
   assert.match(md, /## Skipped release edits/);
   assert.match(md, /Development-only diagnostics skipped as expected: queryTimings\./);
@@ -90,4 +90,14 @@ test('a required adapter failure means the build would not patch, even without a
   assert.deepEqual(report.summary.blockers, ['settings: Settings compatibility: expected one Button, found 2']);
   assert.match(md, /would FAIL/);
   assert.equal(report.diff, undefined);
+});
+
+test('a startup discovery that cannot finish, even retried, means the build would not patch', () => {
+  const timedOut = review({build:'400', chunks:[], startupEdits:[], startup:{status:'failed', seconds:241,
+    retries:['Code discovery timed out after 60 s; the app was not patched.'],
+    error:'Startup discovery failed (Code discovery timed out after 180 s; the app was not patched.). ChatGPT was left as it was; retry the patch when the Mac is less busy.'}});
+  const {status, report} = run(timedOut);
+  assert.equal(status, 1);
+  assert.match(report.summary.blockers[0], /^startup: Startup discovery failed \(Code discovery timed out after 180 s/);
+  assert.match(report.summary.warnings[0], /startup discovery was retried with a longer deadline after: Code discovery timed out after 60 s/);
 });

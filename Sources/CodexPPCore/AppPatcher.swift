@@ -310,6 +310,7 @@ public struct AppPatcher: Sendable {
                     onProgress("Preparing extensions…")
                     replacements += try recipe.patches(in: original)
                     try JSONEncoder().encode(recipe.settingsReport).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-settings-discovery.json"), options: .atomic)
+                    if let report = recipe.startupReport { try JSONEncoder().encode(report).write(to: stage.appendingPathComponent(StartupStatus.reportPath), options: .atomic) }
                 } else if adapter.isReviewed {
                     let resources = helper.appendingPathComponent("Contents/Resources")
                     let bundles = try fm.contentsOfDirectory(at: resources, includingPropertiesForKeys: nil).filter { $0.pathExtension == "bundle" }
@@ -317,17 +318,17 @@ public struct AppPatcher: Sendable {
                     let runtime = try String(contentsOf: runtimeURL, encoding: .utf8)
                     onProgress("Adapting extensions…")
                     // The same pipeline `BuildReview` reports on; here a required
-                    // adapter that fails stops the patch.
-                    let discovery = try RendererPipeline().run(archive: original, settingsRuntime: runtime)
+                    // adapter that fails, or a startup discovery that cannot finish
+                    // even when retried, stops the patch.
+                    let discovery = try RendererPipeline().run(archive: original, settingsRuntime: runtime, onRetry: { _ in self.onProgress("Retrying startup discovery…") })
                     if let settings = discovery.settings {
                         try JSONEncoder().encode(settings).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-settings-discovery.json"), options: .atomic)
                     }
                     if let sidebar = discovery.sidebar {
                         try JSONEncoder().encode(SidebarDiscoveryReport(missing: sidebar.missing, capabilities: sidebar.report)).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-sidebar-discovery.json"), options: .atomic)
                     }
-                    if let startup = discovery.startup?.result {
-                        try JSONEncoder().encode(StartupDiscoveryReport(applied: startup.applied, skipped: startup.skipped)).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-startup-discovery.json"), options: .atomic)
-                    }
+                    guard let startup = discovery.startup?.result else { throw PatchError.invalid("Startup discovery did not run.") }
+                    try JSONEncoder().encode(StartupDiscoveryReport(applied: startup.applied, skipped: startup.skipped, duration: startup.duration)).write(to: stage.appendingPathComponent(StartupStatus.reportPath), options: .atomic)
                     replacements += discovery.renderers
                 }
                 let headerHash = try AsarArchive(stagedArchive).replacing(replacements, output: temporary)
