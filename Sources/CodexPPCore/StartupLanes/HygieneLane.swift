@@ -14,6 +14,5 @@ extension StartupStatus {
         "benignResizeObserverNotice": "ResizeObserver notices not logged as errors",
         "knownConversationNotifications": "Thread updates only in windows that have the thread",
         "libraryTrashPaginationGuard": "Bounded Library Empty Trash listing",
-        "sharedMcpInventory": "Fewer MCP inventory requests",
     ]
 }
