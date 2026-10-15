@@ -241,8 +241,39 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
   adapt(input) {
     const marker = '/*codexpp:startup*/';
     const parse = source => acorn.parse(source, { ecmaVersion: 'latest', sourceType: 'module' });
+    // A whole module is walked by dozens of edits. Its nodes are listed once,
+    // in the same pre-order, with each node's parent, and every later walk of
+    // that module is a loop over the list; ancestors are built only for
+    // visitors that take them. Walks of a subtree use the plain recursion.
+    const flattened = new WeakMap();
+    function flatten(root) {
+      const nodes = [], parents = [], stack = [[root, -1]];
+      while (stack.length) {
+        const [node, parent] = stack.pop(), index = nodes.length;
+        nodes.push(node); parents.push(parent);
+        const children = [];
+        for (const value of Object.values(node)) {
+          if (Array.isArray(value)) { for (const child of value) if (child && typeof child.type === 'string') children.push(child); }
+          else if (value && typeof value.type === 'string') children.push(value);
+        }
+        for (let i = children.length - 1; i >= 0; i--) stack.push([children[i], index]);
+      }
+      const list = { nodes, parents };
+      flattened.set(root, list);
+      return list;
+    }
     function walk(node, visit, ancestors = []) {
       if (!node || typeof node.type !== 'string') return;
+      if (ancestors.length === 0 && node.type === 'Program') {
+        const { nodes, parents } = flattened.get(node) ?? flatten(node), withAncestors = visit.length >= 2;
+        for (let i = 0; i < nodes.length; i++) {
+          if (!withAncestors) { visit(nodes[i]); continue; }
+          const chain = [];
+          for (let p = parents[i]; p !== -1; p = parents[p]) chain.push(nodes[p]);
+          visit(nodes[i], chain.reverse());
+        }
+        return;
+      }
       visit(node, ancestors);
       ancestors.push(node);
       for (const value of Object.values(node)) {
