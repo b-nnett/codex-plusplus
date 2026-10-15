@@ -45,7 +45,9 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['ambientSuggestionsLowEffort', 'ambientSuggestionsOnDemand', 'appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'cachedAutoHighlightLanguage', 'capIdlePageSessions', 'catchUpPredictionWhenShown', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'gitStateWhenChanged', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'pubsubReconnectCap', 'queryTimings', 'queuedAppearanceChange', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'terminalOutputAppend', 'terminalWebglRenderer', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
+  // Every other edit is skipped because its chunk or code is not in this fixture.
+  // None was dropped for breaking the module or colliding with another edit.
+  assert.ok(!Object.values(result.skipped).some(reason => /did not parse|overlaps another edit|already exists/.test(reason)), JSON.stringify(result.skipped));
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });

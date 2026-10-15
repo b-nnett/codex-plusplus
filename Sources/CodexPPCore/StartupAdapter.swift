@@ -11,96 +11,96 @@ public enum StartupAdapter {
         public let applied: [String: String]
         public let skipped: [String: String]
     }
-    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let appServer: String?; let remoteSettings: String?; let xtermOutput: String?; let terminalPanel: String?; let primary: String?; let ambient: String?; let css: [String: String]? }
+    /// The adapter's result: which edits applied or were skipped, and the
+    /// rewritten source for each input chunk it changed, by chunk key.
+    struct Output: Decodable {
+        let applied: [String: String]
+        let skipped: [String: String]
+        let css: [String: String]?
+        let chunks: [String: String]
+        private struct Key: CodingKey {
+            let stringValue: String
+            init(stringValue: String) { self.stringValue = stringValue }
+            var intValue: Int? { nil }
+            init?(intValue: Int) { nil }
+        }
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: Key.self)
+            applied = try container.decode([String: String].self, forKey: Key(stringValue: "applied"))
+            skipped = try container.decode([String: String].self, forKey: Key(stringValue: "skipped"))
+            css = try container.decodeIfPresent([String: String].self, forKey: Key(stringValue: "css"))
+            var chunks: [String: String] = [:]
+            for key in container.allKeys where !["applied", "skipped", "css"].contains(key.stringValue) {
+                if let text = try? container.decode(String.self, forKey: key) { chunks[key.stringValue] = text }
+            }
+            self.chunks = chunks
+        }
+        subscript(_ key: String) -> String? { chunks[key] }
+        var shared: String? { chunks["shared"] }
+        var initial: String? { chunks["initial"] }
+    }
+
+    /// The vendor chunks the edits target. Each resolves to the single `.js`
+    /// file in its directory whose name starts with the prefix and whose source
+    /// contains every marker; without markers the prefix alone must be unique.
+    static let coreChunks: [StartupChunk] = [
+        StartupChunk("shared", prefix: "app-shared-"),
+        StartupChunk("initial", prefix: "app-initial-"),
+        StartupChunk("requirements", in: ".vite/build", prefix: "startup-requirements-"),
+        StartupChunk("main", in: ".vite/build", prefix: "main-"),
+        // The app-server websocket transport (its keep-alive ping).
+        StartupChunk("network", in: ".vite/build", prefix: "application-network-startup-"),
+        // The Remote Connections settings page (its refresh poll).
+        StartupChunk("remoteSettings", prefix: "remote-connections-settings-"),
+        // The app-server connection and remote-control websocket.
+        StartupChunk("appServer", in: ".vite/build", prefix: "src-", containing: ["(`AppServerConnection`)"]),
+        // The composer (its catch-up prediction query).
+        StartupChunk("primary", prefix: "app-primary-"),
+        // The ambient suggestions generator; when it is the app-server chunk
+        // its edits are made through that input (see `aliases`).
+        StartupChunk("ambient", in: ".vite/build", prefix: "src-", containing: ["ambientSuggestionsModel", "first-plugin-connect"]),
+        // The background-command output terminal and the integrated terminal.
+        StartupChunk("xtermOutput", prefix: "xterm-output-panel-"),
+        StartupChunk("terminalPanel", prefix: "terminal-panel-", containing: ["TerminalPanel", "ResizeObserver"]),
+        // The checkout webview hosts.
+        StartupChunk("checkout", prefix: "webview-page-", containing: ["CheckoutPricingWebviewHost"]),
+        // Empty Trash in a Space, and a Space's icon and colour picker.
+        StartupChunk("trash", prefix: "space-trash-items-", containing: ["`/pages/archived`"]),
+        StartupChunk("appearance", prefix: "space-appearance-button-", containing: ["/spaces/v2/{space_id}/appearance"]),
+    ]
+    /// Every chunk, including those the edit lanes add (StartupLanes/*.swift).
+    static var chunks: [StartupChunk] { coreChunks + streamingChunks + turnsChunks + hygieneChunks + pluginChunks }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
         do {
             try PatchAdapter.approveArchive(archive)
-            func module(_ prefix: String, in directory: String = "webview/assets") throws -> (String, String)? {
-                let paths = try archive.packedFiles(in: directory).filter {
-                    let name = URL(fileURLWithPath: $0).lastPathComponent
-                    return name.hasPrefix(prefix) && name.hasSuffix(".js")
-                }
-                guard paths.count == 1, let path = paths.first else { return nil }
+            func source(at path: String) throws -> String? {
                 let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
-                guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8) else { return nil }
-                return (path, source)
+                guard data.count <= 32 * 1024 * 1024 else { return nil }
+                return String(data: data, encoding: .utf8)
             }
-            let shared = try module("app-shared-"), initial = try module("app-initial-")
-            let requirements = try module("startup-requirements-", in: ".vite/build")
-            let main = try module("main-", in: ".vite/build")
-            // The app-server websocket transport (its keep-alive ping).
-            let network = try module("application-network-startup-", in: ".vite/build")
-            // The Remote Connections settings page (its refresh poll).
-            let remoteSettings = try module("remote-connections-settings-")
-            // The app-server connection and remote-control websocket live in one
-            // of several .vite/build/src-* chunks.
-            func buildModule(containing markers: [String]) throws -> (String, String)? {
-                let paths = try archive.packedFiles(in: ".vite/build").filter {
+            func resolve(_ chunk: StartupChunk) throws -> (String, String)? {
+                let paths = try archive.packedFiles(in: chunk.directory).filter {
                     let name = URL(fileURLWithPath: $0).lastPathComponent
-                    return name.hasPrefix("src-") && name.hasSuffix(".js")
+                    return name.hasPrefix(chunk.prefix) && name.hasSuffix(".js")
+                }
+                if chunk.markers.isEmpty {
+                    guard paths.count == 1, let text = try source(at: paths[0]) else { return nil }
+                    return (paths[0], text)
                 }
                 let matches = try paths.compactMap { path -> (String, String)? in
-                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
-                    guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
-                          markers.allSatisfy(source.contains) else { return nil }
-                    return (path, source)
+                    guard let text = try source(at: path), chunk.markers.allSatisfy(text.contains) else { return nil }
+                    return (path, text)
                 }
                 return matches.count == 1 ? matches[0] : nil
             }
-            let appServer = try buildModule(containing: ["(`AppServerConnection`)"])
-            // The composer (its catch-up prediction query).
-            let primary = try module("app-primary-")
-            // The main-process ambient suggestions generator, in one of the src-* chunks.
-            // When it is the app-server chunk, its edit is made through that input.
-            let ambientCandidate = try buildModule(containing: ["ambientSuggestionsModel", "first-plugin-connect"])
-            let ambient = ambientCandidate?.0 == appServer?.0 ? nil : ambientCandidate
-            // The background-command output terminal, and the integrated terminal
-            // (two chunks share its prefix; only one holds the panel).
-            let xtermOutput = try module("xterm-output-panel-")
-            let terminalPanel: (String, String)? = try {
-                let paths = try archive.packedFiles(in: "webview/assets").filter {
-                    let name = URL(fileURLWithPath: $0).lastPathComponent
-                    return name.hasPrefix("terminal-panel-") && name.hasSuffix(".js")
-                }
-                let matches = try paths.compactMap { path -> (String, String)? in
-                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
-                    guard data.count <= 8 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
-                          source.contains("TerminalPanel"), source.contains("ResizeObserver") else { return nil }
-                    return (path, source)
-                }
-                return matches.count == 1 ? matches[0] : nil
-            }()
-            // The checkout webview hosts live in one of several webview-page-* chunks.
-            let checkout: (String, String)? = try {
-                let paths = try archive.packedFiles(in: "webview/assets").filter {
-                    let name = URL(fileURLWithPath: $0).lastPathComponent
-                    return name.hasPrefix("webview-page-") && name.hasSuffix(".js")
-                }
-                let matches = try paths.compactMap { path -> (String, String)? in
-                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
-                    guard data.count <= 8 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
-                          source.contains("CheckoutPricingWebviewHost") else { return nil }
-                    return (path, source)
-                }
-                return matches.count == 1 ? matches[0] : nil
-            }()
-            // Space chunks, picked by content when several hashed copies share a prefix.
-            func spaceModule(_ prefix: String, containing marker: String) throws -> (String, String)? {
-                let paths = try archive.packedFiles(in: "webview/assets").filter {
-                    let name = URL(fileURLWithPath: $0).lastPathComponent
-                    return name.hasPrefix(prefix) && name.hasSuffix(".js")
-                }
-                let matches = try paths.compactMap { path -> (String, String)? in
-                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
-                    guard data.count <= 8 * 1024 * 1024, let source = String(data: data, encoding: .utf8), source.contains(marker) else { return nil }
-                    return (path, source)
-                }
-                return matches.count == 1 ? matches[0] : nil
+            // Each archive path is one input; a later chunk that resolves to the
+            // same file becomes an alias, so all its edits compose in one source.
+            var resolved: [String: (String, String)] = [:], aliases: [String: String] = [:]
+            for chunk in chunks where resolved[chunk.key] == nil && aliases[chunk.key] == nil {
+                guard let found = try resolve(chunk) else { continue }
+                if let owner = resolved.first(where: { $0.value.0 == found.0 })?.key { aliases[chunk.key] = owner } else { resolved[chunk.key] = found }
             }
-            // Empty Trash in a Space, and a Space's icon and colour picker.
-            let trash = try spaceModule("space-trash-items-", containing: "`/pages/archived`")
-            let appearance = try spaceModule("space-appearance-button-", containing: "/spaces/v2/{space_id}/appearance")
             // index.html and its entry module, for the entry preload hints.
             let htmlPath = "webview/index.html"
             let htmlData = try replacements.first(where: { $0.0 == htmlPath })?.1 ?? archive.data(at: htmlPath)
@@ -112,24 +112,11 @@ public enum StartupAdapter {
                 guard let source = String(data: try archive.data(at: path), encoding: .utf8) else { return nil }
                 return (path, source)
             }
-            var input: [String: Any] = ["diagnostics": PatchAdapter.experimentsEnabled]
-            if let shared { input["shared"] = shared.1 }
-            if let initial { input["initial"] = initial.1 }
-            if let requirements { input["requirements"] = requirements.1 }
-            if let main { input["main"] = main.1 }
-            if let network { input["network"] = network.1 }
-            if let appServer { input["appServer"] = appServer.1 }
-            if let remoteSettings { input["remoteSettings"] = remoteSettings.1 }
-            if let checkout { input["checkout"] = checkout.1 }
-            if let trash { input["trash"] = trash.1 }
-            if let appearance { input["appearance"] = appearance.1 }
-            if let xtermOutput { input["xtermOutput"] = xtermOutput.1 }
-            if let terminalPanel { input["terminalPanel"] = terminalPanel.1 }
+            var input: [String: Any] = ["diagnostics": PatchAdapter.experimentsEnabled, "aliases": aliases]
+            for (key, chunk) in resolved { input[key] = chunk.1 }
             // The xterm WebGL renderer addon, inlined into the terminal panel.
-            if terminalPanel != nil, let url = Bundle.module.url(forResource: "xterm-addon-webgl", withExtension: "js"),
+            if resolved["terminalPanel"] != nil, let url = Bundle.module.url(forResource: "xterm-addon-webgl", withExtension: "js"),
                let addon = try? String(contentsOf: url, encoding: .utf8) { input["webglAddon"] = addon }
-            if let primary { input["primary"] = primary.1 }
-            if let ambient { input["ambient"] = ambient.1 }
             if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
             // Every stylesheet, for the viewport container-query rewrite.
             var stylesheets: [String: String] = [:]
@@ -140,21 +127,10 @@ public enum StartupAdapter {
             input["css"] = stylesheets
             let output = try adapt(input: input, archive: archive)
             var result: [(String, Data)] = []
-            if let source = output.shared, let shared { result.append((shared.0, Data(source.utf8))) }
-            if let source = output.initial, let initial { result.append((initial.0, Data(source.utf8))) }
-            if let source = output.requirements, let requirements { result.append((requirements.0, Data(source.utf8))) }
-            if let source = output.html { result.append((htmlPath, Data(source.utf8))) }
-            if let source = output.main, let main { result.append((main.0, Data(source.utf8))) }
-            if let source = output.network, let network { result.append((network.0, Data(source.utf8))) }
-            if let source = output.appServer, let appServer { result.append((appServer.0, Data(source.utf8))) }
-            if let source = output.remoteSettings, let remoteSettings { result.append((remoteSettings.0, Data(source.utf8))) }
-            if let source = output.checkout, let checkout { result.append((checkout.0, Data(source.utf8))) }
-            if let source = output.trash, let trash { result.append((trash.0, Data(source.utf8))) }
-            if let source = output.appearance, let appearance { result.append((appearance.0, Data(source.utf8))) }
-            if let source = output.xtermOutput, let xtermOutput { result.append((xtermOutput.0, Data(source.utf8))) }
-            if let source = output.terminalPanel, let terminalPanel { result.append((terminalPanel.0, Data(source.utf8))) }
-            if let source = output.primary, let primary { result.append((primary.0, Data(source.utf8))) }
-            if let source = output.ambient, let ambient { result.append((ambient.0, Data(source.utf8))) }
+            if let source = output["html"] { result.append((htmlPath, Data(source.utf8))) }
+            for (key, chunk) in resolved.sorted(by: { $0.key < $1.key }) {
+                if let source = output[key] { result.append((chunk.0, Data(source.utf8))) }
+            }
             for (path, source) in output.css ?? [:] where stylesheets[path] != nil { result.append((path, Data(source.utf8))) }
             return Result(replacements: result, applied: output.applied, skipped: output.skipped)
         } catch {
@@ -197,7 +173,8 @@ struct StartupDiscoveryReport: Codable {
 public struct StartupStatus: Equatable, Sendable {
     public static let reportPath = "Contents/Resources/codexpp-startup-discovery.json"
     static let diagnostics: Set<String> = ["appGateReasons", "chunkTimings", "loadingGateTimings", "opaqueSurfaceExperiment", "policyPhaseTimings", "queryTimings"]
-    static let labels: [String: String] = [
+    static var labels: [String: String] { coreLabels.merging(streamingLabels) { a, _ in a }.merging(turnsLabels) { a, _ in a }.merging(hygieneLabels) { a, _ in a }.merging(pluginLabels) { a, _ in a } }
+    static let coreLabels: [String: String] = [
         "statsigCacheFirst": "Cached feature flags", "statsigUserCacheFirst": "Cached feature flags for the signed-in user",
         "statsigBootstrapCacheFirst": "Cached sign-in bootstrap", "settingsCacheFirst": "Cached settings",
         "startupRevealUnthrottled": "Immediate first render", "deferDictationCues": "Deferred dictation sounds",

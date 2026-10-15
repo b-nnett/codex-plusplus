@@ -249,24 +249,35 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     const member = (node, name) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
-    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [], trash: [], appearance: [], appServer: [], remoteSettings: [], xtermOutput: [], terminalPanel: [], primary: [], ambient: [] };
+    const applied = {}, skipped = {}, edits = {};
     // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
     // ship only in development builds of the helper (input.diagnostics).
     const diagnostics = input.diagnostics === true;
     const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
-    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout, trash: input.trash, appearance: input.appearance, appServer: input.appServer, remoteSettings: input.remoteSettings, xtermOutput: input.xtermOutput, terminalPanel: input.terminalPanel, primary: input.primary, ambient: input.ambient };
+    // Every string input is a vendor chunk, by key, except these and any
+    // input whose key starts with "asset" (files Codex++ ships, like the
+    // terminal's WebGL renderer). An alias names a chunk that is the same file
+    // as another input; its edits are composed into that input's source.
+    const notChunks = new Set(['diagnostics', 'aliases', 'css', 'html', 'entry', 'webglAddon']);
+    const sources = {};
+    for (const [key, value] of Object.entries(input)) if (typeof value === 'string' && !notChunks.has(key) && !key.startsWith('asset')) sources[key] = value;
+    const aliases = {};
+    for (const [alias, target] of Object.entries(input.aliases && typeof input.aliases === 'object' ? input.aliases : {})) {
+      if (typeof sources[target] === 'string' && sources[alias] === undefined) aliases[alias] = target;
+    }
     if (Object.values(sources).some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
     }
     const trees = {};
     let result_html = null;
     for (const [key, source] of Object.entries(sources)) if (typeof source === 'string') trees[key] = parse(source);
+    for (const [alias, target] of Object.entries(aliases)) { sources[alias] = sources[target]; trees[alias] = trees[target]; }
     function record(name, file, matches, edit) {
       if (!trees[file]) { skipped[name] = 'module not found'; return; }
       if (developmentOnly.has(name) && !diagnostics) { skipped[name] = 'development builds only'; return; }
       if (matches.length !== 1) { skipped[name] = `expected one match, found ${matches.length}`; return; }
       const made = edit(matches[0]);
-      for (const one of Array.isArray(made) ? made : [made]) edits[file].push({ ...one, name });
+      for (const one of Array.isArray(made) ? made : [made]) (edits[aliases[file] ?? file] ??= []).push({ ...one, name });
       applied[name] = file;
     }
 
@@ -528,7 +539,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         const fields = ':is([contenteditable],textarea,input)';
         const css = `${fields}{caret-animation:manual}@media (prefers-reduced-motion:no-preference){:root[data-codexpp-caret-blink] ${fields}:focus{` +
           `animation:codexpp-caret-blink 1.06s step-end 5}}@keyframes codexpp-caret-blink{50%{caret-color:transparent}}`;
-        edits.initial.push({ name: 'caretBlinkTimeout', start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
+        (edits.initial ??= []).push({ name: 'caretBlinkTimeout', start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `if(typeof document==="undefined"||!globalThis.CSS?.supports?.("caret-animation","manual"))return;` +
           `const ppStyle=document.createElement("style");ppStyle.textContent=${JSON.stringify(css)};(document.head??document.documentElement).append(ppStyle);` +
           // Restart the blink on activity: drop the attribute, set it again next frame.
@@ -536,7 +547,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `ppFrame=requestAnimationFrame(()=>ppRoot.setAttribute("data-codexpp-caret-blink",""))};` +
           `for(const ppEvent of["keydown","pointerdown","focusin"])addEventListener(ppEvent,ppWake,!0)}catch{}})();` });
         applied.caretBlinkTimeout = 'initial';
-        edits.initial.push({ name: 'compositorShimmer', start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
+        (edits.initial ??= []).push({ name: 'compositorShimmer', start: firstStatement.start, end: firstStatement.start, text: `${marker}${compositorShimmer}` });
         applied.compositorShimmer = 'initial';
       } else skipped.caretBlinkTimeout = skipped.compositorShimmer = firstStatement ? 'initial bundle not recognised' : 'module not found';
       // The app shell measures itself with a ResizeObserver, which runs after
@@ -566,7 +577,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `ppElement.isConnected&&(ppHeight.set(ppElement.clientHeight),ppWidth.set(ppElement.clientWidth))},!0);` +
           `return(ppElement,ppHeight,ppWidth)=>{ppElement?ppShells.set(ppWidth,[ppElement,ppHeight]):ppShells.delete(ppWidth)}})())(${element},${height},${width});` }));
       if (firstStatement && applied.chunkTimings) {
-        edits.initial.push({ name: 'learnedStartupPreload', start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
+        (edits.initial ??= []).push({ name: 'learnedStartupPreload', start: firstStatement.start, end: firstStatement.start, text: `${marker}(()=>{try{` +
           `const ppKey="codexpp.startupChunks.v2:"+import.meta.url;let ppList=null;try{ppList=JSON.parse(localStorage.getItem(ppKey)??"null")}catch{}` +
           `if(Array.isArray(ppList))for(const ppName of ppList.slice(0,40)){if(typeof ppName!=="string"||!/^\\.\\/[\\w.-]+\\.js$/.test(ppName))continue;` +
           `const ppLink=document.createElement("link");ppLink.rel="modulepreload";ppLink.crossOrigin="";ppLink.href=new URL(ppName,import.meta.url).href;document.head.append(ppLink)}` +
@@ -746,7 +757,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
         const cacheable = '/^(PATH|MANPATH|INFOPATH|FPATH|LANG|LC_[A-Z]+|EDITOR|VISUAL|PAGER|HOMEBREW_(PREFIX|CELLAR|REPOSITORY)|[A-Z][A-Z0-9_]*_(HOME|ROOT|DIR|PATH))$/';
         const sensitive = '/(KEY|TOKEN|SECRET|PASS|AUTH|CREDENTIAL|COOKIE|SESSION|PRIVATE)/i';
         const credentials = '/:\\/\\/[^\\/\\s@]*@/';
-        edits.requirements.push({ name: 'shellEnvironmentCacheFirst', start: load.start, end: load.end, text: `${marker}await(async ppLoad=>{const ppFs=require("fs"),` +
+        (edits.requirements ??= []).push({ name: 'shellEnvironmentCacheFirst', start: load.start, end: load.end, text: `${marker}await(async ppLoad=>{const ppFs=require("fs"),` +
           `ppFile=require("path").join(${electron}.app.getPath("userData"),"codexpp-shell-environment-v2.json"),ppBefore={...process.env},` +
           // Caches written before the allow-list may hold values it now refuses.
           `ppOld=(()=>{try{ppFs.unlinkSync(require("path").join(${electron}.app.getPath("userData"),"codexpp-shell-environment.json"))}catch{}})(),` +
@@ -761,14 +772,14 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `void ppPending.then(()=>ppSave(ppCached.savedAt),()=>{})})(${src.slice(load.argument.callee.start, load.argument.callee.end)})` });
         applied.shellEnvironmentCacheFirst = 'requirements';
         const { mkdir } = phases[0];
-        if (mkdir) edits.requirements.push({ name: 'shellEnvironmentCacheFirst', start: mkdir.start, end: mkdir.end,
+        if (mkdir) (edits.requirements ??= []).push({ name: 'shellEnvironmentCacheFirst', start: mkdir.start, end: mkdir.end,
           text: `${marker}(require("fs").mkdirSync(${src.slice(mkdir.argument.arguments[0].start, mkdir.argument.arguments[0].end)},{recursive:!0}),void 0)` });
       } else if (trees.requirements) skipped.shellEnvironmentCacheFirst = 'shell environment load not found';
       if (phases.length === 1 && diagnostics) {
         const { first, request, validate } = phases[0];
-        edits.requirements.push({ name: 'policyPhaseTimings', start: first.end, end: first.end, text: `${marker}${mark('environment')};` });
-        edits.requirements.push({ name: 'policyPhaseTimings', start: request.start, end: request.start, text: `${marker}(${mark('policy-read')},0)||` });
-        edits.requirements.push({ name: 'policyPhaseTimings', start: validate.end, end: validate.end, text: `,ppPhase=(${mark('policy-validated')})` });
+        (edits.requirements ??= []).push({ name: 'policyPhaseTimings', start: first.end, end: first.end, text: `${marker}${mark('environment')};` });
+        (edits.requirements ??= []).push({ name: 'policyPhaseTimings', start: request.start, end: request.start, text: `${marker}(${mark('policy-read')},0)||` });
+        (edits.requirements ??= []).push({ name: 'policyPhaseTimings', start: validate.end, end: validate.end, text: `,ppPhase=(${mark('policy-validated')})` });
       }
     } else skipped.policyPhaseTimings = 'module not found';
 
@@ -1464,6 +1475,26 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `try{ppGl=new ppAddon;ppGl.onContextLoss(()=>{try{ppGl.dispose()}catch{}});ppTerm.loadAddon(ppGl)}catch{try{ppGl?.dispose()}catch{}}}})();\n` },
         { start: node.end, end: node.end, text: `,ppWebgl(${term})` }]);
     } else skipped.terminalWebglRenderer = trees.terminalPanel ? 'renderer addon not provided' : 'module not found';
+
+    // ===== streaming lane: streaming replies: per-frame rendering of the message being streamed and its turn. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of streaming lane =====
+
+
+    // ===== turns lane: streaming turn state: rebuilding turn items and applying output deltas per frame. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of turns lane =====
+
+
+    // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of hygiene lane =====
+
+
+    // ===== plugin lane: plugins and MCP servers: retries, validation, discovery. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of plugin lane =====
+
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;
