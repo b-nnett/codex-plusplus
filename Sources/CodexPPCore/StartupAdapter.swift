@@ -84,7 +84,7 @@ public enum StartupAdapter {
         StartupChunk("appearance", prefix: "space-appearance-button-", containing: ["/spaces/v2/{space_id}/appearance"]),
     ]
     /// Every chunk, including those the edit lanes add (StartupLanes/*.swift).
-    static var chunks: [StartupChunk] { coreChunks + streamingChunks + turnsChunks + gpuChunks + hygieneChunks + pluginChunks }
+    static var chunks: [StartupChunk] { coreChunks + streamingChunks + turnsChunks + gpuChunks + usageChunks + hygieneChunks + pluginChunks }
 
     /// Discovery for a patch: a failed run is retried once with a longer
     /// deadline, then fails the patch so the installed app stays as it is.
@@ -263,7 +263,7 @@ struct StartupDiscoveryReport: Codable {
 public struct StartupStatus: Equatable, Sendable {
     public static let reportPath = "Contents/Resources/codexpp-startup-discovery.json"
     static let diagnostics: Set<String> = ["appGateReasons", "chunkTimings", "loadingGateTimings", "opaqueSurfaceExperiment", "policyPhaseTimings", "queryTimings"]
-    static var labels: [String: String] { coreLabels.merging(streamingLabels) { a, _ in a }.merging(turnsLabels) { a, _ in a }.merging(gpuLabels) { a, _ in a }.merging(hygieneLabels) { a, _ in a }.merging(pluginLabels) { a, _ in a } }
+    static var labels: [String: String] { coreLabels.merging(streamingLabels) { a, _ in a }.merging(turnsLabels) { a, _ in a }.merging(gpuLabels) { a, _ in a }.merging(usageLabels) { a, _ in a }.merging(hygieneLabels) { a, _ in a }.merging(pluginLabels) { a, _ in a } }
     static let coreLabels: [String: String] = [
         "statsigCacheFirst": "Cached feature flags", "statsigUserCacheFirst": "Cached feature flags for the signed-in user",
         "statsigBootstrapCacheFirst": "Cached sign-in bootstrap", "settingsCacheFirst": "Cached settings",

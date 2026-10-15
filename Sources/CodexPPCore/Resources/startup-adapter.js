@@ -1983,6 +1983,11 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // ===== end of gpu lane =====
 
 
+    // ===== usage lane: hidden model calls that spend the user's plan usage (titles, descriptions, suggestions). =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of usage lane =====
+
+
     // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
     // (Edits of this lane go between these markers.)
 
