@@ -1,0 +1,23 @@
+<!doctype html><meta charset="utf-8"><title>wave bench</title>
+<style>body{margin:0;font:14px system-ui}main{display:flex;flex-direction:column;height:100vh}#log{flex:1;overflow:auto}#log p{margin:4px 12px}
+footer{display:flex;align-items:center;gap:8px;padding:8px;border-top:1px solid #ccc}#wave{width:240px;height:28px;color:rgb(30,30,30)}</style>
+<main><div id="log"></div><footer><span id="timer">0:00</span><canvas id="wave"></canvas><span>Listening</span></footer></main>
+<script src="work/wave-vendor.js"></script>
+<script>
+// The composer's dictation waveform (v1c, verbatim) drawn every frame next to a 3000-paragraph page.
+const log=document.getElementById('log');for(let i=0;i<3000;i++){const p=document.createElement('p');p.textContent='Message '+i+' '+'lorem ipsum dolor sit amet '.repeat(1+i%7);log.append(p)}
+// The upper bound of caching: draw() with the size, scale and colour read once and never again (not a candidate edit).
+class Cached extends v1c{draw(e,t){let n=e.getContext(`2d`);this.c??={r:e.clientWidth,i:e.clientHeight,ratio:e.getBoundingClientRect().width/e.clientWidth,color:getComputedStyle(e).color};const r=this.c.r,i=this.c.i;if(n==null||r===0||i===0)return;let a=Math.ceil(r/5)+2;a>this.history.length&&this.history.unshift(...Array(a-this.history.length).fill(0));let o=(window.devicePixelRatio||1)*this.c.ratio;(e.width!==Math.round(r*o)||e.height!==Math.round(i*o))&&(e.width=Math.round(r*o),e.height=Math.round(i*o)),n.setTransform(o,0,0,o,0,0),n.clearRect(0,0,r,i),n.fillStyle=this.c.color;let s=[.3,.5,1,.7,.4,.7],c=t?0:this.phase;for(let e=0;e<this.history.length;e++){let a=r-2-e*5-c,l=t?this.envelope*(s[e%s.length]??1):this.history[this.history.length-1-e]??0,u=Math.max(0,Math.min(a,r-a-2)),d=Math.min(1,u/20);n.globalAlpha=(1-this.blend)*.45*(l===0?.5:1)*d*d*(3-2*d);let f=2+l*(i*.88-2);n.beginPath(),n.roundRect(Math.round(a*o)/o,(i-f)/2,2,f,1),n.fill()}for(let[e,t]of this.compact.levels.entries()){let a=3+t*(Math.min(i,20)-3);n.globalAlpha=this.blend,n.beginPath(),n.roundRect((r-27)/2+e*5,(i-a)/2,2,a,1),n.fill()}n.globalAlpha=1}}
+let stop=null;
+// dirty: none | pre (another rAF callback changes text before the waveform draws) | both (and again after it).
+window.startWave=(variant,dirty)=>{const canvas=document.getElementById('wave'),timer=document.getElementById('timer');let frames=0,running=true,drawMs=0;
+  const pre=()=>{if(!running)return;timer.textContent='0:'+String(frames%60).padStart(2,'0');requestAnimationFrame(pre)};
+  const post=()=>{if(!running)return;log.lastChild.textContent='partial '+frames;requestAnimationFrame(post)};
+  if(dirty==='pre'||dirty==='both')requestAnimationFrame(pre);
+  const wave=variant==='cached'?new Cached:new v1c;let last=performance.now();
+  const audio=setInterval(()=>{const l=Math.random()*.2;wave.receive(l,Math.min(1,l*4))},46);
+  const loop=n=>{if(!running)return;wave.advance(n-last,false,true,false);const t0=performance.now();wave.draw(canvas,false);drawMs+=performance.now()-t0;last=n;frames++;requestAnimationFrame(loop)};requestAnimationFrame(loop);
+  if(dirty==='both')requestAnimationFrame(post);
+  stop=()=>{running=false;clearInterval(audio);return{frames,drawMsPerFrame:drawMs/frames}}};
+window.stopWave=()=>stop();
+</script>

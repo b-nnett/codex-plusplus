@@ -1873,6 +1873,113 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
         return { start: node.end, end: node.end, text: `,${marker}${gpuStyle('ppBlossomShimmerStyle', css)}` };
       });
     } else skipped.readyPulseOpacity = skipped.blossomShimmerTransform = 'module not found';
+
+    // imageUploadOffThread: before an image is uploaded to a ChatGPT
+    // conversation (pasted, dropped or picked in the ChatGPT composer), the app
+    // reads the whole file as a base64 data URL, decodes it through an <img>,
+    // and, when it is over 2048 px on a side or over 1 MB, draws it scaled into
+    // a canvas and re-encodes it with toBlob, all on the renderer's main thread:
+    // in headless Chrome 155 (scripts/media-bench) 40-65 ms for a 5K JPEG
+    // screenshot, 95-155 ms for a 5K PNG screenshot and 210-400 ms for a noisy
+    // 5K PNG, with single tasks up to 219 ms (the drawImage decode). The
+    // size is now read from an <img> loaded from a blob: URL (no base64, and no
+    // pixel decode), and the scaling runs in a worker: createImageBitmap (EXIF
+    // orientation applied, as <img> does), the same drawImage onto an
+    // OffscreenCanvas of the same size, and convertToBlob with canvas.toBlob's
+    // default quality (JPEG 0.92, WebP 0.8; convertToBlob's own default is 1).
+    // The sizes, thresholds, MIME type and file name are the original's; PNG
+    // output is byte-identical, JPEG output differs within 46-50 dB PSNR
+    // (Blink decodes an <img> JPEG at a reduced scale when drawing it smaller).
+    // Main-thread time per image drops to 2-10 ms. Other output types, the
+    // byte-copy mode the original has behind a flag (off in this build), a
+    // missing API or any failure run the original code.
+    if (trees.initial) {
+      const found = [];
+      const numeric = (node, value) => node?.type === 'Literal' && typeof node.value === 'number' && (value === undefined || node.value === value);
+      const gt = (node, left) => node?.type === 'BinaryExpression' && node.operator === '>' && numeric(node.right) && left(node.left);
+      const named = (node, name) => node?.type === 'Identifier' && (name === undefined || node.name === name);
+      // Function declarations that are statements of a module or block body.
+      const decls = new Map(), statements = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'Program' && node.type !== 'BlockStatement') return;
+        for (const s of node.body) if (s.type === 'FunctionDeclaration' && s.id) { statements.push(s); decls.set(s.id.name, [...(decls.get(s.id.name) ?? []), s]); }
+      });
+      for (const node of statements) {
+        if (!node.async || node.params.length !== 3 || !node.params.every(p => p.type === 'Identifier')) continue;
+        const [, file, signal] = node.params.map(p => p.name), body = node.body.body;
+        // let a=await read(file,signal); signal.throwIfAborted(); let{width:o,height:s}=a; if(o>N||s>N||file.size>M)try{...}catch{...} ... return copy?{...}:{...}
+        const at = body.findIndex(s => s.type === 'VariableDeclaration' && s.declarations.length === 1 && named(s.declarations[0].id) &&
+          s.declarations[0].init?.type === 'AwaitExpression' && s.declarations[0].init.argument.type === 'CallExpression' &&
+          named(s.declarations[0].init.argument.callee) && s.declarations[0].init.argument.arguments.length === 2 &&
+          named(s.declarations[0].init.argument.arguments[0], file) && named(s.declarations[0].init.argument.arguments[1], signal));
+        if (at < 1) continue;
+        const read = body[at], image = read.declarations[0].id.name, reader = read.declarations[0].init.argument.callee.name;
+        const [check, sizes, branch] = body.slice(at + 1, at + 4), last = body.at(-1);
+        if (check?.type !== 'ExpressionStatement' || !member(check.expression, 'throwIfAborted') || !named(check.expression.callee.object, signal)) continue;
+        const pattern = sizes?.type === 'VariableDeclaration' && sizes.declarations.length === 1 ? sizes.declarations[0] : null;
+        if (pattern?.id.type !== 'ObjectPattern' || !named(pattern.init, image) || pattern.id.properties.length !== 2) continue;
+        const dims = Object.fromEntries(pattern.id.properties.map(p => [p.key?.name, p.value?.type === 'Identifier' ? p.value.name : null]));
+        const [width, height] = [dims.width, dims.height];
+        if (!width || !height) continue;
+        const test = branch?.type === 'IfStatement' ? branch.test : null;
+        if (branch?.consequent.type !== 'TryStatement' || branch.alternate || test?.type !== 'LogicalExpression' || test.operator !== '||' ||
+            test.left.type !== 'LogicalExpression' || test.left.operator !== '||') continue;
+        const side = test.left.left, other = test.left.right, bytes = test.right;
+        if (!gt(side, n => named(n, width)) || !gt(other, n => named(n, height)) || side.right.value !== other.right.value ||
+            !gt(bytes, n => n.type === 'MemberExpression' && !n.computed && named(n.object, file) && n.property.name === 'size')) continue;
+        const limit = side.right.value, maxBytes = bytes.right.value;
+        const resize = sources.initial.slice(branch.consequent.block.start, branch.consequent.block.end);
+        if (!resize.includes(`=Math.min(1,${limit}/Math.max(${width},${height})),`) || !resize.includes('.createElement(`canvas`)') ||
+            !new RegExp(`\\.drawImage\\(${image.replace(/\$/g, '\\$')},0,0,[\\w$]+,[\\w$]+\\)`).test(resize) ||
+            !resize.includes(`=${file}.type||\`image/png\``) || !/\.toBlob\([\w$]+,[\w$]+\)\}\)/.test(resize) ||
+            !/return\{file:new File\(\[[\w$]+\],[\w$]+\.name,\{type:[\w$]+\}\),width:Math\.trunc\([\w$]+\),height:Math\.trunc\([\w$]+\)\}/.test(resize)) continue;
+        if (last?.type !== 'ReturnStatement' || last.argument?.type !== 'ConditionalExpression' || !named(last.argument.test)) continue;
+        const tail = sources.initial.slice(last.argument.alternate.start, last.argument.alternate.end);
+        if (tail !== `{file:${file},width:${width},height:${height}}`) continue;
+        // The copy flag is declared before the read, where the fast path is inserted.
+        const copy = last.argument.test.name;
+        if (!body.slice(0, at).some(s => s.type === 'VariableDeclaration' && s.declarations.some(d => named(d.id, copy)))) continue;
+        // The reader: a FileReader data URL decoded by an <img>.
+        const readers = decls.get(reader) ?? [];
+        if (readers.length !== 1) continue;
+        const readerText = sources.initial.slice(readers[0].start, readers[0].end);
+        if (!readerText.includes('new FileReader') || !readerText.includes('new Image') || !readerText.includes('.readAsDataURL(')) continue;
+        found.push({ node, read, file, signal, copy, limit, maxBytes });
+      }
+      record('imageUploadOffThread', 'initial', found, ({ node, read, file, signal, copy, limit, maxBytes }) => {
+        const worker = 'onmessage=async({data:{id,file,w,h,type,quality}})=>{let blob=null;try{const b=await createImageBitmap(file,{imageOrientation:"from-image"});' +
+          'try{const c=new OffscreenCanvas(w,h),x=c.getContext("2d");if(x){x.drawImage(b,0,0,w,h);blob=await c.convertToBlob(quality===void 0?{type}:{type,quality})}}finally{b.close()}}catch{}postMessage({id,blob})}';
+        const helpers = `async function ppImageUploadFast(file,signal,copy){try{` +
+          `if(copy||typeof createImageBitmap!=="function"||typeof OffscreenCanvas!=="function"||typeof Worker!=="function"||typeof Image!=="function"||typeof URL?.createObjectURL!=="function")return null;` +
+          `const abortable=(p,reason)=>new Promise((ok,fail)=>{const stop=()=>fail(reason());signal.addEventListener("abort",stop,{once:!0});p.then(ok,fail).finally(()=>signal.removeEventListener("abort",stop))});` +
+          `signal.throwIfAborted();` +
+          // Width and height as the original's <img> reports them; a blob: URL instead of a data URL, and no pixel decode.
+          `const url=URL.createObjectURL(file),img=new Image;let size;` +
+          `try{size=await abortable(new Promise((ok,fail)=>{img.onload=()=>ok({width:img.width,height:img.height});img.onerror=fail;img.src=url}),()=>signal.reason instanceof Error?signal.reason:new DOMException("Aborted","AbortError"))}` +
+          `finally{img.onload=img.onerror=null;img.src="";URL.revokeObjectURL(url)}` +
+          `signal.throwIfAborted();const{width:o,height:s}=size;` +
+          `if(!(o>${limit}||s>${limit}||file.size>${maxBytes}))return{file,width:o,height:s};` +
+          `const k=Math.min(1,${limit}/Math.max(o,s)),w=o*k,h=s*k,type=file.type||"image/png";` +
+          // canvas.toBlob's default qualities; other types keep the original path.
+          `const quality={"image/jpeg":.92,"image/webp":.8}[type];if(quality===void 0&&type!=="image/png")return null;` +
+          `const blob=await abortable(ppImageUploadWorker(file,w,h,type,quality),()=>signal.reason);signal.throwIfAborted();` +
+          `return blob==null?null:{file:new File([blob],file.name,{type}),width:Math.trunc(w),height:Math.trunc(h)}` +
+          `}catch{signal.throwIfAborted();return null}}` +
+          // One worker, created on first use and ended after 30 s without work.
+          `var ppImageUploadState;function ppImageUploadWorker(file,w,h,type,quality){` +
+          `const st=ppImageUploadState??=(()=>{const u=URL.createObjectURL(new Blob([${JSON.stringify(worker)}],{type:"text/javascript"})),worker=new Worker(u);URL.revokeObjectURL(u);` +
+          `const s={worker,next:0,pending:new Map,timer:0};` +
+          `const end=()=>{clearTimeout(s.timer);for(const done of s.pending.values())done(null);s.pending.clear();if(ppImageUploadState===s)ppImageUploadState=void 0;worker.terminate()};` +
+          `worker.onmessage=({data})=>{const done=s.pending.get(data?.id);s.pending.delete(data?.id);done?.(data.blob instanceof Blob?data.blob:null);` +
+          `if(!s.pending.size){clearTimeout(s.timer);s.timer=setTimeout(()=>{if(!s.pending.size)end()},3e4)}};` +
+          `worker.onerror=worker.onmessageerror=end;return s})();` +
+          `clearTimeout(st.timer);return new Promise(done=>{const id=++st.next;st.pending.set(id,done);try{st.worker.postMessage({id,file,w,h,type,quality})}catch{st.pending.delete(id);done(null)}})}`;
+        return [
+          { start: read.start, end: read.start, text: `{${marker}let ppImageUploadPrepared=await ppImageUploadFast(${file},${signal},${copy});if(ppImageUploadPrepared!=null)return ppImageUploadPrepared}` },
+          { start: node.end, end: node.end, text: helpers },
+        ];
+      });
+    } else skipped.imageUploadOffThread = 'module not found';
     // ===== end of gpu lane =====
 
 
