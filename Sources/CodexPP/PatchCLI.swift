@@ -5,8 +5,18 @@ import CodexPPCore
 enum PatchCLI {
     @MainActor static func runIfRequested() -> Bool {
         let args = ProcessInfo.processInfo.arguments
-        guard args.count > 1, ["--patch-status", "--check-probe", "--stage-patch", "--patch-app", "--patch-and-restart", "--restore-app", "--recover-patch", "--restart-helper", "--begin-update-validation", "--finish-background-update-validation", "--finish-self-update"].contains(args[1]) else { return false }
+        guard args.count > 1, ["--patch-status", "--check-probe", "--stage-patch", "--patch-app", "--patch-and-restart", "--restore-app", "--recover-patch", "--restart-helper", "--begin-update-validation", "--finish-background-update-validation", "--finish-self-update", "--review-build"].contains(args[1]) else { return false }
         do {
+            // Hidden, read-only: what patching would discover in a build, as JSON
+            // (scripts/review-build.py formats it).
+            if args[1] == "--review-build" {
+                let app = URL(fileURLWithPath: args.count > 2 ? args[2] : "/Applications/ChatGPT.app").standardizedFileURL.resolvingSymlinksInPath()
+                guard let runtimeURL = Bundle.module.url(forResource: "native-settings", withExtension: "js") else { throw PatchError.invalid("The native Settings runtime is missing.") }
+                let review = try BuildReview.run(app: app, settingsRuntime: try String(contentsOf: runtimeURL, encoding: .utf8))
+                let data = try JSONSerialization.data(withJSONObject: review, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
+                print(String(decoding: data, as: UTF8.self))
+                return true
+            }
             if args[1] == "--finish-self-update", args.count == 3 {
                 try finishSelfUpdate(ticketPath: args[2])
                 return true

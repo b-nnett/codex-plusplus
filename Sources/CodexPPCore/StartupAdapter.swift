@@ -71,7 +71,33 @@ public enum StartupAdapter {
     /// Every chunk, including those the edit lanes add (StartupLanes/*.swift).
     static var chunks: [StartupChunk] { coreChunks + streamingChunks + turnsChunks + gpuChunks + hygieneChunks + pluginChunks }
 
+    /// How one chunk resolved, for reviewing a new build: how many files had
+    /// the prefix, how many of those had every marker, and where it landed.
+    public struct ChunkResolution: Codable, Sendable {
+        public let key: String
+        public let directory: String
+        public let prefix: String
+        public let markers: [String]
+        public let prefixMatches: Int
+        /// Files with the prefix that contain every marker (nil without markers).
+        public let markerMatches: Int?
+        public let path: String?
+        /// The input that already owns the same file, when this chunk is an alias.
+        public let aliasOf: String?
+    }
+    /// The discovery result together with how every chunk resolved.
+    public struct Diagnosis: Sendable {
+        public let result: Result
+        public let chunks: [ChunkResolution]
+        public let entry: String?
+    }
+
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
+        try? diagnose(archive: archive, replacements: replacements).result
+    }
+
+    /// `discover`, keeping its error and the chunk resolution (for build reviews).
+    public static func diagnose(archive: AsarArchive, replacements: [(String, Data)]) throws -> Diagnosis {
         do {
             try PatchAdapter.approveArchive(archive)
             func source(at path: String) throws -> String? {
@@ -79,27 +105,34 @@ public enum StartupAdapter {
                 guard data.count <= 32 * 1024 * 1024 else { return nil }
                 return String(data: data, encoding: .utf8)
             }
-            func resolve(_ chunk: StartupChunk) throws -> (String, String)? {
+            func resolve(_ chunk: StartupChunk) throws -> (found: (String, String)?, prefixMatches: Int, markerMatches: Int?) {
                 let paths = try archive.packedFiles(in: chunk.directory).filter {
                     let name = URL(fileURLWithPath: $0).lastPathComponent
                     return name.hasPrefix(chunk.prefix) && name.hasSuffix(".js")
                 }
                 if chunk.markers.isEmpty {
-                    guard paths.count == 1, let text = try source(at: paths[0]) else { return nil }
-                    return (paths[0], text)
+                    guard paths.count == 1, let text = try source(at: paths[0]) else { return (nil, paths.count, nil) }
+                    return ((paths[0], text), 1, nil)
                 }
                 let matches = try paths.compactMap { path -> (String, String)? in
                     guard let text = try source(at: path), chunk.markers.allSatisfy(text.contains) else { return nil }
                     return (path, text)
                 }
-                return matches.count == 1 ? matches[0] : nil
+                return (matches.count == 1 ? matches[0] : nil, paths.count, matches.count)
             }
             // Each archive path is one input; a later chunk that resolves to the
             // same file becomes an alias, so all its edits compose in one source.
             var resolved: [String: (String, String)] = [:], aliases: [String: String] = [:]
+            var resolutions: [ChunkResolution] = []
             for chunk in chunks where resolved[chunk.key] == nil && aliases[chunk.key] == nil {
-                guard let found = try resolve(chunk) else { continue }
-                if let owner = resolved.first(where: { $0.value.0 == found.0 })?.key { aliases[chunk.key] = owner } else { resolved[chunk.key] = found }
+                let attempt = try resolve(chunk)
+                var owner: String?
+                if let found = attempt.found {
+                    owner = resolved.first(where: { $0.value.0 == found.0 })?.key
+                    if let owner { aliases[chunk.key] = owner } else { resolved[chunk.key] = found }
+                }
+                resolutions.append(ChunkResolution(key: chunk.key, directory: chunk.directory, prefix: chunk.prefix, markers: chunk.markers,
+                    prefixMatches: attempt.prefixMatches, markerMatches: attempt.markerMatches, path: attempt.found?.0, aliasOf: owner))
             }
             // index.html and its entry module, for the entry preload hints.
             let htmlPath = "webview/index.html"
@@ -132,9 +165,7 @@ public enum StartupAdapter {
                 if let source = output[key] { result.append((chunk.0, Data(source.utf8))) }
             }
             for (path, source) in output.css ?? [:] where stylesheets[path] != nil { result.append((path, Data(source.utf8))) }
-            return Result(replacements: result, applied: output.applied, skipped: output.skipped)
-        } catch {
-            return nil
+            return Diagnosis(result: Result(replacements: result, applied: output.applied, skipped: output.skipped), chunks: resolutions, entry: entry?.0)
         }
     }
 

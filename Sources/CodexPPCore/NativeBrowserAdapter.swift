@@ -9,7 +9,7 @@ public enum NativeBrowserAdapter {
             return name == "main.js" || (name.hasPrefix("main-") && name.hasSuffix(".js"))
         }
         guard paths.count == 1, let path = paths.first else {
-            throw PatchError.invalid("Expected one native browser main module.")
+            throw PatchError.invalid("Expected one native browser main module, found \(paths.count).")
         }
         guard let source = String(data: try archive.data(at: path), encoding: .utf8) else { throw PatchError.invalid("The browser module must be UTF-8 JavaScript.") }
         if let output = try JavaScriptDiscovery.run(archive: archive, adapter: "browser", input: ["source": source]) {

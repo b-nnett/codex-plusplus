@@ -15,7 +15,7 @@ public enum ShellAdapter {
             }
         }
         guard matches.count == 1, let (path, original) = matches.first else {
-            throw PatchError.invalid("Expected exactly one complete shell module.")
+            throw PatchError.invalid("Expected exactly one complete shell module, found \(matches.count).")
         }
         return (path, try patch(source: replacements.first(where: { $0.0 == path })?.1 ?? original, archive: archive))
     }

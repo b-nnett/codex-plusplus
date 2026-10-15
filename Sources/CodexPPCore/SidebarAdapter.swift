@@ -16,20 +16,21 @@ public enum SidebarAdapter {
     struct Output: Decodable { let source: String; let missing: [String]; let report: [String: Evidence] }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
-        do {
-            try PatchAdapter.approveArchive(archive)
-            let paths = try archive.packedFiles(in: "webview/assets").filter {
-                let name = URL(fileURLWithPath: $0).lastPathComponent
-                return name.hasPrefix("app-shared-") && name.hasSuffix(".js")
-            }
-            guard paths.count == 1, let path = paths.first else { return nil }
-            let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
-            guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8) else { return nil }
-            let output = try adapt(source: source, archive: archive)
-            return Result(path: path, source: Data(output.source.utf8), missing: output.missing, report: output.report)
-        } catch {
-            return nil
+        try? diagnose(archive: archive, replacements: replacements)
+    }
+
+    /// `discover`, keeping its error (for build reviews).
+    public static func diagnose(archive: AsarArchive, replacements: [(String, Data)]) throws -> Result {
+        try PatchAdapter.approveArchive(archive)
+        let paths = try archive.packedFiles(in: "webview/assets").filter {
+            let name = URL(fileURLWithPath: $0).lastPathComponent
+            return name.hasPrefix("app-shared-") && name.hasSuffix(".js")
         }
+        guard paths.count == 1, let path = paths.first else { throw PatchError.invalid("Expected one app-shared- module, found \(paths.count).") }
+        let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
+        guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8) else { throw PatchError.invalid("The sidebar module is oversized or not UTF-8.") }
+        let output = try adapt(source: source, archive: archive)
+        return Result(path: path, source: Data(output.source.utf8), missing: output.missing, report: output.report)
     }
 
     private static func adapt(source: String, archive: AsarArchive) throws -> Output {

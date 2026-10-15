@@ -37,7 +37,7 @@ public enum BookmarksAdapter {
         }
         var patches = try JSONDecoder().decode(Output.self, from: output).patches.map { ($0.path, Data($0.source.utf8)) }
         let initialPaths = try archive.packedFiles(in: "webview/assets").filter { URL(fileURLWithPath: $0).lastPathComponent.hasPrefix("app-initial-") && $0.hasSuffix(".js") }
-        guard initialPaths.count == 1, let initialPath = initialPaths.first else { throw PatchError.invalid("Expected one bookmarks startup module.") }
+        guard initialPaths.count == 1, let initialPath = initialPaths.first else { throw PatchError.invalid("Expected one bookmarks startup module, found \(initialPaths.count).") }
         let initialData = try replacements.first(where: { $0.0 == initialPath })?.1 ?? archive.data(at: initialPath)
         var initial = Data(try String(contentsOf: runtimeURL, encoding: .utf8).utf8)
         initial.append(Data("\n".utf8)); initial.append(initialData)

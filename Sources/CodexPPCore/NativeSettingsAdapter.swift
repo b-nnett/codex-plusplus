@@ -21,7 +21,7 @@ public enum NativeSettingsAdapter {
         let paths = try archive.packedFiles(in: "webview/assets").filter {
             $0.hasSuffix(".js") && ["settings-page-", "use-visible-settings-sections-", "general-settings-", "app-initial-", "app-shared-"].contains(where: URL(fileURLWithPath: $0).lastPathComponent.hasPrefix)
         }
-        guard paths.count <= 24 else { throw PatchError.invalid("Unexpected Settings module graph size.") }
+        guard paths.count <= 24 else { throw PatchError.invalid("Unexpected Settings module graph size: \(paths.count) modules (at most 24).") }
         var modules: [String: String] = [:]
         for path in paths {
             let data = try archive.data(at: path)

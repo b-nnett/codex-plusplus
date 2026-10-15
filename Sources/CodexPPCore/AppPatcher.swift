@@ -316,30 +316,19 @@ public struct AppPatcher: Sendable {
                     guard let runtimeURL = bundles.compactMap({ Bundle(url: $0)?.url(forResource: "native-settings", withExtension: "js") }).first else { throw PatchError.invalid("The helper's native Settings runtime is missing.") }
                     let runtime = try String(contentsOf: runtimeURL, encoding: .utf8)
                     onProgress("Adapting extensions…")
-                    let discovery = try NativeSettingsAdapter.discover(archive: original, runtime: runtime)
-                    try JSONEncoder().encode(discovery.report).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-settings-discovery.json"), options: .atomic)
-                    let (shellPath, shellSource) = try ShellAdapter.discover(archive: original, replacements: discovery.patches)
-                    let baseRenderers = discovery.patches.filter({ $0.0 != shellPath }) + [(shellPath, shellSource)]
-                    let bookmarkRenderers = try BookmarksAdapter.discover(archive: original, replacements: baseRenderers)
-                    let bookmarkPaths = Set(bookmarkRenderers.map { $0.0 })
-                    var renderers = baseRenderers.filter({ !bookmarkPaths.contains($0.0) }) + bookmarkRenderers
-                    // Optional: a sidebar contract mismatch leaves better-sidebar to
-                    // report its missing capabilities; it never blocks the patch.
-                    if let sidebar = SidebarAdapter.discover(archive: original, replacements: renderers) {
-                        renderers = renderers.filter({ $0.0 != sidebar.path }) + [(sidebar.path, sidebar.source)]
+                    // The same pipeline `BuildReview` reports on; here a required
+                    // adapter that fails stops the patch.
+                    let discovery = try RendererPipeline().run(archive: original, settingsRuntime: runtime)
+                    if let settings = discovery.settings {
+                        try JSONEncoder().encode(settings).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-settings-discovery.json"), options: .atomic)
+                    }
+                    if let sidebar = discovery.sidebar {
                         try JSONEncoder().encode(SidebarDiscoveryReport(missing: sidebar.missing, capabilities: sidebar.report)).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-sidebar-discovery.json"), options: .atomic)
                     }
-                    // The startup fast path also edits the main bundle, so it builds
-                    // on the browser adapter's output rather than replacing it.
-                    let (browserPath, browserSource) = try NativeBrowserAdapter.patch(archive: original)
-                    renderers = renderers.filter({ $0.0 != browserPath }) + [(browserPath, browserSource)]
-                    // Optional startup fast path: unmatched code stays unpatched.
-                    if let startup = StartupAdapter.discover(archive: original, replacements: renderers) {
-                        let paths = Set(startup.replacements.map { $0.0 })
-                        renderers = renderers.filter({ !paths.contains($0.0) }) + startup.replacements
+                    if let startup = discovery.startup?.result {
                         try JSONEncoder().encode(StartupDiscoveryReport(applied: startup.applied, skipped: startup.skipped)).write(to: stage.appendingPathComponent("Contents/Resources/codexpp-startup-discovery.json"), options: .atomic)
                     }
-                    replacements += renderers
+                    replacements += discovery.renderers
                 }
                 let headerHash = try AsarArchive(stagedArchive).replacing(replacements, output: temporary)
                 try fm.removeItem(at: stagedArchive); try fm.moveItem(at: temporary, to: stagedArchive)
