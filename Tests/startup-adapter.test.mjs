@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['ambientSuggestionsLowEffort', 'ambientSuggestionsOnDemand', 'appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'cachedAutoHighlightLanguage', 'capIdlePageSessions', 'catchUpPredictionWhenShown', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'gitStateWhenChanged', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'pubsubReconnectCap', 'queryTimings', 'queuedAppearanceChange', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'terminalOutputAppend', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['ambientSuggestionsLowEffort', 'ambientSuggestionsOnDemand', 'appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'cachedAutoHighlightLanguage', 'capIdlePageSessions', 'catchUpPredictionWhenShown', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'gitStateWhenChanged', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'pubsubReconnectCap', 'queryTimings', 'queuedAppearanceChange', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'terminalOutputAppend', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -622,32 +622,6 @@ test('a keep-alive tick that comes late after sleep pings before it drops the so
   assert.equal(awake.dropped, 0);
   awake.advance(1e4);
   assert.equal(awake.dropped, 1);
-});
-
-test('live next-message predictions run only for a thread whose composer is open', async () => {
-  const shared = 'function H0r(e,t){let n=pr.cumberbatch;n!=null&&t.addTurnCompletedListener(r=>{try{if(t.getStreamRole(r.conversationId)?.role!==`owner`)return;' +
-    'let o={hostId:r.hostId,threadId:r.conversationId,latestTurnId:r.turnId,generationTrigger:`live`},s=null;' +
-    'Promise.resolve(n.requestUserMessagePrediction(o,s)).then(t=>{t!=null&&log.push(t)}).catch(()=>{})}catch(e){}})}';
-  const {shared: patched, applied} = adapt({shared});
-  assert.equal(applied.predictOnlyOpenThreads, 'shared');
-  const requests = [], log = [];
-  let open = [];
-  const scope = {queryClient: {getQueryCache: () => ({findAll: ({queryKey}) => open.filter(k => k[0] === queryKey[0]).map(queryKey => ({queryKey}))})}};
-  let listener;
-  const sandbox = {log, Promise, pr: {cumberbatch: {requestUserMessagePrediction: target => (requests.push(target.threadId), `prediction:${target.threadId}`)}}};
-  vm.runInNewContext(patched + ';this.H0r=H0r;', sandbox);
-  sandbox.H0r(scope, {addTurnCompletedListener: f => { listener = f; }, getStreamRole: () => ({role: 'owner'})});
-  const complete = id => listener({hostId: 'local', conversationId: id, turnId: `${id}-turn`});
-  open = [['cumberbatch', {hostId: 'local', threadId: 'visible', latestTurnId: 'visible-turn'}], ['other-query']];
-  complete('visible'); complete('background');
-  await new Promise(resolve => setTimeout(resolve, 0));
-  assert.deepEqual(requests, ['visible'], 'a thread nobody has open is not forked');
-  assert.deepEqual(log, ['prediction:visible']);
-  // Without a query cache (an unexpected scope), behaviour is unchanged.
-  const fallback = {};
-  sandbox.H0r(fallback, {addTurnCompletedListener: f => { listener = f; }, getStreamRole: () => ({role: 'owner'})});
-  complete('background');
-  assert.deepEqual(requests, ['visible', 'background']);
 });
 
 test('words whose fade has finished render as plain text; fading words stay spans', () => {

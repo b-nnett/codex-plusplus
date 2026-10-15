@@ -844,33 +844,6 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `${sources.network.slice(tick.body.start + 1, tick.body.end - 1)}})(Date.now())` }));
     } else skipped.wakeAwarePongTimeout = 'module not found';
 
-    // predictOnlyOpenThreads: when any turn completes, the window forks that
-    // whole conversation to predict the user's next message, even for a thread
-    // nobody is looking at. A thread's composer already requests the same
-    // prediction for each new turn while it is open (the main process shares
-    // one request per turn), and again when the thread is opened later. So a
-    // live prediction is requested only while a composer for that thread is
-    // mounted; its prediction query exists exactly then.
-    if (trees.shared) {
-      const predictions = [];
-      walk(trees.shared, (node, ancestors) => {
-        if (!member(node, 'addTurnCompletedListener') || node.arguments.length !== 1 || node.arguments[0].type !== 'ArrowFunctionExpression') return;
-        const listener = node.arguments[0], text = sources.shared.slice(listener.start, listener.end);
-        if (!text.includes('generationTrigger:`live`')) return;
-        const owner = [...ancestors].reverse().find(a => a.type === 'FunctionDeclaration');
-        const scope = owner?.params[0];
-        if (scope?.type !== 'Identifier') return;
-        walk(listener.body, call => {
-          if (member(call, 'requestUserMessagePrediction') && call.arguments.length === 2 && call.arguments[0].type === 'Identifier') {
-            predictions.push({ call, scope: scope.name, target: call.arguments[0].name });
-          }
-        });
-      });
-      record('predictOnlyOpenThreads', 'shared', predictions, ({ call, scope, target }) => ({ start: call.start, end: call.end,
-        text: `${marker}((ppCache)=>ppCache!=null&&ppCache.findAll({queryKey:[\`cumberbatch\`]}).every(ppQuery=>ppQuery.queryKey[1]?.threadId!==${target}.threadId))` +
-          `(${scope}.queryClient?.getQueryCache?.())?Promise.resolve(null):${sources.shared.slice(call.start, call.end)}` }));
-    } else skipped.predictOnlyOpenThreads = 'module not found';
-
     // plainSettledWords: while a reply streams, every word is its own fading
     // <span>, and every frame rebuilds and reconciles a span for every word of
     // the message, so frames cost more the longer the reply gets. A word whose

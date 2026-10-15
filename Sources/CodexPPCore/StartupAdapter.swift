@@ -202,7 +202,7 @@ public struct StartupStatus: Equatable, Sendable {
         "shellEnvironmentCacheFirst": "Cached shell environment", "authStorageGateCacheFirst": "Cached auth storage flag",
         "deferDockIcon": "Deferred Dock icon", "caretBlinkTimeout": "Idle text cursor", "compositorShimmer": "Compositor loading shimmer", "viewportContainerQueries": "Breakpoints without full restyles", "shellResizeSync": "Steady chat column while resizing", "coalesceBrowserMenuRefresh": "Fewer menu rebuilds while resizing", "lazyPageWindowPrewarm": "On-demand Page window",
         "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window", "lazyCheckoutPricingPrewarm": "On-demand upgrade page", "lazyCheckoutCreditPrewarm": "On-demand credit checkout", "skipHiddenThreadRefetch": "No MCP refetch for hidden threads",
-        "wakeAwarePongTimeout": "Connections kept across sleep", "predictOnlyOpenThreads": "Predictions only for open threads", "plainSettledWords": "Lighter streaming text",
+        "wakeAwarePongTimeout": "Connections kept across sleep", "plainSettledWords": "Lighter streaming text",
         "capIdlePageSessions": "Fewer idle Page connections", "childPagesPollOnSpaceRoute": "Folder refreshes only in Spaces",
         "trashPaginationGuard": "Bounded Empty Trash listing", "queuedAppearanceChange": "Space appearance changes kept while saving",
         "stderrNotConnectionError": "App-server warnings not shown as connection errors", "remoteControlBackoff": "Remote-control reconnect backoff",
