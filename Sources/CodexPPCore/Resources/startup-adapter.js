@@ -1637,6 +1637,73 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
     // ===== plugin lane: plugins and MCP servers: retries, validation, discovery. =====
     // (Edits of this lane go between these markers.)
+
+    // chromeProfileScanBackoff (main process, bundled plugins): to keep the
+    // bundled Chrome plugin in step with the Chrome extension, the app lists
+    // Chrome's user-data folder (~/Library/Application Support/Google/Chrome)
+    // during the startup plugin reconcile (twice) and again on every
+    // browser-window-focus. When macOS privacy protection denies that folder,
+    // every attempt fails with EPERM and logs a warning with two stacks: about
+    // 900 warnings in three days of one user's logs, one or two per launch and
+    // one per window focus. After a permission error (EPERM or EACCES) for a
+    // folder, the listing is now retried after 1 minute, then 2, 4, ... up to
+    // 1 hour; in between, it fails at once with the same error, so the app
+    // treats the extension state as unknown exactly as it does today. The app
+    // becoming active again (after it was inactive, as when the user returns
+    // from System Settings) allows one immediate retry, and a successful
+    // listing ends the backoff. The two sync-state warnings are logged once
+    // per such episode instead of per attempt. Other errors behave as before.
+    if (trees.main) {
+      const scans = [], warnings = { plural: [], singular: [] };
+      const warningNames = { plural: 'bundled_plugins_chrome_extension_sync_state_read_failed', singular: 'bundled_plugin_chrome_extension_sync_state_read_failed' };
+      walk(trees.main, node => {
+        if (member(node, 'warning') && node.arguments.length === 2 && node.arguments[0].type === 'TemplateLiteral' &&
+            node.arguments[0].quasis.length === 1 && node.arguments[1].type === 'ObjectExpression') {
+          const name = node.arguments[0].quasis[0].value.cooked;
+          const kind = Object.keys(warningNames).find(k => warningNames[k] === name);
+          const sensitive = node.arguments[1].properties.find(p => p.type === 'Property' && !p.computed && p.key.name === 'sensitive')?.value;
+          const error = sensitive?.type === 'ObjectExpression' ? sensitive.properties.find(p => p.type === 'Property' && !p.computed && p.key.name === 'error')?.value : null;
+          if (kind && error?.type === 'Identifier') warnings[kind].push({ node, error: error.name });
+        }
+        // function(dir, extensionId) { return existsSync(dir) ? [dir, ...readdirSync(dir, {withFileTypes: true})...]
+        //   .some(profile => ... `Secure Preferences` ... `Preferences` ...) : false }
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 2 || !node.params.every(p => p.type === 'Identifier')) return;
+        const text = sources.main.slice(node.start, node.end);
+        if (!text.includes('`Secure Preferences`') || !text.includes('`Preferences`') || !text.includes('existsSync')) return;
+        const dir = node.params[0].name, reads = [];
+        walk(node.body, inner => {
+          if (inner.type !== 'CallExpression' || inner.arguments.length !== 2 || inner.arguments[0].type !== 'Identifier' || inner.arguments[0].name !== dir) return;
+          const callee = inner.callee.type === 'SequenceExpression' ? inner.callee.expressions.at(-1) : inner.callee;
+          if (callee.type === 'MemberExpression' && !callee.computed && callee.property.name === 'readdirSync' &&
+              sources.main.slice(inner.arguments[1].start, inner.arguments[1].end).includes('withFileTypes')) reads.push(inner);
+        });
+        if (reads.length === 1) scans.push({ read: reads[0], dir });
+      });
+      if (scans.length === 1 && (warnings.plural.length !== 1 || warnings.singular.length !== 1)) skipped.chromeProfileScanBackoff = 'sync-state warnings not found';
+      else record('chromeProfileScanBackoff', 'main', scans, ({ read, dir }) => {
+        const gate = `(globalThis.__codexPPChromeScan??=(()=>{const ppChromeScanPaths=new Map;let ppChromeScanEpoch=0,ppChromeScanAway=!1;` +
+          // An activation after the app was inactive starts a new epoch, which allows one attempt.
+          `try{const ppChromeScanApp=require("electron").app,ppChromeScanBack=()=>{ppChromeScanAway&&(ppChromeScanAway=!1,ppChromeScanEpoch++)};` +
+          `ppChromeScanApp.on("did-resign-active",()=>{ppChromeScanAway=!0});ppChromeScanApp.on("did-become-active",ppChromeScanBack);ppChromeScanApp.on("browser-window-focus",ppChromeScanBack)}catch{}` +
+          `const ppChromeScanDenied=ppChromeScanError=>{for(let ppChromeScanDepth=0;ppChromeScanError!=null&&ppChromeScanDepth<4;ppChromeScanDepth++,ppChromeScanError=ppChromeScanError.cause)` +
+          `if(ppChromeScanError.code==="EPERM"||ppChromeScanError.code==="EACCES")return ppChromeScanError;return null};` +
+          `return{scan(ppChromeScanDir,ppChromeScanRead){const ppChromeScanNow=Date.now(),ppChromeScanLast=ppChromeScanPaths.get(ppChromeScanDir);` +
+          `if(ppChromeScanLast!=null&&ppChromeScanNow<ppChromeScanLast.until&&ppChromeScanLast.epoch===ppChromeScanEpoch)throw ppChromeScanLast.error;` +
+          `let ppChromeScanResult;try{ppChromeScanResult=ppChromeScanRead()}catch(ppChromeScanError){if(ppChromeScanDenied(ppChromeScanError)!=null){` +
+          `const ppChromeScanDelay=ppChromeScanLast==null?6e4:Math.min(2*ppChromeScanLast.delay,36e5);ppChromeScanPaths.set(ppChromeScanDir,{delay:ppChromeScanDelay,` +
+          `until:ppChromeScanNow+ppChromeScanDelay,epoch:ppChromeScanEpoch,error:ppChromeScanError,logged:ppChromeScanLast?.logged===!0})}throw ppChromeScanError}` +
+          `ppChromeScanPaths.delete(ppChromeScanDir);return ppChromeScanResult},` +
+          // true: this permission failure was already logged in its episode.
+          `quiet(ppChromeScanError){const ppChromeScanDenial=ppChromeScanDenied(ppChromeScanError);if(ppChromeScanDenial==null)return!1;` +
+          `for(const ppChromeScanEntry of ppChromeScanPaths.values())if(ppChromeScanEntry.error===ppChromeScanDenial){if(ppChromeScanEntry.logged)return!0;ppChromeScanEntry.logged=!0;return!1}return!1}}})())`;
+        const quiet = ({ node, error }) => ({ start: node.start, end: node.end,
+          text: `(globalThis.__codexPPChromeScan?.quiet(${error})||${sources.main.slice(node.start, node.end)})` });
+        return [
+          { start: read.start, end: read.end, text: `${marker}${gate}.scan(${dir},()=>${sources.main.slice(read.start, read.end)})` },
+          quiet(warnings.plural[0]), quiet(warnings.singular[0]),
+        ];
+      });
+    } else skipped.chromeProfileScanBackoff = 'module not found';
     // ===== end of plugin lane =====
 
 
