@@ -1129,7 +1129,8 @@ test('git state is added to a turn only when it differs from the copy the thread
   sandbox.compacted(manager, 'c');
   assert.equal(await send('m8'), true, 'after a compaction or rollback');
   assert.equal(await send('m9'), false);
-  delete sandbox.__codexPPGitStateSession;
+  // Delete inside the context: older Node does not propagate an outside delete.
+  vm.runInContext('delete globalThis.__codexPPGitStateSession', sandbox);
   assert.equal(await send('m10'), true, 'after a reload');
   // Without the state API, or with an unreadable value, every turn carries it as before.
   const bare = {getConversation: manager.getConversation};
