@@ -249,12 +249,12 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     const member = (node, name) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
-    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [], trash: [], appearance: [], appServer: [], remoteSettings: [] };
+    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [], trash: [], appearance: [], appServer: [], remoteSettings: [], xtermOutput: [], terminalPanel: [] };
     // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
     // ship only in development builds of the helper (input.diagnostics).
     const diagnostics = input.diagnostics === true;
     const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
-    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout, trash: input.trash, appearance: input.appearance, appServer: input.appServer, remoteSettings: input.remoteSettings };
+    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout, trash: input.trash, appearance: input.appearance, appServer: input.appServer, remoteSettings: input.remoteSettings, xtermOutput: input.xtermOutput, terminalPanel: input.terminalPanel };
     if (Object.values(sources).some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
     }
@@ -1203,6 +1203,112 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
       });
       record('quietSidebarRebind', 'main', registrations, ({ at, previous, owner }) => ({ start: at.start, end: at.start, text: `${marker}if(${previous}===${owner})return;` }));
     } else skipped.quietSidebarRebind = 'module not found';
+    // terminalOutputAppend: the read-only terminal that shows a background
+    // command's output (XtermOutputPanel) receives the whole output string on
+    // every update (50 ms while it streams) and writes only the part after the
+    // previous string. Once the output passes its cap (the last 20,000
+    // characters behind an "[output truncated]" line, or the 16,000-character
+    // session buffer), the new string no longer starts with the old one, so
+    // every update reset the terminal and rewrote all of it: flicker, a lost
+    // scroll position and the full parse each time. Now, when the old text (at
+    // least its last 1,024 characters, or all of it if shorter) runs into the
+    // start of the new one, only the text after that overlap is written; with
+    // no such overlap the terminal is reset as before.
+    if (trees.xtermOutput) {
+      const src = sources.xtermOutput, appends = [];
+      walk(trees.xtermOutput, node => {
+        if (node.type !== 'IfStatement' || !member(node.test, 'startsWith') || node.test.callee.object.type !== 'Identifier' ||
+            node.test.arguments.length !== 1 || node.test.arguments[0].type !== 'Identifier' || node.consequent.type !== 'BlockStatement') return;
+        const next = node.test.callee.object.name, prev = node.test.arguments[0].name;
+        if (!src.slice(node.consequent.start, node.consequent.end).includes(`${next}.slice(${prev}.length)`)) return;
+        const alternate = node.alternate?.type === 'ExpressionStatement' ? node.alternate.expression : null;
+        if (alternate?.type !== 'SequenceExpression' || alternate.expressions.length !== 2) return;
+        const [reset, rewrite] = alternate.expressions;
+        if (!member(reset, 'reset') || reset.arguments.length !== 0 || reset.callee.object.type !== 'Identifier') return;
+        const term = reset.callee.object.name;
+        // n.length>0&&e.write(b(n)): the same terminal, through the line-ending helper.
+        const write = rewrite.type === 'LogicalExpression' && rewrite.operator === '&&' ? rewrite.right : null;
+        if (!member(write, 'write') || write.callee.object.type !== 'Identifier' || write.callee.object.name !== term || write.arguments.length !== 1) return;
+        const convert = write.arguments[0];
+        if (convert.type !== 'CallExpression' || convert.callee.type !== 'Identifier' || convert.arguments.length !== 1 ||
+            convert.arguments[0].type !== 'Identifier' || convert.arguments[0].name !== next) return;
+        appends.push({ alternate, next, prev, term, convert: convert.callee.name });
+      });
+      // The longest start of the new text (after any truncation line) that ends
+      // the old text, found with a KMP automaton over both: linear time.
+      const tail = `(ppPrev,ppNext)=>{if(typeof ppPrev!=="string"||typeof ppNext!=="string"||ppNext.length<ppPrev.length)return null;` +
+        `const ppMark="[output truncated]\\n",ppBody=ppText=>ppText.startsWith(ppMark)?ppText.slice(ppMark.length):ppText,ppOld=ppBody(ppPrev),ppNew=ppBody(ppNext);` +
+        `if(ppOld.length===0||ppNew.length===0)return null;const ppSeen=ppOld.length>ppNew.length?ppOld.slice(-ppNew.length):ppOld,ppFail=new Int32Array(ppNew.length);` +
+        `for(let ppAt=1,ppHave=0;ppAt<ppNew.length;ppAt++){for(;ppHave>0&&ppNew.charCodeAt(ppAt)!==ppNew.charCodeAt(ppHave);)ppHave=ppFail[ppHave-1];` +
+        `ppNew.charCodeAt(ppAt)===ppNew.charCodeAt(ppHave)&&ppHave++;ppFail[ppAt]=ppHave}` +
+        `let ppHave=0;for(let ppAt=0;ppAt<ppSeen.length;ppAt++){for(;ppHave>0&&(ppHave===ppNew.length||ppSeen.charCodeAt(ppAt)!==ppNew.charCodeAt(ppHave));)ppHave=ppFail[ppHave-1];` +
+        `ppSeen.charCodeAt(ppAt)===ppNew.charCodeAt(ppHave)&&ppHave++}` +
+        `return ppHave>0&&ppHave>=Math.min(ppOld.length,1024)?ppNew.slice(ppHave):null}`;
+      record('terminalOutputAppend', 'xtermOutput', appends, ({ alternate, next, prev, term, convert }) => ({ start: alternate.start, end: alternate.end,
+        text: `${marker}((ppTail)=>ppTail!=null?ppTail.length>0&&${term}.write(${convert}(ppTail)):(${src.slice(alternate.start, alternate.end)}))((${tail})(${prev},${next}))` }));
+    } else skipped.terminalOutputAppend = 'module not found';
+
+    // coalescedTerminalResize: the integrated terminal refits itself through a
+    // helper that queues its own animation frame on every call; mounting calls
+    // it directly and again from the ResizeObserver's first report, and
+    // attaching calls it once more, so one frame could run several fits (each
+    // forces a layout read). Calls now share one pending frame per terminal; a
+    // forced repaint requested by any of them is kept. The pty resize itself
+    // already skips unchanged sizes.
+    if (trees.terminalPanel) {
+      const src = sources.terminalPanel, fits = [];
+      walk(trees.terminalPanel, (node, ancestors) => {
+        if (node.type !== 'VariableDeclarator' || node.id.type !== 'Identifier' || node.init?.type !== 'ArrowFunctionExpression') return;
+        const fn = node.init;
+        if (fn.params.length !== 1 || fn.params[0].type !== 'Identifier' || fn.body.type !== 'BlockStatement' || fn.body.body.length !== 2) return;
+        const [declaration, statement] = fn.body.body, param = fn.params[0].name;
+        if (declaration.type !== 'VariableDeclaration' || declaration.declarations.length !== 1 || declaration.declarations[0].id.type !== 'Identifier' ||
+            !declaration.declarations[0].init || src.slice(declaration.declarations[0].init.start, declaration.declarations[0].init.end) !== `${param}!==void 0&&${param}`) return;
+        const frames = [];
+        walk(statement, call => {
+          if (call.type === 'CallExpression' && call.callee.type === 'Identifier' && call.callee.name === 'requestAnimationFrame') frames.push(call);
+        });
+        const frame = frames.length === 1 ? frames[0] : null, callback = frame?.arguments[0];
+        if (frame?.arguments.length !== 1 || callback.type !== 'ArrowFunctionExpression' || callback.params.length !== 0 ||
+            !src.slice(callback.start, callback.end).includes('.fit()')) return;
+        // The terminal panel's own refit: its ResizeObserver calls it.
+        const owner = [...ancestors].reverse().find(a => a.type === 'ArrowFunctionExpression' && a !== fn &&
+          src.slice(a.start, a.end).includes(`new ResizeObserver(()=>{${node.id.name}()})`));
+        if (owner) fits.push({ fn, frame, callback, force: declaration.declarations[0].id.name });
+      });
+      record('coalescedTerminalResize', 'terminalPanel', fits, ({ fn, frame, callback, force }) => ({ start: fn.start, end: fn.end,
+        text: `${marker}((ppResize)=>${src.slice(fn.start, frame.start)}(ppResize.force=ppResize.force||${force},ppResize.frame||(ppResize.frame=requestAnimationFrame(()=>{` +
+          `const ppForce=ppResize.force;ppResize.frame=0,ppResize.force=!1;(${force}=>${src.slice(callback.body.start, callback.body.end)})(ppForce)})))` +
+          `${src.slice(frame.end, fn.end)})({frame:0,force:!1})` }));
+    } else skipped.coalescedTerminalResize = 'module not found';
+
+    // batchedPtyOutput (main process): every chunk a terminal's pty produced
+    // was handled on its own: the session's 16,000-character buffer was
+    // concatenated and sliced, and one IPC message went to the window, which
+    // copies its own buffer and writes to xterm per message. Heavy output means
+    // thousands of chunks a second. Now the first chunk after a quiet spell
+    // still goes out at once (typing echoes without delay), and chunks within
+    // the next 8 ms are joined and sent together (at once past 64 KB), in
+    // order. Pending output is always delivered before the exit is handled.
+    if (trees.main) {
+      const src = sources.main, sinks = [];
+      walk(trees.main, node => {
+        if (node.type !== 'VariableDeclarator' || node.init?.type !== 'ObjectExpression' || node.init.properties.length !== 2) return;
+        const props = new Map(node.init.properties.filter(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier' && p.kind === 'init' && !p.method && !p.shorthand)
+          .map(p => [p.key.name, p.value]));
+        const data = props.get('onData'), exit = props.get('onExit');
+        if (data?.type !== 'ArrowFunctionExpression' || exit?.type !== 'ArrowFunctionExpression' || data.params.length !== 1 || exit.params.length !== 1) return;
+        const dataText = src.slice(data.start, data.end), exitText = src.slice(exit.start, exit.end);
+        if (dataText.includes('this.appendOutput(') && dataText.includes('.slice(-16e3)') && exitText.includes('this.destroySession(')) sinks.push({ object: node.init, data, exit });
+      });
+      record('batchedPtyOutput', 'main', sinks, ({ object, data, exit }) => ({ start: object.start, end: object.end,
+        text: `${marker}((ppData,ppExit)=>{let ppPending="",ppTimer=null;const ppDeliver=()=>{if(ppPending.length===0)return;const ppChunk=ppPending;ppPending="";ppData(ppChunk)},` +
+          `ppTick=()=>{ppTimer=null;if(ppPending.length===0)return;ppTimer=setTimeout(ppTick,8);ppDeliver()};` +
+          `return{onData:ppChunk=>{if(typeof ppChunk!=="string"){ppDeliver();ppData(ppChunk);return}` +
+          `if(ppTimer==null){ppTimer=setTimeout(ppTick,8);ppData(ppChunk);return}ppPending+=ppChunk;ppPending.length>=65536&&ppDeliver()},` +
+          `onExit:ppResult=>{ppTimer!=null&&(clearTimeout(ppTimer),ppTimer=null);ppDeliver();ppExit(ppResult)}}})` +
+          `(${src.slice(data.start, data.end)},${src.slice(exit.start, exit.end)})` }));
+    } else skipped.batchedPtyOutput = 'module not found';
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;

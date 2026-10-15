@@ -11,7 +11,7 @@ public enum StartupAdapter {
         public let applied: [String: String]
         public let skipped: [String: String]
     }
-    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let appServer: String?; let remoteSettings: String?; let css: [String: String]? }
+    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let appServer: String?; let remoteSettings: String?; let xtermOutput: String?; let terminalPanel: String?; let css: [String: String]? }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
         do {
@@ -44,6 +44,22 @@ public enum StartupAdapter {
                     let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
                     guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
                           source.contains("(`AppServerConnection`)") else { return nil }
+                    return (path, source)
+                }
+                return matches.count == 1 ? matches[0] : nil
+            }()
+            // The background-command output terminal, and the integrated terminal
+            // (two chunks share its prefix; only one holds the panel).
+            let xtermOutput = try module("xterm-output-panel-")
+            let terminalPanel: (String, String)? = try {
+                let paths = try archive.packedFiles(in: "webview/assets").filter {
+                    let name = URL(fileURLWithPath: $0).lastPathComponent
+                    return name.hasPrefix("terminal-panel-") && name.hasSuffix(".js")
+                }
+                let matches = try paths.compactMap { path -> (String, String)? in
+                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
+                    guard data.count <= 8 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
+                          source.contains("TerminalPanel"), source.contains("ResizeObserver") else { return nil }
                     return (path, source)
                 }
                 return matches.count == 1 ? matches[0] : nil
@@ -100,6 +116,8 @@ public enum StartupAdapter {
             if let checkout { input["checkout"] = checkout.1 }
             if let trash { input["trash"] = trash.1 }
             if let appearance { input["appearance"] = appearance.1 }
+            if let xtermOutput { input["xtermOutput"] = xtermOutput.1 }
+            if let terminalPanel { input["terminalPanel"] = terminalPanel.1 }
             if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
             // Every stylesheet, for the viewport container-query rewrite.
             var stylesheets: [String: String] = [:]
@@ -121,6 +139,8 @@ public enum StartupAdapter {
             if let source = output.checkout, let checkout { result.append((checkout.0, Data(source.utf8))) }
             if let source = output.trash, let trash { result.append((trash.0, Data(source.utf8))) }
             if let source = output.appearance, let appearance { result.append((appearance.0, Data(source.utf8))) }
+            if let source = output.xtermOutput, let xtermOutput { result.append((xtermOutput.0, Data(source.utf8))) }
+            if let source = output.terminalPanel, let terminalPanel { result.append((terminalPanel.0, Data(source.utf8))) }
             for (path, source) in output.css ?? [:] where stylesheets[path] != nil { result.append((path, Data(source.utf8))) }
             return Result(replacements: result, applied: output.applied, skipped: output.skipped)
         } catch {
@@ -177,6 +197,7 @@ public struct StartupStatus: Equatable, Sendable {
         "stderrNotConnectionError": "App-server warnings not shown as connection errors", "remoteControlBackoff": "Remote-control reconnect backoff",
         "pubsubReconnectCap": "Prompt ChatGPT live-update reconnects", "resumeVisibleThreadFirst": "Open thread resumed first after reconnect",
         "remoteSettingsPollWhenVisible": "Remote Connections refresh only while visible", "quietSidebarRebind": "Quieter Browser sidebar log",
+        "terminalOutputAppend": "Background terminal output without rewrites", "coalescedTerminalResize": "One terminal refit per frame", "batchedPtyOutput": "Batched terminal output",
     ]
     public let active: [String]
     /// Speed-ups that did not match this build, with the adapter's reason.
