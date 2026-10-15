@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Waking the Mac no longer drops working remote connections. The websocket keep-alive dropped a socket once 60 s passed without a pong, and its timer stops while the Mac sleeps, so the first tick after a wake counted the whole sleep as silence and dropped the ChatGPT (`durable`) app-server connection even when it still worked; every open thread then resynced and its stream restarted. A tick that comes more than two intervals late now pings first and allows 5 s for the answer, so a dead socket is still dropped within about 10 s of a wake (it took 60 s before) and a live one is kept. In the logs of one Mac, 13 of 29 pong timeouts came within two minutes of a wake: 3 dropped the socket within 2 s of waking and 10 took 59–69 s to notice a dead one.
+- Next-message predictions no longer fork threads nobody is looking at. After every turn in any thread, ChatGPT forked the whole conversation to predict the user's next message, at the thread's own model and, unless the server names one, its reasoning effort. A thread's open composer already requests the same prediction for each new turn (the main process shares one request per turn) and requests it again when the thread is opened later, so a live prediction is now made only while that thread's composer is open.
+- Streaming replies render less per frame. Every word of a streaming reply was its own fading `<span>`, and every frame rebuilt and reconciled a span for every word of the message, so frames cost more the longer the reply got. Words whose fade has finished are now plain text; only the words still fading are elements.
+
 ## 2.0.0 — 2026-10-14
 
 Codex++ 2.0 is a new implementation for the ChatGPT desktop app (`com.openai.codex`): a signed macOS menu-bar helper that stages, probes and atomically installs a patched copy of the app, built and signed locally with your own Developer ID. It shares no code with Codex++ 1.x (the Node-based tweak system), whose source stays on the `legacy-1.x` branch and whose tags and releases are unchanged. 1.x tweaks are not loaded by 2.0; extensions use the contract in the README.

@@ -249,13 +249,13 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     const member = (node, name) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
-    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], checkout: [] };
+    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [] };
     // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
     // ship only in development builds of the helper (input.diagnostics).
     const diagnostics = input.diagnostics === true;
     const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
-    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, checkout: input.checkout };
-    if ([sources.shared, sources.initial, sources.requirements, sources.main, sources.checkout].some(source => typeof source === 'string' && source.includes(marker))) {
+    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout };
+    if (Object.values(sources).some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
     }
     const trees = {};
@@ -807,6 +807,97 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     });
     record('lazyCheckoutPricingPrewarm', 'checkout', pricing, node => ({ start: node.test.start, end: node.test.start, text: `${marker}!1&&` }));
     record('lazyCheckoutCreditPrewarm', 'checkout', credit, node => ({ start: node.right.start, end: node.right.start, text: `${marker}!0||` }));
+
+    // wakeAwarePongTimeout: the websocket keep-alive pings every 10 s and drops
+    // the socket once 60 s pass without a pong. Its timer stops while the Mac
+    // sleeps, so the first tick after a wake saw the whole sleep as silence and
+    // dropped a socket that still worked, and every thread then resynced. A
+    // tick that comes more than two intervals late now pings first and allows
+    // half an interval for the pong, so a dead socket is still dropped within
+    // seconds of a wake and a live one is kept.
+    if (trees.network) {
+      const pings = [];
+      walk(trees.network, node => {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 2 || node.params[1].type !== 'ObjectPattern') return;
+        const local = {};
+        for (const p of node.params[1].properties) {
+          if (p.type === 'Property' && p.key.type === 'Identifier' && p.value.type === 'AssignmentPattern' && p.value.left.type === 'Identifier') local[p.key.name] = p.value.left.name;
+        }
+        if (!local.pingIntervalMs || !local.pongTimeoutMs || !node.params[1].properties.some(p => p.key?.name === 'onPongTimeout')) return;
+        walk(node.body, call => {
+          if (call.type !== 'CallExpression' || call.callee.type !== 'Identifier' || call.callee.name !== 'setInterval' || call.arguments.length !== 2) return;
+          const [tick, interval] = call.arguments;
+          if (tick.type !== 'ArrowFunctionExpression' || tick.params.length !== 0 || tick.body.type !== 'BlockStatement' ||
+              interval.type !== 'Identifier' || interval.name !== local.pingIntervalMs) return;
+          let lastPong = null;
+          walk(tick.body, test => {
+            if (test.type === 'BinaryExpression' && test.operator === '>' && test.right.type === 'Identifier' && test.right.name === local.pongTimeoutMs &&
+                test.left.type === 'BinaryExpression' && test.left.operator === '-' && test.left.right.type === 'Identifier' &&
+                isDateNow(test.left.left)) lastPong = test.left.right.name;
+          });
+          if (lastPong && sources.network.slice(tick.body.start, tick.body.end).includes('.ping()')) pings.push({ tick, lastPong, ...local });
+        });
+      });
+      function isDateNow(node) { return node.type === 'CallExpression' && member(node, 'now') && node.callee.object.type === 'Identifier' && node.callee.object.name === 'Date'; }
+      record('wakeAwarePongTimeout', 'network', pings, ({ tick, lastPong, pingIntervalMs: n, pongTimeoutMs: r }) => ({ start: tick.start, end: tick.end,
+        text: `${marker}((ppTick)=>()=>{let ppNow=Date.now();ppNow-ppTick>2*${n}&&(${lastPong}=Math.max(${lastPong},ppNow-${r}+${n}/2));ppTick=ppNow;` +
+          `${sources.network.slice(tick.body.start + 1, tick.body.end - 1)}})(Date.now())` }));
+    } else skipped.wakeAwarePongTimeout = 'module not found';
+
+    // predictOnlyOpenThreads: when any turn completes, the window forks that
+    // whole conversation to predict the user's next message, even for a thread
+    // nobody is looking at. A thread's composer already requests the same
+    // prediction for each new turn while it is open (the main process shares
+    // one request per turn), and again when the thread is opened later. So a
+    // live prediction is requested only while a composer for that thread is
+    // mounted; its prediction query exists exactly then.
+    if (trees.shared) {
+      const predictions = [];
+      walk(trees.shared, (node, ancestors) => {
+        if (!member(node, 'addTurnCompletedListener') || node.arguments.length !== 1 || node.arguments[0].type !== 'ArrowFunctionExpression') return;
+        const listener = node.arguments[0], text = sources.shared.slice(listener.start, listener.end);
+        if (!text.includes('generationTrigger:`live`')) return;
+        const owner = [...ancestors].reverse().find(a => a.type === 'FunctionDeclaration');
+        const scope = owner?.params[0];
+        if (scope?.type !== 'Identifier') return;
+        walk(listener.body, call => {
+          if (member(call, 'requestUserMessagePrediction') && call.arguments.length === 2 && call.arguments[0].type === 'Identifier') {
+            predictions.push({ call, scope: scope.name, target: call.arguments[0].name });
+          }
+        });
+      });
+      record('predictOnlyOpenThreads', 'shared', predictions, ({ call, scope, target }) => ({ start: call.start, end: call.end,
+        text: `${marker}((ppCache)=>ppCache!=null&&ppCache.findAll({queryKey:[\`cumberbatch\`]}).every(ppQuery=>ppQuery.queryKey[1]?.threadId!==${target}.threadId))` +
+          `(${scope}.queryClient?.getQueryCache?.())?Promise.resolve(null):${sources.shared.slice(call.start, call.end)}` }));
+    } else skipped.predictOnlyOpenThreads = 'module not found';
+
+    // plainSettledWords: while a reply streams, every word is its own fading
+    // <span>, and every frame rebuilds and reconciles a span for every word of
+    // the message, so frames cost more the longer the reply gets. A word whose
+    // fade has finished has no class, handler or ref left; runs of those are
+    // now emitted as plain text, so only the words still fading are elements.
+    if (trees.initial) {
+      const fades = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 1 || node.params[0].type !== 'ObjectPattern') return;
+        const local = {};
+        for (const p of node.params[0].properties) if (p.type === 'Property' && p.key.type === 'Identifier' && p.value.type === 'Identifier') local[p.key.name] = p.value.name;
+        if (!local.fadeText || !local.fadeSegmentTimeline || !local.keys || !local.segments || !local.fadeSegmentStartIndex) return;
+        const body = node.body.body;
+        if (body.length !== 1 || body[0].type !== 'ReturnStatement' || body[0].argument?.type !== 'ConditionalExpression') return;
+        const { test, consequent } = body[0].argument;
+        if (test.type !== 'Identifier' || test.name !== local.fadeText || !member(consequent, 'map') || consequent.callee.object.type !== 'Identifier' ||
+            consequent.callee.object.name !== local.segments || consequent.arguments.length !== 1) return;
+        const each = consequent.arguments[0];
+        if (each.type !== 'ArrowFunctionExpression' || each.params.length !== 2 || !sources.initial.slice(each.start, each.end).includes('`span`')) return;
+        fades.push({ consequent, each, ...local });
+      });
+      record('plainSettledWords', 'initial', fades, ({ consequent, each, keys, segments, fadeSegmentTimeline: timeline }) => ({ start: consequent.start, end: consequent.end,
+        text: `${marker}((ppOut,ppText,ppEach)=>(${segments}.forEach((ppSegment,ppIndex)=>{let ppKey=${keys}?.[ppIndex];` +
+          `if(typeof ppSegment==="string"&&ppKey!=null&&${timeline}?.settledKeys.has(ppKey)){ppText=(ppText??"")+ppSegment;return}` +
+          `ppText!=null&&(ppOut.push(ppText),ppText=null);ppOut.push(ppEach(ppSegment,ppIndex))}),ppText!=null&&ppOut.push(ppText),ppOut))` +
+          `([],null,${sources.initial.slice(each.start, each.end)})` }));
+    } else skipped.plainSettledWords = 'module not found';
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;

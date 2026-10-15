@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'policyPhaseTimings', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'viewportContainerQueries'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -585,4 +585,83 @@ test('the settings query keeps its context, any property order and a trailing co
   const result = await sandbox.module.VK().queryFn({signal});
   assert.equal(result.signal, true, 'the query context reaches the original queryFn');
   assert.deepEqual(Object.keys(storage).sort(), ['codexpp.settings:app://-/assets/app-shared-1.js', 'unrelated'], 'older builds\' entries are removed');
+});
+
+test('a keep-alive tick that comes late after sleep pings before it drops the socket', () => {
+  const network = 'var Q={Open:1};var Wo=1e4,Go=6e4;function Ko(e,{onPongTimeout:t,pingIntervalMs:n=Wo,pongTimeoutMs:r=Go}){let i=Date.now(),a=!1,o=()=>{i=Date.now()},' +
+    's=setInterval(()=>{if(!(e.readyState!==Q.Open||a)){if(Date.now()-i>r){a=!0,t();return}e.ping()}},n),c=()=>{clearInterval(s),e.off(`pong`,o),e.off(`close`,c)};' +
+    'return e.on(`pong`,o),e.on(`close`,c),c}';
+  const {network: patched, applied} = adapt({network});
+  assert.equal(applied.wakeAwarePongTimeout, 'network');
+  const run = source => {
+    let now = 0, tick = null;
+    const sandbox = {Date: {now: () => now}, Math, setInterval: f => (tick = f, 1), clearInterval() {}};
+    vm.runInNewContext(source + ';this.Ko=Ko;', sandbox);
+    const socket = new EventEmitter(); socket.readyState = 1; socket.pings = 0; socket.ping = () => socket.pings++;
+    let dropped = 0;
+    sandbox.Ko(socket, {onPongTimeout: () => dropped++});
+    return {socket, advance(ms) { now += ms; tick(); }, get dropped() { return dropped; }, pong() { socket.emit('pong'); }};
+  };
+  // Stock: the first tick after a long sleep drops a socket that still works.
+  const stock = run(network);
+  stock.advance(1e4); stock.pong(); stock.advance(3600e3);
+  assert.equal(stock.dropped, 1);
+  // Patched: that tick pings; a live socket answers and is kept.
+  const live = run(patched);
+  live.advance(1e4); live.pong(); live.advance(3600e3);
+  assert.equal(live.dropped, 0); assert.equal(live.socket.pings, 2);
+  live.pong(); live.advance(1e4);
+  assert.equal(live.dropped, 0);
+  // A socket that died during sleep is dropped on the next tick, not 60 s later.
+  const dead = run(patched);
+  dead.advance(1e4); dead.pong(); dead.advance(3600e3); dead.advance(1e4);
+  assert.equal(dead.dropped, 1);
+  // While awake a silent socket is still dropped after the 60 s timeout.
+  const awake = run(patched);
+  for (let i = 0; i < 6; i++) awake.advance(1e4);
+  assert.equal(awake.dropped, 0);
+  awake.advance(1e4);
+  assert.equal(awake.dropped, 1);
+});
+
+test('live next-message predictions run only for a thread whose composer is open', async () => {
+  const shared = 'function H0r(e,t){let n=pr.cumberbatch;n!=null&&t.addTurnCompletedListener(r=>{try{if(t.getStreamRole(r.conversationId)?.role!==`owner`)return;' +
+    'let o={hostId:r.hostId,threadId:r.conversationId,latestTurnId:r.turnId,generationTrigger:`live`},s=null;' +
+    'Promise.resolve(n.requestUserMessagePrediction(o,s)).then(t=>{t!=null&&log.push(t)}).catch(()=>{})}catch(e){}})}';
+  const {shared: patched, applied} = adapt({shared});
+  assert.equal(applied.predictOnlyOpenThreads, 'shared');
+  const requests = [], log = [];
+  let open = [];
+  const scope = {queryClient: {getQueryCache: () => ({findAll: ({queryKey}) => open.filter(k => k[0] === queryKey[0]).map(queryKey => ({queryKey}))})}};
+  let listener;
+  const sandbox = {log, Promise, pr: {cumberbatch: {requestUserMessagePrediction: target => (requests.push(target.threadId), `prediction:${target.threadId}`)}}};
+  vm.runInNewContext(patched + ';this.H0r=H0r;', sandbox);
+  sandbox.H0r(scope, {addTurnCompletedListener: f => { listener = f; }, getStreamRole: () => ({role: 'owner'})});
+  const complete = id => listener({hostId: 'local', conversationId: id, turnId: `${id}-turn`});
+  open = [['cumberbatch', {hostId: 'local', threadId: 'visible', latestTurnId: 'visible-turn'}], ['other-query']];
+  complete('visible'); complete('background');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.deepEqual(requests, ['visible'], 'a thread nobody has open is not forked');
+  assert.deepEqual(log, ['prediction:visible']);
+  // Without a query cache (an unexpected scope), behaviour is unchanged.
+  const fallback = {};
+  sandbox.H0r(fallback, {addTurnCompletedListener: f => { listener = f; }, getStreamRole: () => ({role: 'owner'})});
+  complete('background');
+  assert.deepEqual(requests, ['visible', 'background']);
+});
+
+test('words whose fade has finished render as plain text; fading words stay spans', () => {
+  const initial = 'function irl({fadeSegmentDelayMs:e,fadeSegmentMaxDelayMs:t,fadeText:n,fadeSegmentStartIndex:r,fadeSegmentTimeline:i,keys:a,segments:o}){' +
+    'return n?o.map((n,o)=>{let s=r+o;return(0,arl.jsx)(`span`,{className:i?.settledKeys.has(a?.[o])?void 0:`fade`,children:n},a?.[o]??`fade-${s}`)}):o}';
+  const {initial: patched, applied} = adapt({initial});
+  assert.equal(applied.plainSettledWords, 'initial');
+  const sandbox = {arl: {jsx: (type, props, key) => ({type, key, children: props.children})}};
+  vm.runInNewContext(patched + ';this.irl=irl;', sandbox);
+  const timeline = {settledKeys: new Set(['k0', 'k1', 'k3'])};
+  const out = sandbox.irl({fadeSegmentDelayMs: 0, fadeText: true, fadeSegmentStartIndex: 0, fadeSegmentTimeline: timeline,
+    keys: ['k0', 'k1', 'k2', 'k3', 'k4'], segments: ['Hello ', 'there, ', 'how ', 'are ', 'you']});
+  assert.deepEqual(JSON.parse(JSON.stringify(out)), ['Hello there, ', {type: 'span', key: 'k2', children: 'how '}, 'are ', {type: 'span', key: 'k4', children: 'you'}]);
+  assert.equal(out.map(part => typeof part === 'string' ? part : part.children).join(''), 'Hello there, how are you', 'the text is unchanged');
+  const quiet = sandbox.irl({fadeText: false, segments: ['a', 'b'], keys: [], fadeSegmentStartIndex: 0, fadeSegmentTimeline: timeline});
+  assert.deepEqual(JSON.parse(JSON.stringify(quiet)), ['a', 'b'], 'without fading the segments pass through as before');
 });
