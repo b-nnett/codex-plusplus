@@ -6,5 +6,8 @@ extension StartupAdapter {
 }
 
 extension StartupStatus {
-    static let switchrenderLabels: [String: String] = [:]
+    static let switchrenderLabels: [String: String] = [
+        "rememberedCodeHighlight": "Code stays highlighted across thread switches",
+        "largerMarkdownLexCache": "Larger markdown parse cache",
+    ]
 }
