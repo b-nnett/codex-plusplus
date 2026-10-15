@@ -64,4 +64,6 @@ else:
   replacements.append({'path':name,'sourceHash':hashlib.sha256(before).hexdigest(),'patchedHash':hashlib.sha256(after).hexdigest(),'edits':edits(before,after)})
  f.close();g.close();assert 1<=len(replacements)<=16
  manifest={'schema':1,'headerHash':headerHash,'version':receipt['version'],'build':receipt['build'],'transformFingerprint':fingerprint(),'settingsReport':json.loads((patched/'Contents/Resources/codexpp-settings-discovery.json').read_text()),'replacements':replacements}
+ startup=patched/'Contents/Resources/codexpp-startup-discovery.json'
+ if startup.exists():manifest['startupReport']=json.loads(startup.read_text())
  target=ROOT/'Assets/ReviewedPatches'/f'{headerHash}.json';target.write_text(json.dumps(manifest,separators=(',',':'))+'\n');print('Generated',target,len(replacements),'replacements,',target.stat().st_size,'bytes')
