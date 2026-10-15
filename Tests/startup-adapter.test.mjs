@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'capIdlePageSessions', 'childPagesPollOnSpaceRoute', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'queryTimings', 'queuedAppearanceChange', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'trashPaginationGuard', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -664,4 +664,137 @@ test('words whose fade has finished render as plain text; fading words stay span
   assert.equal(out.map(part => typeof part === 'string' ? part : part.children).join(''), 'Hello there, how are you', 'the text is unchanged');
   const quiet = sandbox.irl({fadeText: false, segments: ['a', 'b'], keys: [], fadeSegmentStartIndex: 0, fadeSegmentTimeline: timeline});
   assert.deepEqual(JSON.parse(JSON.stringify(quiet)), ['a', 'b'], 'without fading the segments pass through as before');
+});
+
+test('at most four idle page sessions wait out the grace period; protected sessions are never closed', () => {
+  const initial = 'var r1=new Map,EDo=12e4;function cDo(e){return e.session.getSnapshot().recoveryDrafts.length>0||e.session.hasDeferredLocalEdits}' +
+    'function uDo(e){return cDo(e)||e.session.getSnapshot().pendingUpdates>0}function mDo(e){return!1}' +
+    'function hDo(e){if(e.disposed||e.consumers!==0||uDo(e))return;let t=e.session.getSnapshot(),n=e.speculative||e.idleSince==null||mDo(e.scope)?0:EDo-Math.max(Date.now()-e.idleSince.wallMs,performance.now()-e.idleSince.monotonicMs);' +
+    'if(n<=0||t.status!==`connected`||!t.hasCanonicalDocument||t.errorCode!=null){_Do(e);return}e.disposalTimer??=setTimeout(()=>{e.disposalTimer=null,hDo(e)},n)}' +
+    'function gDo(e){e.disposalTimer!=null&&(clearTimeout(e.disposalTimer),e.disposalTimer=null)}' +
+    'function _Do(e){if(!e.disposed){e.disposed=!0,gDo(e);for(let t of e.keys)r1.get(t)===e&&r1.delete(t);e.session.dispose()}}';
+  const {initial: patched, applied} = adapt({initial});
+  assert.equal(applied.capIdlePageSessions, 'initial');
+  const run = source => {
+    let now = 1000, timers = 0;
+    const sandbox = {Date: {now: () => now}, performance: {now: () => now}, setTimeout: () => ++timers, clearTimeout() {}, Map, Set};
+    vm.runInNewContext(source + ';this.r1=r1;this.hDo=hDo;', sandbox);
+    const make = (id, snapshot = {}) => {
+      const entry = {id, keys: [`${id}:content`, `${id}:meta`], consumers: 1, disposed: false, idleSince: null, disposalTimer: null, speculative: false, closed: 0,
+        session: {hasDeferredLocalEdits: false, snap: {status: 'connected', hasCanonicalDocument: true, errorCode: null, pendingUpdates: 0, recoveryDrafts: [], ...snapshot},
+          getSnapshot() { return this.snap; }, dispose() { entry.closed++; }}};
+      for (const key of entry.keys) sandbox.r1.set(key, entry);
+      return entry;
+    };
+    // A consumer leaves: the session is idle from now on and waits out the grace period.
+    const release = entry => { now += 10; entry.consumers = 0; entry.idleSince = {wallMs: now, monotonicMs: now}; sandbox.hDo(entry); };
+    return {make, release, map: sandbox.r1};
+  };
+  const scenario = source => {
+    const {make, release, map} = run(source);
+    const open = make('open');                                  // still shown
+    const drafts = make('drafts');                              // recovery drafts
+    const late = make('late');                                  // goes idle first, gets an unsent edit later
+    release(late); late.session.snap.pendingUpdates = 1;
+    release(drafts); drafts.session.snap.recoveryDrafts = ['draft']; release(drafts);
+    const pages = Array.from({length: 7}, (_, i) => make(`page${i}`));
+    for (const page of pages) release(page);
+    return {open, drafts, late, pages, map};
+  };
+  const stock = scenario(initial);
+  assert.equal(stock.pages.filter(p => p.disposed).length, 0, 'stock keeps every idle session for 2 minutes');
+  const capped = scenario(patched);
+  assert.deepEqual(capped.pages.map(p => p.disposed), [true, true, true, false, false, false, false], 'the three longest-idle plain sessions are closed; four wait');
+  assert.ok(capped.pages.every(p => p.closed === (p.disposed ? 1 : 0)), 'each through the app\'s own disposal, once');
+  assert.ok(capped.pages.every(p => p.disposed !== p.keys.some(key => capped.map.has(key))), 'closed sessions leave the session map under every key');
+  assert.ok(!capped.open.disposed && !capped.drafts.disposed && !capped.late.disposed, 'sessions with consumers, drafts or pending updates are kept');
+});
+
+test('child-page lists poll only on a Space route, through the spaces list\'s own gate', () => {
+  const initial = 'var dP,jf,vDr,q={},qg={THIRTY_SECONDS:3e4};function Cu(e,t){return{read:t}}function Cxr(e,t){return t.metadataRefreshInterval}' +
+    'function init(){vDr=Cu(q,({get:e})=>e(jf).pathname?.startsWith(`/space`)===!0&&e(dP)!==!1)}' +
+    'function spaceRoots(t){return Cxr(1,{listId:`space-roots`,metadataRefreshInterval:t(vDr)?qg.THIRTY_SECONDS:!1})}' +
+    'function children(t,e){return Cxr(1,{accountId:1,listId:`parent:${e}`,checkpointEnabled:!1,metadataRefreshInterval:t(dP)!==!1&&qg.THIRTY_SECONDS})}';
+  const {initial: patched, applied} = adapt({initial});
+  assert.equal(applied.childPagesPollOnSpaceRoute, 'initial');
+  const run = (source, {initialised = true} = {}) => {
+    const sandbox = {};
+    vm.runInNewContext(source + ';this.atoms=()=>({dP,jf,vDr});this.init=init;this.children=children;dP={name:"focus"};jf={name:"location"};', sandbox);
+    if (initialised) sandbox.init();
+    return (pathname, focused) => {
+      const {dP, jf} = sandbox.atoms();
+      const get = atom => atom === dP ? focused : atom === jf ? {pathname} : atom.read({get});
+      return sandbox.children(get, 'folder');
+    };
+  };
+  const stock = run(initial), gated = run(patched);
+  assert.equal(stock('/local/thread-1', true), 3e4, 'stock polls off the Space route');
+  assert.equal(gated('/local/thread-1', true), false);
+  assert.equal(gated('/space/page-1', true), 3e4, 'on a Space route it polls as before');
+  assert.equal(gated('/space/page-1', false), false, 'not while the window is unfocused');
+  const early = run(patched, {initialised: false});
+  assert.equal(early('/local/thread-1', true), 3e4, 'before the gate exists, the original focus check applies');
+  assert.equal(early('/local/thread-1', false), false);
+});
+
+test('Empty Trash stops listing on a repeated cursor or after 200 pages and keeps what it collected', async () => {
+  const trash = 'export async function collect(ge,_,a){let l=[];{let e=new Set,t;do{let n=await ge.safeGet(`/pages/archived`,{parameters:{query:{cursor:t,limit:50}},signal:a.signal});' +
+    'for(let t of n.items)_.has(t.page_id)||e.add(t.page_id);t=n.next_cursor??void 0}while(t!=null);l=[...e]}return l}';
+  const {trash: patched, applied} = adapt({trash});
+  assert.equal(applied.trashPaginationGuard, 'trash');
+  const load = source => { const sandbox = {module: {}, Set}; vm.runInNewContext(source.replace('export async function collect', 'module.collect=async function'), sandbox); return sandbox.module.collect; };
+  const server = next => { const calls = []; return {calls, safeGet: async (path, {parameters: {query}}) => { calls.push(query.cursor); return next(query.cursor, calls.length); }}; };
+  const run = async (source, next) => { const ge = server(next); const items = await load(source)(ge, new Set(['skip']), {signal: {}}); return {items: [...items], calls: ge.calls}; };
+  // A normal three-page listing is unchanged.
+  const pages = {undefined: ['a', 'skip', 'c1'], c1: ['b', 'c2'], c2: ['c', null]};
+  const normal = await run(patched, cursor => ({items: pages[cursor].slice(0, -1).map(page_id => ({page_id})), next_cursor: pages[cursor].at(-1)}));
+  assert.deepEqual(normal, {items: ['a', 'b', 'c'], calls: [undefined, 'c1', 'c2']});
+  // A server that hands back the same cursor: stock would request it forever.
+  const repeated = await run(patched, (cursor, n) => ({items: [{page_id: `p${n}`}], next_cursor: 'again'}));
+  assert.deepEqual(repeated, {items: ['p1', 'p2'], calls: [undefined, 'again']});
+  const stockRepeated = await run(trash, (cursor, n) => { if (n > 500) throw new Error('still paging'); return {items: [], next_cursor: 'again'}; }).catch(e => e.message);
+  assert.equal(stockRepeated, 'still paging');
+  // A listing that never ends stops after 200 pages.
+  const endless = await run(patched, (cursor, n) => ({items: [{page_id: `p${n}`}], next_cursor: `c${n}`}));
+  assert.equal(endless.calls.length, 200); assert.equal(endless.items.length, 200);
+});
+
+test('a Space appearance change made while a save is in flight is sent when that save succeeds', async () => {
+  const appearance = 'export function make(P,m,E,c,x,j,O,p,s,I,L,d){let V;V=async e=>{if(!P||m==null||E?.saving===!0||c.get(x)!==m)return;let t=j(c,m);' +
+    'O({appearance:{emoji:I,theme:L,...e},saving:!0}),await p.safePatch(`/spaces/v2/{space_id}/appearance`,{parameters:{path:{space_id:s.id}},requestBody:e,signal:t.signal})' +
+    '.then(async e=>{t.signal.aborted||O({appearance:e,saving:!1})}).catch(()=>{O(E),t.signal.aborted||d.danger(`Could not save space appearance`)}).finally(()=>{t.signal.aborted&&O(null),t.stop()})};return V}';
+  const {appearance: patched, applied} = adapt({appearance});
+  assert.equal(applied.queuedAppearanceChange, 'appearance');
+  const run = (source, {fail = false} = {}) => {
+    const sandbox = {module: {}, Map, Promise};
+    vm.runInNewContext(source.replace('export function make', 'module.make=function'), sandbox);
+    const requests = [], shown = [], errors = [], pending = [];
+    const api = {safePatch: (path, {requestBody}) => { requests.push(JSON.parse(JSON.stringify(requestBody))); return new Promise((resolve, reject) => pending.push(() => fail ? reject(new Error('500')) : resolve({emoji: null, theme: null, ...requestBody}))); }};
+    const scope = {get: () => 'account'};
+    // Each render makes a new save function; E is that render's optimistic state.
+    const render = E => sandbox.module.make(true, 'account', E, scope, 'accountAtom', () => ({signal: {aborted: false}, stop() {}}), state => shown.push(state), api, {id: 'space-1'}, null, null, {danger: m => errors.push(m)});
+    const settle = async () => { while (pending.length) { pending.shift()(); await new Promise(resolve => setTimeout(resolve, 0)); } };
+    return {render, requests, shown, errors, settle, queue: () => sandbox.__codexPPAppearanceQueue};
+  };
+  const scenario = async (source, options) => {
+    const app = run(source, options);
+    const first = app.render(null)({theme: 'blue'});
+    const saving = app.render({appearance: {emoji: null, theme: 'blue'}, saving: true});
+    saving({theme: 'red'}); saving({emoji: 'star'});
+    await app.settle(); await first;
+    return app;
+  };
+  const stock = await scenario(appearance);
+  assert.deepEqual(stock.requests, [{theme: 'blue'}], 'stock drops changes made during the save');
+  const queued = await scenario(patched);
+  assert.deepEqual(queued.requests, [{theme: 'blue'}, {theme: 'red', emoji: 'star'}], 'the latest changes are merged and sent after the first save');
+  assert.deepEqual(JSON.parse(JSON.stringify(queued.shown.at(-1))), {appearance: {emoji: 'star', theme: 'red'}, saving: false});
+  assert.equal(queued.queue().size, 0);
+  const failed = await scenario(patched, {fail: true});
+  assert.deepEqual(failed.requests, [{theme: 'blue'}], 'a failed save drops the queued change with it');
+  assert.equal(failed.errors.length, 1); assert.equal(failed.queue().size, 0);
+  // Without a save in flight, each change is sent at once, as before.
+  const app = run(patched);
+  const one = app.render(null)({emoji: 'a'}); await app.settle(); await one;
+  assert.deepEqual(app.requests, [{emoji: 'a'}]);
 });

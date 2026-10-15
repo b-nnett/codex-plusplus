@@ -11,7 +11,7 @@ public enum StartupAdapter {
         public let applied: [String: String]
         public let skipped: [String: String]
     }
-    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let css: [String: String]? }
+    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let css: [String: String]? }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
         do {
@@ -45,6 +45,22 @@ public enum StartupAdapter {
                 }
                 return matches.count == 1 ? matches[0] : nil
             }()
+            // Space chunks, picked by content when several hashed copies share a prefix.
+            func spaceModule(_ prefix: String, containing marker: String) throws -> (String, String)? {
+                let paths = try archive.packedFiles(in: "webview/assets").filter {
+                    let name = URL(fileURLWithPath: $0).lastPathComponent
+                    return name.hasPrefix(prefix) && name.hasSuffix(".js")
+                }
+                let matches = try paths.compactMap { path -> (String, String)? in
+                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
+                    guard data.count <= 8 * 1024 * 1024, let source = String(data: data, encoding: .utf8), source.contains(marker) else { return nil }
+                    return (path, source)
+                }
+                return matches.count == 1 ? matches[0] : nil
+            }
+            // Empty Trash in a Space, and a Space's icon and colour picker.
+            let trash = try spaceModule("space-trash-items-", containing: "`/pages/archived`")
+            let appearance = try spaceModule("space-appearance-button-", containing: "/spaces/v2/{space_id}/appearance")
             // index.html and its entry module, for the entry preload hints.
             let htmlPath = "webview/index.html"
             let htmlData = try replacements.first(where: { $0.0 == htmlPath })?.1 ?? archive.data(at: htmlPath)
@@ -63,6 +79,8 @@ public enum StartupAdapter {
             if let main { input["main"] = main.1 }
             if let network { input["network"] = network.1 }
             if let checkout { input["checkout"] = checkout.1 }
+            if let trash { input["trash"] = trash.1 }
+            if let appearance { input["appearance"] = appearance.1 }
             if let html, let entry { input["html"] = html; input["entry"] = entry.1 }
             // Every stylesheet, for the viewport container-query rewrite.
             var stylesheets: [String: String] = [:]
@@ -80,6 +98,8 @@ public enum StartupAdapter {
             if let source = output.main, let main { result.append((main.0, Data(source.utf8))) }
             if let source = output.network, let network { result.append((network.0, Data(source.utf8))) }
             if let source = output.checkout, let checkout { result.append((checkout.0, Data(source.utf8))) }
+            if let source = output.trash, let trash { result.append((trash.0, Data(source.utf8))) }
+            if let source = output.appearance, let appearance { result.append((appearance.0, Data(source.utf8))) }
             for (path, source) in output.css ?? [:] where stylesheets[path] != nil { result.append((path, Data(source.utf8))) }
             return Result(replacements: result, applied: output.applied, skipped: output.skipped)
         } catch {
@@ -131,6 +151,8 @@ public struct StartupStatus: Equatable, Sendable {
         "deferDockIcon": "Deferred Dock icon", "caretBlinkTimeout": "Idle text cursor", "compositorShimmer": "Compositor loading shimmer", "viewportContainerQueries": "Breakpoints without full restyles", "shellResizeSync": "Steady chat column while resizing", "coalesceBrowserMenuRefresh": "Fewer menu rebuilds while resizing", "lazyPageWindowPrewarm": "On-demand Page window",
         "lazyAvatarOverlayPrewarm": "On-demand avatar overlay", "lazyDetachedWindowPrewarm": "On-demand detached window", "lazyHotkeyWindowPrewarm": "On-demand hotkey window", "lazyCheckoutPricingPrewarm": "On-demand upgrade page", "lazyCheckoutCreditPrewarm": "On-demand credit checkout", "skipHiddenThreadRefetch": "No MCP refetch for hidden threads",
         "wakeAwarePongTimeout": "Connections kept across sleep", "predictOnlyOpenThreads": "Predictions only for open threads", "plainSettledWords": "Lighter streaming text",
+        "capIdlePageSessions": "Fewer idle Page connections", "childPagesPollOnSpaceRoute": "Folder refreshes only in Spaces",
+        "trashPaginationGuard": "Bounded Empty Trash listing", "queuedAppearanceChange": "Space appearance changes kept while saving",
     ]
     public let active: [String]
     /// Speed-ups that did not match this build, with the adapter's reason.

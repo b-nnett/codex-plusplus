@@ -249,12 +249,12 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     const member = (node, name) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
-    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [] };
+    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [], trash: [], appearance: [] };
     // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
     // ship only in development builds of the helper (input.diagnostics).
     const diagnostics = input.diagnostics === true;
     const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
-    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout };
+    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout, trash: input.trash, appearance: input.appearance };
     if (Object.values(sources).some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
     }
@@ -898,6 +898,141 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `ppText!=null&&(ppOut.push(ppText),ppText=null);ppOut.push(ppEach(ppSegment,ppIndex))}),ppText!=null&&ppOut.push(ppText),ppOut))` +
           `([],null,${sources.initial.slice(each.start, each.end)})` }));
     } else skipped.plainSettledWords = 'module not found';
+
+    // capIdlePageSessions: closing a Page keeps its realtime session (a
+    // websocket, the CRDT document and its heartbeat) for 2 minutes so that
+    // reopening it is instant, with no limit on how many are kept: browsing
+    // 40 pages in a Space leaves 40 live sockets for those 2 minutes. At most 4
+    // idle sessions now wait out the grace period; when another one starts
+    // waiting, the longest-idle ones are closed at once through the app's own
+    // disposal. A session that has consumers, pending updates, deferred local
+    // edits, recovery drafts or an unfinished local save is never counted or
+    // closed (the same checks the app makes before disposing).
+    if (trees.initial) {
+      const caps = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 1 || node.params[0].type !== 'Identifier') return;
+        const p = node.params[0].name, body = node.body.body, first = body[0];
+        if (first?.type !== 'IfStatement' || first.consequent.type !== 'ReturnStatement' || first.test.type !== 'LogicalExpression') return;
+        const guard = first.test.right;
+        if (!sources.initial.slice(first.test.start, first.test.end).startsWith(`${p}.disposed||${p}.consumers!==0||`) || guard.type !== 'CallExpression' ||
+            guard.callee.type !== 'Identifier' || guard.arguments.length !== 1 || guard.arguments[0].type !== 'Identifier' || guard.arguments[0].name !== p) return;
+        const timer = body.find(s => s.type === 'ExpressionStatement' && s.expression.type === 'AssignmentExpression' && s.expression.operator === '??=' &&
+          sources.initial.slice(s.expression.left.start, s.expression.left.end) === `${p}.disposalTimer` && s.expression.right.type === 'CallExpression' &&
+          s.expression.right.callee.type === 'Identifier' && s.expression.right.callee.name === 'setTimeout');
+        const now = body.find(s => s.type === 'IfStatement' && sources.initial.slice(s.test.start, s.test.end).includes('!==`connected`') &&
+          s.consequent.type === 'BlockStatement' && s.consequent.body.length === 2 && s.consequent.body[1].type === 'ReturnStatement');
+        const call = now?.consequent.body[0].expression;
+        if (!timer || call?.type !== 'CallExpression' || call.callee.type !== 'Identifier' || call.arguments[0]?.name !== p) return;
+        // The disposal function removes the session from the session map under each of its keys.
+        let map = null;
+        walk(trees.initial, fn => {
+          if (fn.type !== 'FunctionDeclaration' || fn.id?.name !== call.callee.name || fn.params.length !== 1) return;
+          const q = fn.params[0].name;
+          walk(fn.body, loop => {
+            if (loop.type !== 'ForOfStatement' || sources.initial.slice(loop.right.start, loop.right.end) !== `${q}.keys`) return;
+            const m = /^([A-Za-z_$][\w$]*)\.get\(([A-Za-z_$][\w$]*)\)===([A-Za-z_$][\w$]*)&&\1\.delete\(\2\);?$/.exec(sources.initial.slice(loop.body.start, loop.body.end));
+            if (m && m[3] === q) map = m[1];
+          });
+        });
+        if (map) caps.push({ timer, p, guard: guard.callee.name, dispose: call.callee.name, map });
+      });
+      record('capIdlePageSessions', 'initial', caps, ({ timer, p, guard, dispose, map }) => ({ start: timer.start, end: timer.end,
+        text: `${marker}try{const ppIdle=[...new Set(${map}.values())].filter(ppEntry=>ppEntry===${p}||!ppEntry.disposed&&ppEntry.consumers===0&&ppEntry.idleSince!=null&&` +
+          `ppEntry.disposalTimer!=null&&!${guard}(ppEntry)).sort((ppA,ppB)=>ppA.idleSince.monotonicMs-ppB.idleSince.monotonicMs);` +
+          `for(let ppExtra=ppIdle.length-4;ppExtra>0;ppExtra--){const ppOldest=ppIdle.shift();ppOldest.consumers===0&&!${guard}(ppOldest)&&${dispose}(ppOldest)}}catch{}` +
+          `if(${p}.disposed)return;${sources.initial.slice(timer.start, timer.end)}` }));
+
+      // childPagesPollOnSpaceRoute: each expanded folder in the Space sidebar
+      // keeps a child-page list query that refetches every 30 s while the
+      // window is focused, also when the app is showing a chat and not a Space.
+      // The spaces list next to it polls only on a /space route (its own
+      // route-and-focus gate). The child lists now use that same gate, so they
+      // poll on Space routes as before and stop elsewhere; they still refetch
+      // when they mount and whenever they become stale. Before the gate is
+      // initialised, the original focus check applies.
+      const gates = [], polls = [];
+      walk(trees.initial, (node, ancestors) => {
+        if (node.type === 'ArrowFunctionExpression' && node.params.length === 1 && node.params[0].type === 'ObjectPattern' && node.body.type === 'LogicalExpression' &&
+            node.body.operator === '&&' && sources.initial.slice(node.body.left.start, node.body.left.end).endsWith('.pathname?.startsWith(`/space`)===!0')) {
+          const focus = node.body.right, holder = ancestors.at(-2);
+          if (focus.type === 'BinaryExpression' && focus.operator === '!==' && isFalse(focus.right) && focus.left.type === 'CallExpression' &&
+              focus.left.arguments.length === 1 && focus.left.arguments[0].type === 'Identifier' && ancestors.at(-1)?.type === 'CallExpression') {
+            const name = holder?.type === 'AssignmentExpression' && holder.left.type === 'Identifier' ? holder.left.name
+              : holder?.type === 'VariableDeclarator' && holder.id.type === 'Identifier' ? holder.id.name : null;
+            if (name) gates.push({ name, focus: focus.left.arguments[0].name });
+          }
+        }
+        if (node.type !== 'ObjectExpression') return;
+        const props = new Map(node.properties.filter(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier').map(p => [p.key.name, p.value]));
+        const list = props.get('listId'), interval = props.get('metadataRefreshInterval');
+        if (list?.type !== 'TemplateLiteral' || !list.quasis[0].value.cooked.startsWith('parent:') || interval?.type !== 'LogicalExpression' || interval.operator !== '&&') return;
+        const test = interval.left;
+        if (test.type === 'BinaryExpression' && test.operator === '!==' && isFalse(test.right) && test.left.type === 'CallExpression' && test.left.callee.type === 'Identifier' &&
+            test.left.arguments.length === 1 && test.left.arguments[0].type === 'Identifier') polls.push({ test, get: test.left.callee.name, focus: test.left.arguments[0].name });
+      });
+      if (gates.length !== 1) skipped.childPagesPollOnSpaceRoute = `expected one Space route gate, found ${gates.length}`;
+      else record('childPagesPollOnSpaceRoute', 'initial', polls.filter(poll => poll.focus === gates[0].focus), ({ test, get }) => ({ start: test.start, end: test.end,
+        text: `${marker}(${gates[0].name}==null?${sources.initial.slice(test.start, test.end)}:${get}(${gates[0].name}))` }));
+    } else skipped.capIdlePageSessions = skipped.childPagesPollOnSpaceRoute = 'module not found';
+
+    // trashPaginationGuard: Empty Trash in a Space first lists every archived
+    // page, following next_cursor until the server returns none. A cursor that
+    // repeats (or a listing that never ends) kept the loop requesting forever
+    // and the dialog never finished; the spaces list guards the same pattern.
+    // The loop now also stops when a cursor repeats or after 200 pages
+    // (10,000 items), and goes on with the pages collected so far.
+    if (trees.trash) {
+      const loops = [];
+      walk(trees.trash, node => {
+        if (node.type !== 'DoWhileStatement' || node.test.type !== 'BinaryExpression' || node.test.operator !== '!=' || node.test.left.type !== 'Identifier' ||
+            node.test.right.type !== 'Literal' || node.test.right.value !== null) return;
+        const cursor = node.test.left.name, body = sources.trash.slice(node.body.start, node.body.end);
+        if (body.includes('`/pages/archived`') && body.includes(`cursor:${cursor}`) &&
+            new RegExp(`[;,{]${cursor.replace(/\$/g, '\\$')}=[^;,]*\\.next_cursor\\?\\?void 0`).test(body)) loops.push({ node, cursor });
+      });
+      record('trashPaginationGuard', 'trash', loops, ({ node, cursor }) => ({ start: node.start, end: node.end,
+        text: `${marker}{const ppSeen=new Set;do${sources.trash.slice(node.body.start, node.body.end)}while(${sources.trash.slice(node.test.start, node.test.end)}&&` +
+          `!(ppSeen.has(${cursor})||ppSeen.add(${cursor}).size>=200));}` }));
+    } else skipped.trashPaginationGuard = 'module not found';
+
+    // queuedAppearanceChange: a Space's icon and colour are saved with one
+    // request per change, and a change made while a save was still in flight
+    // was dropped without a word (the picker showed it, then reverted). The
+    // latest change made during a save is now kept (several merge into one)
+    // and sent when that save succeeds, through the same save path and its
+    // checks. If the save fails, the queued change is dropped with it.
+    if (trees.appearance) {
+      const saves = [];
+      walk(trees.appearance, (node, ancestors) => {
+        if (node.type !== 'ArrowFunctionExpression' || !node.async || node.params.length !== 1 || node.params[0].type !== 'Identifier' || node.body.type !== 'BlockStatement') return;
+        const first = node.body.body[0];
+        if (first?.type !== 'IfStatement' || first.consequent.type !== 'ReturnStatement' || !sources.appearance.slice(first.test.start, first.test.end).includes('.saving===!0')) return;
+        if (ancestors.at(-1)?.type !== 'AssignmentExpression') return;
+        let then = null, space = null, signal = null;
+        walk(node.body, inner => {
+          if (!member(inner, 'then') || inner.arguments.length !== 1) return;
+          const patch = inner.callee.object;
+          if (!member(patch, 'safePatch') || patch.arguments.length !== 2 || patch.arguments[0].type !== 'TemplateLiteral' ||
+              patch.arguments[0].quasis[0].value.cooked !== '/spaces/v2/{space_id}/appearance') return;
+          const options = sources.appearance.slice(patch.arguments[1].start, patch.arguments[1].end);
+          const id = /path:\{space_id:([A-Za-z_$][\w$]*\.id)\}/.exec(options), aborts = /signal:([A-Za-z_$][\w$]*)\.signal[,}]/.exec(options);
+          if (id && aborts) { then = inner.arguments[0]; space = id[1]; signal = aborts[1]; }
+        });
+        if (then) saves.push({ node, then, space, signal });
+      });
+      record('queuedAppearanceChange', 'appearance', saves, ({ node, then, space, signal }) => {
+        const src = sources.appearance;
+        // The original save, with its success callback marking whether the save went through.
+        const original = src.slice(node.start, then.start) + `async(...ppArgs)=>{await(${src.slice(then.start, then.end)})(...ppArgs);ppMine.saved=!${signal}.signal.aborted}` +
+          src.slice(then.end, node.end);
+        return { start: node.start, end: node.end,
+          text: `${marker}async function ppSaveAppearance(ppPatch){const ppQueue=globalThis.__codexPPAppearanceQueue??=new Map,ppKey=${space},ppBusy=ppQueue.get(ppKey);` +
+            `if(ppBusy){ppBusy.pending={...ppBusy.pending,...ppPatch};return}const ppMine={pending:null,saved:!1};ppQueue.set(ppKey,ppMine);` +
+            `try{await(${original})(ppPatch)}finally{ppQueue.get(ppKey)===ppMine&&ppQueue.delete(ppKey)}` +
+            `ppMine.saved&&ppMine.pending!=null&&await ppSaveAppearance({...ppPatch,...ppMine.pending})}` };
+      });
+    } else skipped.queuedAppearanceChange = 'module not found';
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;
