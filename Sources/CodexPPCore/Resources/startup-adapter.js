@@ -249,12 +249,12 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     const member = (node, name) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
-    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [], trash: [], appearance: [] };
+    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [], trash: [], appearance: [], appServer: [], remoteSettings: [] };
     // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
     // ship only in development builds of the helper (input.diagnostics).
     const diagnostics = input.diagnostics === true;
     const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
-    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout, trash: input.trash, appearance: input.appearance };
+    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout, trash: input.trash, appearance: input.appearance, appServer: input.appServer, remoteSettings: input.remoteSettings };
     if (Object.values(sources).some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
     }
@@ -1033,6 +1033,176 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
             `ppMine.saved&&ppMine.pending!=null&&await ppSaveAppearance({...ppPatch,...ppMine.pending})}` };
       });
     } else skipped.queuedAppearanceChange = 'module not found';
+    // stderrNotConnectionError (main process, app-server connection): the stdio
+    // transport reports every non-empty line the app-server writes to stderr
+    // through onerror, and the connection stored each one as its connection
+    // error ({code: "connection-failed", message: <line>}), which every window
+    // then receives with the next connection-state broadcast, even while the
+    // host stays connected; harmless WARN lines did this hundreds of times. A
+    // stderr line (an error event without an error object) of a stdio
+    // transport whose process is still running is now only logged as before.
+    // The transport still keeps the last line, which becomes the close reason
+    // and the "most recent error" when the process exits; process and stdin
+    // errors, websocket errors and lines that mean restart or update required
+    // are recorded as before.
+    if (trees.appServer) {
+      const handlers = [];
+      walk(trees.appServer, node => {
+        if (node.type !== 'AssignmentExpression' || node.left.type !== 'MemberExpression' || node.left.computed || node.left.property.name !== 'onerror' ||
+            node.left.object.type !== 'Identifier' || node.right.type !== 'ArrowFunctionExpression' || node.right.params.length !== 1 || node.right.params[0].type !== 'Identifier') return;
+        const handler = node.right, connection = node.left.object.name, event = handler.params[0].name;
+        const text = sources.appServer.slice(handler.start, handler.end);
+        if (!text.includes('`Codex CLI stderr`') || !text.includes('this.options.transport.kind') || !text.includes(`this.connection!==${connection}`)) return;
+        walk(handler.body, set => {
+          if (set.type === 'AssignmentExpression' && set.operator === '=' && set.left.type === 'MemberExpression' && set.left.object.type === 'ThisExpression' &&
+              !set.left.computed && set.left.property.name === 'connectionError' && set.right.type === 'CallExpression' && set.right.arguments.length === 1) handlers.push({ set, connection, event });
+        });
+      });
+      record('stderrNotConnectionError', 'appServer', handlers, ({ set, connection, event }) => ({ start: set.start, end: set.end,
+        text: `${marker}((ppError)=>this.options.transport.kind===\`stdio\`&&${connection}.readyState===1&&!(${event}!=null&&typeof ${event}=="object"&&"error" in ${event})&&` +
+          `ppError?.code===\`connection-failed\`||(this.connectionError=ppError))(${sources.appServer.slice(set.right.start, set.right.end)})` }));
+    } else skipped.stderrNotConnectionError = 'module not found';
+
+    // remoteControlBackoff (main process, remote-control websocket): while any
+    // remote-control stream is open, a dropped websocket is reopened 1 s later,
+    // and a failed attempt (each one enrolls the client and asks for a new
+    // handshake) schedules the next 1 s later, forever. Retries now back off:
+    // 1 s, doubling to 30 s, with +-20% jitter, back to 1 s once a websocket is
+    // installed again.
+    if (trees.appServer) {
+      const reconnects = [];
+      walk(trees.appServer, node => {
+        if (node.type !== 'ClassBody') return;
+        const method = name => node.body.find(m => m.type === 'MethodDefinition' && !m.computed && m.key.type === 'Identifier' && m.key.name === name);
+        const schedule = method('scheduleReconnect'), install = method('installWebsocket');
+        if (!schedule || !install || !method('ensureOpen')) return;
+        walk(schedule.value.body, (call, ancestors) => {
+          if (call.type !== 'CallExpression' || call.callee.type !== 'Identifier' || call.callee.name !== 'setTimeout' || call.arguments.length !== 2) return;
+          if (ancestors.some(a => a.type === 'FunctionExpression' || a.type === 'FunctionDeclaration')) return;
+          const [fire, delay] = call.arguments;
+          if (fire.type !== 'ArrowFunctionExpression' || delay.type !== 'Identifier' || !sources.appServer.slice(fire.start, fire.end).includes('this.ensureOpen().catch(')) return;
+          reconnects.push({ delay, install });
+        });
+      });
+      record('remoteControlBackoff', 'appServer', reconnects, ({ delay, install }) => [
+        { start: delay.start, end: delay.end,
+          text: `${marker}((ppStep)=>(this.ppRemoteBackoff=ppStep+1,Math.min(${delay.name}*2**ppStep,3e4)*(.8+Math.random()*.4)))(Math.min(this.ppRemoteBackoff??0,5))` },
+        { start: install.value.body.start + 1, end: install.value.body.start + 1, text: `${marker}this.ppRemoteBackoff=0;` },
+      ]);
+    } else skipped.remoteControlBackoff = 'module not found';
+
+    // pubsubReconnectCap: the ChatGPT pubsub socket grows its reconnect delay
+    // without limit (x1.5 from 1-5 s while focused, x2 from 2-10 s in the
+    // background), so after a long outage the next attempt can be hours away,
+    // and focusing the window reconnects only once every retry is used up.
+    // The delay is now capped at 60 s; focusing the window also reconnects at
+    // once while a retry is merely waiting; and the window's online event
+    // reconnects a socket that is not open. reconnect() clears the pending
+    // timer and does nothing while a socket exists or after close().
+    if (trees.shared) {
+      const caps = [], focus = [], listeners = [];
+      const keys = ['maxReconnectionDelay', 'maxRetries', 'minReconnectionDelay', 'reconnectionDelayGrowFactor'];
+      walk(trees.shared, (node, ancestors) => {
+        if (node.type === 'ObjectExpression' && node.properties.length === keys.length) {
+          const names = node.properties.map(p => p.type === 'Property' && !p.computed && p.key.type === 'Identifier' ? p.key.name : null);
+          const cap = node.properties[names.indexOf('maxReconnectionDelay')]?.value;
+          if (keys.every(k => names.includes(k)) && cap?.type === 'BinaryExpression' && cap.operator === '/' && cap.left.value === 1 && cap.right.value === 0) caps.push(cap);
+        }
+        if (node.type === 'PropertyDefinition' && !node.computed && node.key.name === 'handleWindowFocusChange' && node.value?.type === 'ArrowFunctionExpression' &&
+            sources.shared.slice(node.value.start, node.value.end).includes('this.isTransportOpen')) {
+          walk(node.value.body, test => {
+            if (test.type === 'UnaryExpression' && test.operator === '!' && test.argument.type === 'MemberExpression' && !test.argument.computed &&
+                test.argument.property.name === 'shouldReconnect' && test.argument.object.type === 'MemberExpression' && test.argument.object.object.type === 'ThisExpression') {
+              focus.push({ test, socket: sources.shared.slice(test.argument.object.start, test.argument.object.end), owner: ancestors[ancestors.length - 1] });
+            }
+          });
+        }
+        if ((member(node, 'addEventListener') || member(node, 'removeEventListener')) && node.callee.object.type === 'Identifier' && node.callee.object.name === 'window' &&
+            node.arguments.length === 2 && node.arguments[0].type === 'TemplateLiteral' && node.arguments[0].expressions.length === 0 && node.arguments[0].quasis[0].value.cooked === 'focus' &&
+            sources.shared.slice(node.arguments[1].start, node.arguments[1].end) === 'this.handleWindowFocusChange' &&
+            ['SequenceExpression', 'ExpressionStatement'].includes(ancestors[ancestors.length - 1]?.type)) {
+          listeners.push({ call: node, add: member(node, 'addEventListener'), owner: [...ancestors].reverse().find(a => a.type === 'ClassBody') });
+        }
+      });
+      const owner = focus[0]?.owner, add = listeners.filter(l => l.add && l.owner === owner), remove = listeners.filter(l => !l.add && l.owner === owner);
+      const matches = caps.length === 2 && focus.length === 1 && add.length === 1 && remove.length === 1 ? [{ caps, ...focus[0], add: add[0].call, remove: remove[0].call }] : [];
+      record('pubsubReconnectCap', 'shared', matches, ({ caps, test, socket, add, remove }) => [
+        ...caps.map(cap => ({ start: cap.start, end: cap.end, text: `${marker}6e4` })),
+        { start: test.start, end: test.end, text: `${marker}(${sources.shared.slice(test.start, test.end)}||${socket}.reconnectTimer!=null)` },
+        { start: add.end, end: add.end, text: `${marker},window.addEventListener(\`online\`,this.ppOnline??=()=>{this.isTransportOpen||${socket}.reconnect?.()})` },
+        { start: remove.end, end: remove.end, text: `${marker},window.removeEventListener(\`online\`,this.ppOnline)` },
+      ]);
+    } else skipped.pubsubReconnectCap = 'module not found';
+
+    // resumeVisibleThreadFirst: when a host's websocket reconnects, the window
+    // marks every conversation for resume, refreshes the whole recent-thread
+    // list, and only after that resumes the conversation on screen, so the
+    // thread the user is looking at waits for the list. Its resume now starts
+    // together with the refresh; both are awaited, and the failure handling
+    // and the recovery log fields are unchanged.
+    if (trees.initial) {
+      const recoveries = [];
+      walk(trees.initial, node => {
+        if (node.type !== 'BlockStatement') return;
+        const body = node.body;
+        for (let i = 1; i + 1 < body.length; i++) {
+          const refresh = body[i], next = body[i + 1];
+          if (refresh.type !== 'TryStatement' || !refresh.handler || !sources.initial.slice(refresh.block.start, refresh.block.end).includes('.refreshRecentConversations()')) continue;
+          if (!body.slice(0, i).some(s => /\.markAllConversationsNeedResumeAfterReconnect\(\{restoreStreams:/.test(sources.initial.slice(s.start, s.end)))) continue;
+          if (next.type !== 'VariableDeclaration' || next.declarations.length !== 1) continue;
+          const init = next.declarations[0].init;
+          if (init?.type !== 'ConditionalExpression' || init.alternate.type !== 'AwaitExpression' || init.alternate.argument.type !== 'CallExpression') continue;
+          recoveries.push({ refresh, test: init.test, call: init.alternate.argument });
+        }
+      });
+      record('resumeVisibleThreadFirst', 'initial', recoveries, ({ refresh, test, call }) => [
+        { start: refresh.start, end: refresh.start,
+          text: `${marker}let ppResume=${sources.initial.slice(test.start, test.end)}?null:${sources.initial.slice(call.start, call.end)};ppResume?.catch(()=>{});` },
+        { start: call.start, end: call.end, text: `${marker}ppResume` },
+      ]);
+    } else skipped.resumeVisibleThreadFirst = 'module not found';
+
+    // remoteSettingsPollWhenVisible: the Remote Connections settings page
+    // refreshes the remote and remote-control connection lists every 15 s for
+    // as long as it is mounted, also while the window is hidden or minimised.
+    // Ticks are now skipped while the document is hidden.
+    if (trees.remoteSettings) {
+      const polls = [];
+      walk(trees.remoteSettings, (node, ancestors) => {
+        if (!member(node, 'setInterval') || node.callee.object.type !== 'Identifier' || node.callee.object.name !== 'window' || node.arguments.length !== 2) return;
+        const [tick, interval] = node.arguments;
+        if (tick.type !== 'ArrowFunctionExpression' || tick.params.length !== 0 || tick.body.type !== 'BlockStatement' || tick.body.body.length !== 1 || interval.type !== 'Identifier') return;
+        const call = tick.body.body[0].expression;
+        if (call?.type !== 'CallExpression' || call.callee.type !== 'Identifier' || call.arguments.length !== 0) return;
+        const effect = [...ancestors].reverse().find(a => a.type === 'ArrowFunctionExpression');
+        const text = effect ? sources.remoteSettings.slice(effect.start, effect.end) : '';
+        if (text.includes('new AbortController') && text.includes('window.clearInterval(')) polls.push(call);
+      });
+      record('remoteSettingsPollWhenVisible', 'remoteSettings', polls, call => ({ start: call.start, end: call.start, text: `${marker}document.hidden||` }));
+    } else skipped.remoteSettingsPollWhenVisible = 'module not found';
+
+    // quietSidebarRebind (main process): the Browser sidebar registers its
+    // window on every browser-panel request, and each call recorded a debug
+    // event and logged "rebound browser sidebar window" although the owner had
+    // not changed (tens of thousands of lines a day, up to 138 a second). When
+    // the owner is the same, the call now returns after ensuring the window
+    // record; a new or changed owner is handled and logged as before.
+    if (trees.main) {
+      const registrations = [];
+      walk(trees.main, node => {
+        if (node.type !== 'MethodDefinition' || node.computed || node.key.name !== 'registerWindow' || node.value.params.length !== 1 || node.value.params[0].type !== 'ObjectPattern') return;
+        const owner = node.value.params[0].properties.find(p => p.type === 'Property' && !p.computed && p.key.name === 'ownerWebContentsId' && p.value.type === 'Identifier');
+        const body = node.value.body.body;
+        if (!owner || body.length !== 3 || body[0].type !== 'VariableDeclaration' || body[1].type !== 'IfStatement' || body[2].type !== 'ExpressionStatement') return;
+        const declarations = body[0].declarations, ensure = declarations.findIndex(d => member(d.init, 'ensureWindowRecord'));
+        const previous = declarations[ensure - 1];
+        if (ensure < 1 || previous.id.type !== 'Identifier' || !/\.ownerWebContentsId$/.test(sources.main.slice(previous.init.start, previous.init.end))) return;
+        const tail = sources.main.slice(body[2].start, body[2].end);
+        if (!tail.includes('this.recordDebugEvent(') || !tail.includes('`browser-window-owner-rebound`')) return;
+        registrations.push({ at: body[1], previous: previous.id.name, owner: owner.value.name });
+      });
+      record('quietSidebarRebind', 'main', registrations, ({ at, previous, owner }) => ({ start: at.start, end: at.start, text: `${marker}if(${previous}===${owner})return;` }));
+    } else skipped.quietSidebarRebind = 'module not found';
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;

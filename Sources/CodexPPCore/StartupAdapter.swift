@@ -11,7 +11,7 @@ public enum StartupAdapter {
         public let applied: [String: String]
         public let skipped: [String: String]
     }
-    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let css: [String: String]? }
+    struct Output: Decodable { let applied: [String: String]; let skipped: [String: String]; let shared: String?; let initial: String?; let requirements: String?; let html: String?; let main: String?; let network: String?; let checkout: String?; let trash: String?; let appearance: String?; let appServer: String?; let remoteSettings: String?; let css: [String: String]? }
 
     public static func discover(archive: AsarArchive, replacements: [(String, Data)]) -> Result? {
         do {
@@ -31,6 +31,23 @@ public enum StartupAdapter {
             let main = try module("main-", in: ".vite/build")
             // The app-server websocket transport (its keep-alive ping).
             let network = try module("application-network-startup-", in: ".vite/build")
+            // The Remote Connections settings page (its refresh poll).
+            let remoteSettings = try module("remote-connections-settings-")
+            // The app-server connection and remote-control websocket live in one
+            // of several .vite/build/src-* chunks.
+            let appServer: (String, String)? = try {
+                let paths = try archive.packedFiles(in: ".vite/build").filter {
+                    let name = URL(fileURLWithPath: $0).lastPathComponent
+                    return name.hasPrefix("src-") && name.hasSuffix(".js")
+                }
+                let matches = try paths.compactMap { path -> (String, String)? in
+                    let data = try replacements.first(where: { $0.0 == path })?.1 ?? archive.data(at: path)
+                    guard data.count <= 32 * 1024 * 1024, let source = String(data: data, encoding: .utf8),
+                          source.contains("(`AppServerConnection`)") else { return nil }
+                    return (path, source)
+                }
+                return matches.count == 1 ? matches[0] : nil
+            }()
             // The checkout webview hosts live in one of several webview-page-* chunks.
             let checkout: (String, String)? = try {
                 let paths = try archive.packedFiles(in: "webview/assets").filter {
@@ -78,6 +95,8 @@ public enum StartupAdapter {
             if let requirements { input["requirements"] = requirements.1 }
             if let main { input["main"] = main.1 }
             if let network { input["network"] = network.1 }
+            if let appServer { input["appServer"] = appServer.1 }
+            if let remoteSettings { input["remoteSettings"] = remoteSettings.1 }
             if let checkout { input["checkout"] = checkout.1 }
             if let trash { input["trash"] = trash.1 }
             if let appearance { input["appearance"] = appearance.1 }
@@ -97,6 +116,8 @@ public enum StartupAdapter {
             if let source = output.html { result.append((htmlPath, Data(source.utf8))) }
             if let source = output.main, let main { result.append((main.0, Data(source.utf8))) }
             if let source = output.network, let network { result.append((network.0, Data(source.utf8))) }
+            if let source = output.appServer, let appServer { result.append((appServer.0, Data(source.utf8))) }
+            if let source = output.remoteSettings, let remoteSettings { result.append((remoteSettings.0, Data(source.utf8))) }
             if let source = output.checkout, let checkout { result.append((checkout.0, Data(source.utf8))) }
             if let source = output.trash, let trash { result.append((trash.0, Data(source.utf8))) }
             if let source = output.appearance, let appearance { result.append((appearance.0, Data(source.utf8))) }
@@ -153,6 +174,9 @@ public struct StartupStatus: Equatable, Sendable {
         "wakeAwarePongTimeout": "Connections kept across sleep", "predictOnlyOpenThreads": "Predictions only for open threads", "plainSettledWords": "Lighter streaming text",
         "capIdlePageSessions": "Fewer idle Page connections", "childPagesPollOnSpaceRoute": "Folder refreshes only in Spaces",
         "trashPaginationGuard": "Bounded Empty Trash listing", "queuedAppearanceChange": "Space appearance changes kept while saving",
+        "stderrNotConnectionError": "App-server warnings not shown as connection errors", "remoteControlBackoff": "Remote-control reconnect backoff",
+        "pubsubReconnectCap": "Prompt ChatGPT live-update reconnects", "resumeVisibleThreadFirst": "Open thread resumed first after reconnect",
+        "remoteSettingsPollWhenVisible": "Remote Connections refresh only while visible", "quietSidebarRebind": "Quieter Browser sidebar log",
     ]
     public let active: [String]
     /// Speed-ups that did not match this build, with the adapter's reason.
