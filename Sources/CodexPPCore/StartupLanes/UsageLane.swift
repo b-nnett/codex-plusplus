@@ -6,7 +6,5 @@ extension StartupAdapter {
 }
 
 extension StartupStatus {
-    static let usageLabels: [String: String] = [
-        "usageBlockCache": "Lighter long usage replies",
-    ]
+    static let usageLabels: [String: String] = [:]
 }
