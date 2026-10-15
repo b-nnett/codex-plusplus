@@ -2069,6 +2069,16 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // ===== end of usage lane =====
 
 
+    // ===== switchdata lane: switching threads: requests and cached thread data. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of switchdata lane =====
+
+
+    // ===== switchrender lane: switching threads: rebuilding the transcript (highlighting, markdown). =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of switchrender lane =====
+
+
     // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
     // (Edits of this lane go between these markers.)
 
