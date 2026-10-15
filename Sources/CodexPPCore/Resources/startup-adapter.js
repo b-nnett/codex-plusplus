@@ -2349,6 +2349,11 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // ===== end of switchrender lane =====
 
 
+    // ===== keepalive lane: keeping recently viewed thread views mounted (development experiment). =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of keepalive lane =====
+
+
     // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
     // (Edits of this lane go between these markers.)
 
