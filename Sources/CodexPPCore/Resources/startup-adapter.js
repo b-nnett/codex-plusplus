@@ -2718,150 +2718,8 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // ===== space lane: the Space page editor, page navigation, Library grid and sidebar search. =====
     // (Edits of this lane go between these markers.)
 
-    // commentHighlightsMapped: on a Page with any comment thread (or a draft
-    // comment), a layout effect keyed on the editor's change count rebuilt every
-    // comment highlight after each keystroke: it resolved each thread's Yjs
-    // relative positions to editor positions, walked the whole document for its
-    // text blocks, built a new decoration set and dispatched an extra
-    // transaction (every plugin's apply and a view update) to install it, then
-    // re-rendered the highlight layer. The decoration plugin already maps its
-    // set through each transaction. A rebuilt set is now kept as "exact", and a
-    // mapped set stays a candidate only through a local edit of plain text
-    // inside one non-empty paragraph (the app's own HM test, one step, not a
-    // projection of the shared document) whose changed range, widened to every
-    // position the same text change could be placed at (runs of equal
-    // characters), touches no highlight's start, end or marker. The effect
-    // then still resolves every thread's range from the shared document, as
-    // the rebuild does (an edit can change the block's markdown so that a
-    // range resolves differently or not at all), and keeps the mapped set only
-    // when each thread's range is exactly its mapped highlight; the threads,
-    // drafts, document, markdown converter and view must be those the set was
-    // built for. Then the walk, the new set, the extra transaction and the
-    // view update are skipped, and the highlight layer re-renders as before.
-    // Anything else (structural edits, formatting, remote revisions, thread
-    // changes, a range that resolves differently) rebuilds as before.
     if (trees.pageContent) {
       const src = sources.pageContent;
-      let key = null, mapping = null, effect = null, rebuild = null, textOnly = null;
-      walk(trees.pageContent, node => {
-        if (node.type === 'AssignmentExpression' && node.left.type === 'Identifier' && node.right.type === 'NewExpression' && node.right.arguments.length === 1 &&
-            src.slice(node.right.arguments[0].start, node.right.arguments[0].end) === '`spacePageCommentDecorations`') key = key == null ? node.left.name : false;
-        // The app's "edit only changed text in one paragraph" test: (transaction, filter) => steps.every(...).
-        if (node.type === 'FunctionDeclaration' && node.params.length === 2 && node.params.every(p => p.type === 'Identifier')) {
-          const text = src.slice(node.body.start, node.body.end);
-          if (text.startsWith(`{return ${node.params[0].name}.steps.every(`) && text.includes('.slice.openStart!==0||') && text.includes('.slice.content.content.every(') &&
-              text.includes('.parent.isTextblock||') && text.includes('.sameParent(') && text.includes('.nodesBetween(')) textOnly = textOnly == null ? node.id.name : false;
-        }
-      });
-      if (typeof key === 'string') {
-        for (const top of trees.pageContent.body) walk(top, node => {
-          // state: {init: () => DecorationSet.empty, apply(tr, set) { let m = tr.getMeta(KEY); return m instanceof DecorationSet ? m : tr.docChanged ? set.map(tr.mapping, tr.doc) : set }}
-          if (node.type === 'Property' && !node.computed && node.key.type === 'Identifier' && node.key.name === 'apply' && node.value.type === 'FunctionExpression' && node.value.params.length === 2) {
-            const [tr, set] = node.value.params, body = node.value.body.body;
-            if (tr.type !== 'Identifier' || set.type !== 'Identifier' || body.length !== 2 || body[1].type !== 'ReturnStatement') return;
-            if (src.slice(body[0].start, body[0].end).replace(/;$/, '') !== `let ${body[0].declarations?.[0]?.id?.name}=${tr.name}.getMeta(${key})`) return;
-            const choice = body[1].argument?.alternate;
-            if (choice?.type !== 'ConditionalExpression' || src.slice(choice.test.start, choice.test.end) !== `${tr.name}.docChanged` ||
-                src.slice(choice.consequent.start, choice.consequent.end) !== `${set.name}.map(${tr.name}.mapping,${tr.name}.doc)` ||
-                choice.alternate.type !== 'Identifier' || choice.alternate.name !== set.name) return;
-            if (top.type === 'FunctionDeclaration') mapping = mapping == null ? { call: choice.consequent, tr: tr.name, set: set.name, top } : false;
-          }
-          // KO(view, document, pmu, threads, drafts = new Map) builds and dispatches the highlight decorations.
-          if (node.type === 'FunctionDeclaration' && node.params.length === 5 && node.params[4].type === 'AssignmentPattern') {
-            const text = src.slice(node.start, node.end);
-            if (text.includes('`page-comment-highlight`') && text.includes(`${key}.getState(`) && text.includes(`.setMeta(${key},`)) rebuild = rebuild == null ? node : false;
-          }
-        });
-        // Inside KO: threads.filter(t => t.state === `open` && BF(t)) and RESOLVE(view, document, pmu, targets.map(...)).
-        if (rebuild) {
-          const [v, d, m, list] = rebuild.params.map(p => p.type === 'Identifier' ? p.name : null), text = src.slice(rebuild.start, rebuild.end);
-          const open = list && new RegExp(`${list.replace(/\$/g, '\\$')}\\.filter\\(([A-Za-z_$][\\w$]*)=>\\1\\.state===\`open\`&&([A-Za-z_$][\\w$]*)\\(\\1\\)\\)`).exec(text);
-          const resolvers = [];
-          walk(rebuild.body, inner => {
-            if (inner.type === 'CallExpression' && inner.callee.type === 'Identifier' && inner.arguments.length === 4 && member(inner.arguments[3], 'map') &&
-                inner.arguments.slice(0, 3).every((a, i) => a.type === 'Identifier' && a.name === [v, d, m][i])) resolvers.push(inner.callee.name);
-          });
-          // RESOLVE(view, document, pmu, targets), exactly: one target resolves on its own (ONE(view, document,
-          // pmu, target)); several share the canonical block ids (CANON(document).order), their editor positions
-          // (ANCHORS(doc, pmu, count)) and a text-position cache. The check below resolves a subset the same way.
-          let shape = null;
-          walk(trees.pageContent, fn => {
-            if (fn.type !== 'FunctionDeclaration' || fn.id?.name !== resolvers[0] || fn.params.length !== 4 || !fn.params.every(p => p.type === 'Identifier')) return;
-            const [E, T, N, R] = fn.params.map(p => p.name), fixed = { E, T, N, R };
-            const template = '{let I=new Map,A=R[0];if(A==null)return I;if(R.every(X=>X===A))return I.set(A,ONE(E,T,N,A));let O=CANON(T).order.toArray(),' +
-              'S={ids:O,indexes:new Map(O.map((Y,Z)=>[Y,Z])),anchors:ANCHORS(E.state.doc,N,O.length),textPositions:new Map};for(let B of R)I.has(B)||I.set(B,ONE(E,T,N,B,S));return I}';
-            const seen = new Set, pattern = template.split(/\b([A-Z]+)\b/).map((part, i) => {
-              if (i % 2 === 0) return part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              if (part === 'Map') return part;
-              if (fixed[part]) return fixed[part].replace(/\$/g, '\\$');
-              if (seen.has(part)) return `\\k<${part}>`;
-              seen.add(part); return `(?<${part}>[A-Za-z_$][\\w$]*)`;
-            }).join('');
-            const m = new RegExp(`^${pattern}$`).exec(src.slice(fn.body.start, fn.body.end));
-            if (m) shape = m.groups;
-          });
-          rebuild = open && resolvers.length === 1 && shape ? { name: rebuild.id.name, threadFilter: open[2], resolve: resolvers[0], one: shape.ONE, canon: shape.CANON, anchors: shape.ANCHORS } : false;
-        }
-        if (rebuild) walk(trees.pageContent, node => {
-          // The layout effect: () => { setHighlights(KO(view, document, pmu, threads, drafts)) }
-          if (node.type !== 'ArrowFunctionExpression' || node.params.length !== 0 || node.body.type !== 'BlockStatement' || node.body.body.length !== 1) return;
-          const call = node.body.body[0].expression;
-          if (call?.type !== 'CallExpression' || call.callee.type !== 'Identifier' || call.arguments.length !== 1) return;
-          const inner = call.arguments[0];
-          if (inner.type !== 'CallExpression' || inner.callee.type !== 'Identifier' || inner.callee.name !== rebuild.name || inner.arguments.length !== 5 ||
-              !inner.arguments.every(a => a.type === 'Identifier')) return;
-          effect = effect == null ? { node, set: call.callee.name, args: inner.arguments.map(a => a.name) } : false;
-        });
-      }
-      const sites = typeof key === 'string' && typeof textOnly === 'string' && mapping && effect && rebuild ? [{ key, textOnly, mapping, effect, rebuild }] : [];
-      record('commentHighlightsMapped', 'pageContent', sites, ({ key, textOnly, mapping, effect, rebuild }) => {
-        const [view, document, pmu, threads, drafts] = effect.args;
-        // Whether a mapped set is as exact as the set it was mapped from (see the comment above).
-        const helper = `function ppCommentHighlightsMapped(ppTr,ppOld,ppMapped){try{const ppTags=globalThis.__codexPPCommentHighlights,ppTag=ppTags?.get(ppOld);` +
-          `if(ppTag==null)return ppMapped;if(ppMapped===ppOld){ppTags.delete(ppOld);return ppMapped}if(ppTr.steps.length!==1||ppTr.getMeta("spacePageEditorProjection")||ppTr.getMeta("appendedTransaction")?.getMeta?.("spacePageEditorProjection")||!${textOnly}(ppTr))return ppMapped;` +
-          `const ppStep=ppTr.steps[0],ppFrom=ppTr.docs[0].resolve(ppStep.from),ppTo=ppTr.docs[0].resolve(ppStep.to),ppParent=ppFrom.parent;let ppPlain=!0;` +
-          `ppParent.forEach(ppChild=>{ppPlain&&=ppChild.isText||ppChild.isLeaf});if(!ppPlain||ppParent.content.size===0||ppTr.doc.resolve(ppTr.mapping.map(ppStep.from)).parent.content.size===0)return ppMapped;` +
-          `const ppOldText=ppParent.textBetween(0,ppParent.content.size,"","\\uFFFC"),ppA=ppFrom.parentOffset,ppB=ppTo.parentOffset,` +
-          `ppNewText=ppOldText.slice(0,ppA)+ppStep.slice.content.textBetween(0,ppStep.slice.content.size)+ppOldText.slice(ppB);let ppPre=0,ppSuf=0;` +
-          `for(;ppPre<ppOldText.length&&ppPre<ppNewText.length&&ppOldText[ppPre]===ppNewText[ppPre];)ppPre++;` +
-          `for(;ppSuf<ppOldText.length&&ppSuf<ppNewText.length&&ppOldText[ppOldText.length-1-ppSuf]===ppNewText[ppNewText.length-1-ppSuf];)ppSuf++;` +
-          `const ppShrink=Math.max(0,ppOldText.length-ppNewText.length),ppStart=ppFrom.start(),` +
-          `ppLow=ppStart+Math.max(0,Math.min(ppA,ppOldText.length-ppSuf-ppShrink)),ppHigh=ppStart+Math.min(ppOldText.length,Math.max(ppB,ppPre+ppShrink));` +
-          // The mapped set carries the positions of the edits made since it was built (at most 64).
-          `for(const ppDeco of ppOld.find())if(ppDeco.from>=ppLow&&ppDeco.from<=ppHigh||ppDeco.to>=ppLow&&ppDeco.to<=ppHigh)return ppMapped;` +
-          `ppTag.touched.length<64&&ppTags.set(ppMapped,{...ppTag,touched:[...ppTag.touched.map(ppPos=>ppTr.mapping.map(ppPos)),ppTr.mapping.map(ppStep.from)]})}catch{}return ppMapped}` +
-          // Whether the range of each thread anchored in an edited top-level block (or the block after one), resolved
-          // as KO resolves it, is exactly its highlight in the set. The canonical block ids must be those the set was
-          // built with; threads anchored only in other blocks then resolve from the same block text, markdown and
-          // neighbours as before, at positions the mapping moved by the same amount.
-          `function ppCommentHighlightsResolved(ppView,ppDocument,ppPmu,ppThreads,ppDrafts,ppSet,ppTag){const ppTargets=ppThreads.filter(ppThread=>ppThread.state==="open"&&${rebuild.threadFilter}(ppThread)).map(ppThread=>[ppThread.id,ppThread.target]);` +
-          `for(const ppDraft of ppDrafts)ppTargets.push(ppDraft);const ppIds=new Set(ppTargets.map(ppTarget=>ppTarget[0]));if(ppIds.size!==ppTargets.length)return!1;` +
-          `const ppRanges=new Map;for(const ppDeco of ppSet.find()){if(ppDeco.spec.highlight!=null)continue;const ppId=ppDeco.spec.commentThreadId,ppRange=ppRanges.get(ppId);if(ppId==null||!ppIds.has(ppId))return!1;` +
-          `ppRanges.set(ppId,ppRange==null?[ppDeco.from,ppDeco.to]:[Math.min(ppRange[0],ppDeco.from),Math.max(ppRange[1],ppDeco.to)])}if(ppTag.touched.length===0)return!0;` +
-          `const ppDoc=ppView.state.doc,ppOrder=${rebuild.canon}(ppDocument).order.toArray();if(ppOrder.length!==ppTag.order.length||ppOrder.some((ppId,ppIndex)=>ppId!==ppTag.order[ppIndex]))return!1;` +
-          `const ppAnchors=${rebuild.anchors}(ppDoc,ppPmu,ppOrder.length),ppEdited=new Set;if(ppAnchors.length!==ppOrder.length||ppAnchors.some(ppAnchor=>ppAnchor==null))return!1;` +
-          `for(const ppPos of ppTag.touched){const ppAt=ppDoc.resolve(ppPos);if(ppAt.depth<1)return!1;const ppLow=ppAt.before(1),ppHigh=ppAt.after(1);let ppLast=-1;` +
-          `ppAnchors.forEach((ppAnchor,ppIndex)=>{ppAnchor.from>=ppLow&&ppAnchor.from<ppHigh&&(ppEdited.add(ppOrder[ppIndex]),ppLast=ppIndex)});ppLast>=0&&ppLast+1<ppOrder.length&&ppEdited.add(ppOrder[ppLast+1])}` +
-          `const ppCheck=ppTargets.filter(([,ppTarget])=>ppTarget?.kind==="block"?ppEdited.has(ppTarget.blockId):ppTarget?.kind!=="selection"||ppEdited.has(ppTarget.anchor?.blockId)||ppEdited.has(ppTarget.head?.blockId));` +
-          `if(ppCheck.length===0)return!0;const ppFirst=ppTargets[0][1],ppAlone=ppTargets.every(ppTarget=>ppTarget[1]===ppFirst),` +
-          `ppShared={ids:ppOrder,indexes:new Map(ppOrder.map((ppId,ppIndex)=>[ppId,ppIndex])),anchors:ppAnchors,textPositions:new Map};` +
-          `for(const[ppId,ppTarget]of ppCheck){const ppRange=ppAlone?${rebuild.one}(ppView,ppDocument,ppPmu,ppTarget):${rebuild.one}(ppView,ppDocument,ppPmu,ppTarget,ppShared),ppMapped=ppRanges.get(ppId);` +
-          `if(ppRange!=null&&ppRange.from<ppRange.to?ppMapped==null||ppMapped[0]!==ppRange.from||ppMapped[1]!==ppRange.to:ppMapped!=null)return!1}return!0}`;
-        const original = src.slice(effect.node.body.start + 1, effect.node.body.end - 1);
-        const same = `ppTag.view===${view}&&ppTag.document===${document}&&ppTag.pmu===${pmu}&&ppTag.threads===${threads}&&ppTag.drafts===${drafts}`;
-        return [
-          { start: mapping.top.start, end: mapping.top.start, text: `${marker}${helper}` },
-          { start: mapping.call.start, end: mapping.call.end, text: `ppCommentHighlightsMapped(${mapping.tr},${mapping.set},${src.slice(mapping.call.start, mapping.call.end)})` },
-          { start: effect.node.body.start, end: effect.node.body.end,
-            text: `{let ppTags=null,ppBefore=null,ppDoc=null;try{ppTags=globalThis.__codexPPCommentHighlights??=new WeakMap;ppBefore=${key}.getState(${view}.state)??null;ppDoc=${view}.state.doc;` +
-              `const ppTag=ppBefore==null?null:ppTags.get(ppBefore);if(ppTag!=null&&${same}&&ppCommentHighlightsResolved(${view},${document},${pmu},${threads},${drafts},ppBefore,ppTag)){` +
-              `ppTag.touched.length>0&&ppTags.set(ppBefore,{...ppTag,touched:[]});${effect.set}(ppPrevious=>ppPrevious.slice());return}}catch{}${original};` +
-              // A new, non-empty set (an empty one is a shared singleton) for the same document is exact.
-              `try{const ppAfter=${key}.getState(${view}.state);ppTags!=null&&ppAfter!=null&&ppAfter!==ppBefore&&${view}.state.doc===ppDoc&&ppAfter.find().length>0&&` +
-              `ppTags.set(ppAfter,{view:${view},document:${document},pmu:${pmu},threads:${threads},drafts:${drafts},touched:[],order:${rebuild.canon}(${document}).order.toArray()})}catch{}}` },
-        ];
-      });
-
       // calloutFilterSkipsText: a filter on every editor transaction that
       // changes the document checks that no nested Highlight (callout) block
       // was split. It walked the whole document with descendants() and its
@@ -2886,7 +2744,7 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
       });
       record('calloutFilterSkipsText', 'pageContent', filters, ({ ret, n }) => ({ start: ret.start, end: ret.end,
         text: `${marker}return ${n}.inlineContent||${n}.isLeaf?!1:void 0${src[ret.end - 1] === ';' ? ';' : ''}` }));
-    } else skipped.commentHighlightsMapped = skipped.calloutFilterSkipsText = 'module not found';
+    } else skipped.calloutFilterSkipsText = 'module not found';
 
     // sidebarSearchScorerOnce: the Space sidebar's page search scores every
     // loaded page against each word of the query on every keystroke, and for
