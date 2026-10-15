@@ -1493,6 +1493,145 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
     // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
     // (Edits of this lane go between these markers.)
+
+    // quietUnhandledBroadcasts (main process): the main process runs several
+    // IPC clients on the local coordination router, and most register handlers
+    // for a few methods only. The router sends client-status-changed to every
+    // client whenever any client connects or leaves, each client hands itself
+    // client-status-changed on connect and ipc-connection-reset when its
+    // socket closes, and ordinary broadcasts (query-cache-invalidate,
+    // thread-stream-following-changed) reach every client too. A client with no
+    // handler for the method logged a warning each time: about 3,000 lines in
+    // three days, 2,639 of them for the two lifecycle notices. The protocol has
+    // no subscriptions (clients do not tell the router which methods they
+    // handle, and other app versions share the router), so delivery stays as
+    // it is; only the warning changes. The two lifecycle notices, which every
+    // client receives by design, no longer log it, and other methods log it
+    // once per client and method. Clients with a handler behave as before.
+    if (trees.appServer) {
+      const warnings = [];
+      walk(trees.appServer, node => {
+        if (node.type !== 'LogicalExpression' || node.operator !== '&&') return;
+        const size = node.left, warn = node.right;
+        if (size.type !== 'BinaryExpression' || size.operator !== '===' || size.right.type !== 'Literal' || size.right.value !== 0 ||
+            size.left.type !== 'MemberExpression' || size.left.property.name !== 'size' || size.left.object.type !== 'MemberExpression' ||
+            size.left.object.property.name !== 'anyBroadcastHandlers' || size.left.object.object.type !== 'ThisExpression') return;
+        if (!member(warn, 'warning') || warn.arguments.length < 1 || warn.arguments[0].type !== 'TemplateLiteral' ||
+            warn.arguments[0].quasis[0]?.value.cooked !== 'Received broadcast but no handler is configured') return;
+        const safe = warn.arguments[1]?.type === 'ObjectExpression' && warn.arguments[1].properties.find(p => p.type === 'Property' && p.key.name === 'safe');
+        const method = safe?.value.type === 'ObjectExpression' && safe.value.properties.find(p => p.type === 'Property' && p.key.name === 'method');
+        if (method?.value.type !== 'MemberExpression' || method.value.object.type !== 'Identifier' || method.value.property.name !== 'method') return;
+        warnings.push({ warn, method: sources.appServer.slice(method.value.start, method.value.end) });
+      });
+      record('quietUnhandledBroadcasts', 'appServer', warnings, ({ warn, method }) => ({ start: warn.start, end: warn.end,
+        text: `${marker}((ppIpcMethod,ppIpcClient)=>{if(ppIpcMethod===\`client-status-changed\`||ppIpcMethod===\`ipc-connection-reset\`)return;` +
+          `const ppIpcWarned=ppIpcClient.ppIpcWarnedMethods??=new Set;if(ppIpcWarned.has(ppIpcMethod))return;ppIpcWarned.add(ppIpcMethod);` +
+          `${sources.appServer.slice(warn.start, warn.end)}})(${method},this)` }));
+    } else skipped.quietUnhandledBroadcasts = 'module not found';
+
+    // benignResizeObserverNotice: the window reports every uncaught error to
+    // the main-process log as "[desktop-notifications][global-error]". Chromium
+    // also fires a window error event, with no error object, when a
+    // ResizeObserver callback changes layout so that some notifications wait
+    // for the next frame ("ResizeObserver loop completed with undelivered
+    // notifications"). The specification defines this as a notice: the
+    // notifications are delivered in the next frame and nothing failed. The
+    // user's logs had 296 of these in three days, up to 15 in a row while a
+    // long thread loaded. The event carries no stack, and 151 bundles create
+    // ResizeObservers, so the observer behind it could not be identified with
+    // confidence; this notice is no longer reported. Other errors, and any
+    // ResizeObserver message thrown as a real error, are reported as before.
+    if (trees.initial) {
+      const listeners = [];
+      walk(trees.initial, node => {
+        if (!member(node, 'addEventListener') || node.arguments.length !== 2 || node.callee.object.type !== 'Identifier' || node.callee.object.name !== 'window') return;
+        const [type, fn] = node.arguments;
+        if (type.type !== 'TemplateLiteral' || type.quasis.length !== 1 || type.quasis[0].value.cooked !== 'error') return;
+        if (fn.type !== 'ArrowFunctionExpression' || fn.params.length !== 1 || fn.params[0].type !== 'Identifier' || fn.body.type !== 'BlockStatement') return;
+        if (sources.initial.slice(fn.body.start, fn.body.end).includes('[desktop-notifications][global-error] ')) listeners.push({ fn, event: fn.params[0].name });
+      });
+      record('benignResizeObserverNotice', 'initial', listeners, ({ fn, event }) => ({ start: fn.body.start + 1, end: fn.body.start + 1,
+        text: `${marker}if(${event}?.error==null&&typeof ${event}?.message==="string"&&/^ResizeObserver loop (completed with undelivered notifications|limit exceeded)/.test(${event}.message))return;` }));
+    } else skipped.benignResizeObserverNotice = 'module not found';
+
+    // knownConversationNotifications: app-server notifications reach every
+    // window, including windows that never loaded the thread (a hidden
+    // window, for one). The thread notification handler checks that the
+    // window has the conversation before applying thread/settings/updated and
+    // thread/status/changed, but not for thread/tokenUsage/updated,
+    // thread/goal/updated, thread/goal/cleared or
+    // thread/environment/(dis)connected, which the app-server sends when a
+    // thread is resumed. In those windows the update found no state and
+    // logged "Conversation state not found" as an error: 19 times in three
+    // days, each in a hidden window just as the visible one resumed that
+    // thread. Those four updates now apply only when the window has the
+    // conversation, as the other two already did; the update did nothing in
+    // that case anyway.
+    if (trees.shared) {
+      const handlers = [];
+      const guarded = ['thread/tokenUsage/updated', 'thread/goal/updated', 'thread/goal/cleared', 'thread/environment/connected'];
+      walk(trees.shared, node => {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 2 || node.params[0].type !== 'ObjectPattern') return;
+        const props = new Map(node.params[0].properties.filter(p => p.type === 'Property' && !p.computed && p.value.type === 'Identifier').map(p => [p.key.name, p.value.name]));
+        const manager = props.get('manager');
+        if (!manager || !props.has('notificationContext')) return;
+        const body = node.body.body;
+        if (body.length !== 1 || body[0].type !== 'SwitchStatement') return;
+        // Each label maps to the case whose statements run for it (labels that
+        // fall through share the next case's statements).
+        const list = body[0].cases, cases = new Map();
+        list.forEach((c, i) => {
+          if (c.test?.type !== 'TemplateLiteral' || c.test.quasis.length !== 1) return;
+          const runs = list.slice(i).find(next => next.consequent.length > 0);
+          if (runs) cases.set(c.test.quasis[0].value.cooked, runs);
+        });
+        const settings = cases.get('thread/settings/updated');
+        if (!settings || !sources.shared.slice(settings.start, settings.end).includes('.conversations.has(')) return;
+        const calls = [];
+        for (const name of guarded) {
+          const block = cases.get(name);
+          if (!block) return;
+          const found = [];
+          const scan = n => {
+            if (!n || typeof n.type !== 'string') return;
+            if (n.type === 'ArrowFunctionExpression' || n.type === 'FunctionExpression') return;
+            if (member(n, 'updateConversationState') && n.callee.object.type === 'Identifier' && n.callee.object.name === manager && n.arguments.length === 2) found.push(n);
+            for (const v of Object.values(n)) {
+              if (Array.isArray(v)) v.forEach(scan);
+              else if (v && typeof v.type === 'string' && v !== n) scan(v);
+            }
+          };
+          block.consequent.forEach(scan);
+          if (found.length !== 1) return;
+          calls.push(found[0]);
+        }
+        handlers.push({ manager, calls });
+      });
+      record('knownConversationNotifications', 'shared', handlers, ({ manager, calls }) => calls.map(call => ({ start: call.start, end: call.end,
+        text: `${marker}((ppKnownId,ppKnownUpdate)=>${manager}.getConversation(ppKnownId)!=null&&${manager}.updateConversationState(ppKnownId,ppKnownUpdate))` +
+          `(${sources.shared.slice(call.arguments[0].start, call.arguments[0].end)},${sources.shared.slice(call.arguments[1].start, call.arguments[1].end)})` })));
+    } else skipped.knownConversationNotifications = 'module not found';
+
+    // libraryTrashPaginationGuard: the Library's Empty Trash lists every
+    // archived page first, following next_cursor until the server returns
+    // none: the same unguarded loop trashPaginationGuard bounds in a Space's
+    // Empty Trash. A cursor that repeats, or a listing that never ends, kept
+    // it requesting forever. The loop now also stops when a cursor repeats or
+    // after 200 pages (10,000 items), and deletes the pages collected so far.
+    if (trees.libraryTrash) {
+      const loops = [];
+      walk(trees.libraryTrash, node => {
+        if (node.type !== 'DoWhileStatement' || node.test.type !== 'BinaryExpression' || node.test.operator !== '!=' || node.test.left.type !== 'Identifier' ||
+            node.test.right.type !== 'Literal' || node.test.right.value !== null) return;
+        const cursor = node.test.left.name, body = sources.libraryTrash.slice(node.body.start, node.body.end);
+        if (body.includes('`/pages/archived`') && body.includes(`cursor:${cursor}`) &&
+            new RegExp(`[;,{]${cursor.replace(/\$/g, '\\$')}=[^;,]*\\.next_cursor\\?\\?void 0`).test(body)) loops.push({ node, cursor });
+      });
+      record('libraryTrashPaginationGuard', 'libraryTrash', loops, ({ node, cursor }) => ({ start: node.start, end: node.end,
+        text: `${marker}{const ppLibraryTrashSeen=new Set;do${sources.libraryTrash.slice(node.body.start, node.body.end)}while(${sources.libraryTrash.slice(node.test.start, node.test.end)}&&` +
+          `!(ppLibraryTrashSeen.has(${cursor})||ppLibraryTrashSeen.add(${cursor}).size>=200));}` }));
+    } else skipped.libraryTrashPaginationGuard = 'module not found';
+
     // ===== end of hygiene lane =====
 
 
