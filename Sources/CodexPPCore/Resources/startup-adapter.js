@@ -2404,6 +2404,16 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
     // ===== end of keepalive lane =====
 
 
+    // ===== typing lane: per-keystroke work in the composer. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of typing lane =====
+
+
+    // ===== scrolling lane: per-frame work while scrolling long threads. =====
+    // (Edits of this lane go between these markers.)
+    // ===== end of scrolling lane =====
+
+
     // ===== hygiene lane: work the app repeats without need: git calls, broadcasts, layout loops, races. =====
     // (Edits of this lane go between these markers.)
 
