@@ -5,38 +5,53 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { adapt } from './startup-harness.mjs';
 
-// fJr: the composer's markdown editor factory. Every call returns a new object
-// whose serialize runs the shared serialiser (counted here).
-const serializeFixture = [
-  'var runs=0,EJr;',
+// The composer's text conversions, reduced: fJr (the markdown editor factory;
+// every call returns a new object whose serialize runs the shared serialiser),
+// mJr (getText) and YB (plain text). The Transform stand-in makes a new copy
+// without the literalPaste mark when the document has one, like the real one.
+const textFixture = [
+  'var runs=0,strips=0,plains=0,EJr;',
+  'class wo{constructor(d){this.doc=d}removeMark(a,b,m){strips++;if(this.doc.pasted)this.doc={...this.doc,pasted:!1};return this}}',
   'function vde(e){return e}',
+  'function CJr(e){return e}',
   'function fJr(){EJr??={serialize:e=>(runs++,e.text+`\\n`)};let e=EJr,t=new WeakMap;return{pmu:e,pastePreferredHtml:(e,t,n)=>!1,pasteLiteralText:(e,t)=>!1,' +
-    'serialize:(n,r)=>{let i=vde(n);if(i.fail)throw Error(`boom`);return!r?.preserveParagraphSpacing&&i.paragraphs?i.text.toUpperCase():e.serialize(i).replace(/\\n$/,``)},plugins:[]}}',
+    'serialize:(n,r)=>{let i=CJr(new wo(vde(n)).removeMark(0,n.content.size,n.type.schema.marks.literalPaste).doc);if(i.fail)throw Error(`boom`);if(i.pasted)throw Error(`not stripped`);' +
+    'return!r?.preserveParagraphSpacing&&i.paragraphs?i.text.toUpperCase():e.serialize(i).replace(/\\n$/,``)},plugins:[]}}',
+  'function YB(e,{forClipboard:t=!1,preferFileMentionFsPath:n=!1,preserveLinkMarkers:r=!1,preserveTextLinkMarks:i=!1,preserveUnresolvedSkillMentions:a=!1}={}){plains++;let o=e.text+(i?`+links`:``)+(t?`+clip`:``);return{content:o}}',
+  'function hJr(e){return e.text.includes(`-`)||e.text.includes(`&`)}',
+  'function mJr(e,t){if(t==null||!hJr(e))return YB(e).content;let n=new wo(vde(e)).removeMark(0,e.content.size,e.type.schema.marks.literalPaste).doc,r=t(n);' +
+    'return r.replace(/&#(?:x[\\da-f]+|\\d+);/gi,``).trim()===``?YB(e).content:r}',
 ].join('\n');
+const schemaStub = { schema: { marks: { literalPaste: {} } } };
+const pmDoc = (text, extra = {}) => ({ text, content: { size: text.length }, type: schemaStub, ...extra });
 
-function loadSerialize(source) {
+function loadText(source) {
   const sandbox = {};
-  vm.runInNewContext(`${source};this.fJr=fJr;this.count=()=>runs;`, sandbox);
+  vm.runInNewContext(`${source};this.fJr=fJr;this.mJr=mJr;this.YB=YB;this.counts=()=>({runs,strips,plains});`, sandbox);
   return sandbox;
 }
+const counts = env => ({ ...env.counts() });
 
-test('composer markdown is serialised once per document, across editor instances', () => {
-  const { initial: patched, applied } = adapt({ initial: serializeFixture });
+test('composer markdown is serialised once per document, across editor instances and pasted text', () => {
+  const { initial: patched, applied } = adapt({ initial: textFixture });
   assert.equal(applied.composerSerializeOnce, 'initial');
-  const stock = loadSerialize(serializeFixture), next = loadSerialize(patched);
-  const doc = { text: '- a\n- b' }, other = { text: '- a\n- bc' }, paragraphs = { text: 'p', paragraphs: true };
+  const stock = loadText(textFixture), next = loadText(patched);
+  const doc = pmDoc('- a\n- b'), other = pmDoc('- a\n- bc'), paragraphs = pmDoc('p', { paragraphs: true }), pasted = pmDoc('- pasted', { pasted: true });
   for (const env of [stock, next]) {
     const store = env.fJr(), editor = env.fJr();
     env.outputs = [...[store.serialize(doc), editor.serialize(doc), editor.serialize(doc), editor.serialize(doc, { preserveParagraphSpacing: true }),
-      editor.serialize(other), store.serialize(paragraphs), store.serialize(paragraphs, { preserveParagraphSpacing: true })]];
+      editor.serialize(other), store.serialize(paragraphs), store.serialize(paragraphs, { preserveParagraphSpacing: true }),
+      // A pasted draft: the store serialises the document, getText the copy without literalPaste marks.
+      store.serialize(pasted), env.mJr(pasted, editor.serialize), env.mJr(pasted, editor.serialize)]];
   }
   assert.deepEqual(next.outputs, stock.outputs);
   assert.deepEqual(next.outputs.slice(0, 5), ['- a\n- b', '- a\n- b', '- a\n- b', '- a\n- b', '- a\n- bc']);
-  // Stock: one run per call that reaches the serialiser (6). Patched: one per distinct document and option (4).
-  assert.equal(stock.count(), 6);
-  assert.equal(next.count(), 4);
+  assert.deepEqual(next.outputs.slice(7), ['- pasted', '- pasted', '- pasted']);
+  // Stock: one run per call that reaches the serialiser (9). Patched: one per distinct document copy and option (5).
+  assert.equal(counts(stock).runs, 9);
+  assert.equal(counts(next).runs, 5);
   // Errors propagate and are not cached; a later call for the same document tries again.
-  const broken = { text: 'x', fail: true }, editor = next.fJr();
+  const broken = pmDoc('x', { fail: true }), editor = next.fJr();
   assert.throws(() => editor.serialize(broken), /boom/);
   broken.fail = false;
   assert.equal(editor.serialize(broken), 'x');
@@ -50,6 +65,50 @@ test('composerSerializeOnce leaves other object literals alone', () => {
   assert.equal(applied.composerSerializeOnce, undefined);
   assert.match(skipped.composerSerializeOnce, /expected one match, found 0/);
   assert.equal(initial ?? source, source);
+});
+
+test('getText is computed once per document and serialize function', () => {
+  const { initial: patched, applied } = adapt({ initial: textFixture });
+  assert.equal(applied.composerTextOnce, 'initial');
+  const stock = loadText(textFixture), next = loadText(patched);
+  const pasted = pmDoc('- pasted', { pasted: true }), plain = pmDoc('plain'), blank = pmDoc('&#x20;', { pasted: true });
+  for (const env of [stock, next]) {
+    const one = env.fJr(), two = env.fJr();
+    env.outputs = [...[env.mJr(pasted, one.serialize), env.mJr(pasted, one.serialize), env.mJr(pasted, two.serialize), env.mJr(pasted, undefined),
+      env.mJr(plain, one.serialize), env.mJr(plain, one.serialize), env.mJr(blank, one.serialize), env.mJr(blank, one.serialize)]];
+  }
+  assert.deepEqual(next.outputs, stock.outputs);
+  assert.deepEqual(next.outputs, ['- pasted', '- pasted', '- pasted', '- pasted', 'plain', 'plain', '&#x20;', '&#x20;']);
+  // Stock strips twice per markdown call (getText, then serialize: 10); patched once per document object
+  // (the two drafts and their two copies: 4), and serialises each copy once.
+  assert.equal(counts(stock).strips, 10);
+  assert.equal(counts(next).strips, 4);
+  assert.equal(counts(stock).runs, 5);
+  assert.equal(counts(next).runs, 2);
+  assert.ok(counts(next).plains < counts(stock).plains);
+  // A non-object document goes to the original function.
+  assert.throws(() => next.mJr(null, undefined), { name: 'TypeError' });
+});
+
+test('plain text is converted once per document and options, in a new object each call', () => {
+  const { initial: patched, applied } = adapt({ initial: textFixture });
+  assert.equal(applied.composerPlainTextOnce, 'initial');
+  const stock = loadText(textFixture), next = loadText(patched);
+  const doc = pmDoc('text');
+  for (const env of [stock, next]) {
+    env.results = [env.YB(doc, { preserveTextLinkMarks: true }), env.YB(doc, { preserveTextLinkMarks: true }), env.YB(doc), env.YB(doc, {}), env.YB(doc, { forClipboard: true })];
+    env.outputs = env.results.map(r => ({ ...r }));
+  }
+  assert.deepEqual(next.outputs, stock.outputs);
+  assert.deepEqual(next.outputs.map(r => r.content), ['text+links', 'text+links', 'text', 'text', 'text+clip']);
+  assert.notEqual(next.results[0], next.results[1]);
+  assert.equal(counts(stock).plains, 5);
+  assert.equal(counts(next).plains, 3);
+  // Options that are not booleans, and null options, go to the original function.
+  next.YB(doc, { preserveTextLinkMarks: 1 });
+  assert.equal(counts(next).plains, 4);
+  assert.throws(() => next.YB(doc, null), { name: 'TypeError' });
+  assert.throws(() => stock.YB(doc, null), { name: 'TypeError' });
 });
 
 // RichTextInput's mount effect, reduced: it subscribes to editor transactions
