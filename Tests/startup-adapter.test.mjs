@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'batchedPtyOutput', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'coalescedTerminalResize', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'terminalOutputAppend', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -664,4 +664,99 @@ test('words whose fade has finished render as plain text; fading words stay span
   assert.equal(out.map(part => typeof part === 'string' ? part : part.children).join(''), 'Hello there, how are you', 'the text is unchanged');
   const quiet = sandbox.irl({fadeText: false, segments: ['a', 'b'], keys: [], fadeSegmentStartIndex: 0, fadeSegmentTimeline: timeline});
   assert.deepEqual(JSON.parse(JSON.stringify(quiet)), ['a', 'b'], 'without fading the segments pass through as before');
+});
+
+test('background command output past its cap appends only the new tail instead of rewriting the terminal', () => {
+  const xtermOutput = 'function X(e,b,C,I,n){let t=I.current,r=C(e);if(n.startsWith(t)){let r=n.slice(t.length);r.length>0&&e.write(b(r))}else e.reset(),n.length>0&&e.write(b(n));I.current=n}';
+  const {xtermOutput: patched, applied} = adapt({xtermOutput});
+  assert.equal(applied.terminalOutputAppend, 'xtermOutput');
+  const run = source => {
+    const sandbox = {Int32Array, Math};
+    vm.runInNewContext(source + ';this.X=X;', sandbox);
+    const term = {stream: '', resets: 0, bytes: 0, reset() { this.stream = ''; this.resets++; }, write(text) { this.stream += text; this.bytes += text.length; }};
+    const ref = {current: ''};
+    return {term, show: output => sandbox.X(term, s => s, () => true, ref, output)};
+  };
+  // The vendor's cap: the last 20,000 characters behind a truncation line.
+  const mark = '[output truncated]\n', cap = 2e4;
+  const capped = history => history.length > cap ? mark + history.slice(-cap) : history;
+  const updates = []; let history = '';
+  for (let i = 0; i < 800; i++) { history += `line ${i} ${'x'.repeat(i % 37)} ${(i * 7919) % 1000}\n`.repeat(3); updates.push(capped(history)); }
+  assert.ok(history.length > 2 * cap);
+  const stock = run(xtermOutput), fixed = run(patched);
+  for (const output of updates) { stock.show(output); fixed.show(output); }
+  assert.ok(stock.term.resets > 100, 'stock resets on every update once truncated');
+  assert.equal(fixed.term.resets, 0);
+  assert.equal(fixed.term.stream, history, 'the terminal received every line exactly once, in order');
+  assert.ok(fixed.term.bytes < stock.term.bytes / 10);
+  // The session buffer's cap (the last 16,000 characters, no truncation line).
+  const session = run(patched); let buffer = '', full = '';
+  for (let i = 0; i < 300; i++) { const chunk = `$ step ${i}: ${'#'.repeat(i % 50)}\r\n`; full += chunk; buffer = (buffer + chunk).slice(-16e3); session.show(buffer); }
+  assert.equal(session.term.resets, 0); assert.equal(session.term.stream, full);
+  // Unrelated output (no overlap), or shorter output, still resets as before.
+  fixed.show(mark + 'y'.repeat(cap));
+  assert.equal(fixed.term.resets, 1); assert.equal(fixed.term.stream, mark + 'y'.repeat(cap));
+  fixed.show('short');
+  assert.equal(fixed.term.resets, 2); assert.equal(fixed.term.stream, 'short');
+});
+
+test('terminal refits requested in the same frame share one animation frame and keep a forced repaint', () => {
+  const terminalPanel = 'const T=(e,F,Se,m,E,l)=>{let u=!1,D=t=>{let n=t!==void 0&&t;u||e.isConnected&&requestAnimationFrame(()=>{u||e.isConnected&&(F.current?Se(m,E,l,n):E.fit())})};' +
+    'D();let oe=new ResizeObserver(()=>{D()});return{D,stop:()=>{u=!0}}}';
+  const {terminalPanel: patched, applied} = adapt({terminalPanel});
+  assert.equal(applied.coalescedTerminalResize, 'terminalPanel');
+  const run = source => {
+    let frames = [];
+    const sandbox = {requestAnimationFrame: f => frames.push(f), ResizeObserver: class {}};
+    vm.runInNewContext(source + ';this.T=T;', sandbox);
+    const calls = [];
+    const panel = sandbox.T({isConnected: true}, {current: true}, (m, E, l, n) => calls.push(n), {}, {fit() {}}, 's');
+    return {panel, calls, frame() { const now = frames; frames = []; now.forEach(f => f()); }, get pending() { return frames.length; }};
+  };
+  const stock = run(terminalPanel);
+  stock.panel.D(); stock.panel.D(true);
+  assert.equal(stock.pending, 3); stock.frame();
+  assert.deepEqual(stock.calls, [false, false, true]);
+  const fixed = run(patched);
+  fixed.panel.D(); fixed.panel.D(true); fixed.panel.D();
+  assert.equal(fixed.pending, 1); fixed.frame();
+  assert.deepEqual(fixed.calls, [true], 'one refit, forced because one caller asked');
+  fixed.panel.D(); fixed.frame();
+  assert.deepEqual(fixed.calls, [true, false], 'the next frame starts unforced');
+  fixed.panel.D(); fixed.panel.stop(); fixed.frame();
+  assert.deepEqual(fixed.calls, [true, false], 'a frame after unmount does nothing, as before');
+});
+
+test('pty output is batched per session, in order, and always delivered before the exit', () => {
+  const main = 'class M{log=[];appendOutput(e,t){this.log.push([`data`,t])}destroySession(e,t){this.log.push([`exit`,t])}getSessionForBackend(){return{id:1}}' +
+    'make(){let n={},i={buffer:``,exit:null},a=()=>n==null?null:this.getSessionForBackend(n),o={onData:e=>{let t=a();if(t==null){i.buffer=`${i.buffer}${e}`.slice(-16e3);return}this.appendOutput(t.id,e)},' +
+    'onExit:e=>{let t=a();if(t==null){i.exit=e;return}this.destroySession(t,e)}};return o}}';
+  const {main: patched, applied} = adapt({main});
+  assert.equal(applied.batchedPtyOutput, 'main');
+  let timers = new Map, id = 0;
+  const sandbox = {setTimeout: (f, ms) => (timers.set(++id, [f, ms]), id), clearTimeout: t => timers.delete(t)};
+  vm.runInNewContext(patched + ';this.M=M;', sandbox);
+  const tick = () => { const due = [...timers.values()]; timers = new Map; for (const [f, ms] of due) { assert.equal(ms, 8); f(); } };
+  const manager = new sandbox.M(), sink = manager.make(), log = () => JSON.parse(JSON.stringify(manager.log));
+  sink.onData('$ ');
+  assert.deepEqual(log(), [['data', '$ ']], 'the first chunk after a quiet spell goes out at once');
+  sink.onData('a'); sink.onData('b'); sink.onData('c');
+  assert.equal(manager.log.length, 1);
+  tick();
+  assert.deepEqual(log().at(-1), ['data', 'abc'], 'chunks within the window are joined');
+  tick();
+  assert.equal(timers.size, 0, 'a quiet window ends the batching');
+  sink.onData('x');
+  assert.deepEqual(log().at(-1), ['data', 'x']);
+  sink.onData('y'.repeat(4e4)); sink.onData('z'.repeat(3e4));
+  assert.deepEqual(log().at(-1), ['data', 'y'.repeat(4e4) + 'z'.repeat(3e4)], 'flushed at once past 64 KB');
+  sink.onData('last words'); sink.onExit({code: 0, signal: null});
+  assert.deepEqual(log().slice(-2), [['data', 'last words'], ['exit', {code: 0, signal: null}]], 'pending output precedes the exit');
+  assert.equal(timers.size, 0);
+  const all = manager.log.filter(e => e[0] === 'data').map(e => e[1]).join('');
+  assert.equal(all, '$ abcx' + 'y'.repeat(4e4) + 'z'.repeat(3e4) + 'last words');
+  // Output that arrives before the session is registered still lands in its pending buffer.
+  const early = new sandbox.M(); early.getSessionForBackend = () => null;
+  const pending = early.make(); pending.onData('boot'); pending.onData(' log'); pending.onExit({code: 1, signal: null});
+  assert.equal(early.log.length, 0);
 });
