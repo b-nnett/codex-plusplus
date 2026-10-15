@@ -14,7 +14,6 @@ extension StartupAdapter {
 
 extension StartupStatus {
     static let spaceLabels: [String: String] = [
-        "pageBlockSerializedOnce": "Page lists serialised once per keystroke",
         "calloutFilterSkipsText": "Page callout check skips text",
         "sidebarSearchScorerOnce": "Space search matcher built once per word",
         "masonrySteadyObserver": "Library grid keeps one resize observer",

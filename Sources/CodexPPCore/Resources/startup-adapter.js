@@ -2832,59 +2832,6 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
       ]);
     } else skipped.masonrySteadyObserver = skipped.masonryUnchangedPositions = 'module not found';
 
-    // pageBlockSerializedOnce: for each edit of a Page, the writer that turns
-    // the editor document into the shared markdown blocks serialises the
-    // edited top-level block to markdown (P$, which keeps the result per node
-    // object), and also serialises a fresh copy of the block as it was before
-    // the edit (a copy, so that the comparison sees a fresh serialisation and
-    // not the canonical markdown kept for the node). For a list or table that
-    // is the whole list again on every keystroke: about 5 ms per keystroke in
-    // a 50-item list in node. The copy has the same content, attributes and
-    // marks as the block the previous keystroke serialised freshly; that
-    // fresh result is now reused (looked up by the block's content fragment,
-    // type, attributes, marks, the wrapper document and the converter). Only
-    // fresh serialisations are kept, never the canonical markdown, so the
-    // result is the one a new serialisation would give.
-    if (trees.initial) {
-      const src = sources.initial, sites = [];
-      for (const top of trees.initial.body) (node => {
-        if (node.type !== 'FunctionDeclaration' || node.params.length !== 2 || node.params[0].type !== 'Identifier' || node.params[1].type !== 'AssignmentPattern') return;
-        const [doc, pmu] = [node.params[0].name, node.params[1].left.name], body = node.body.body;
-        if (!src.slice(node.params[1].right.start, node.params[1].right.end).includes('isRichTableCellSupportEnabled:') || body.length !== 4) return;
-        const head = src.slice(node.body.start, body[3].start), cache = /^\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.get\(/.exec(head);
-        if (!cache || head !== `{let ${cache[1]}=${cache[2]}.get(${doc})?.get(${pmu});if(${cache[1]}!=null)return ${cache[1]}.slice();let ${body[2].declarations?.[0]?.id?.name}=[];`) return;
-        const store = cache[2], out = body[2].declarations[0].id.name, seq = body[3].argument;
-        if (seq?.type !== 'SequenceExpression' || seq.expressions.length !== 3 || !member(seq.expressions[0], 'forEach') || src.slice(seq.expressions[0].callee.object.start, seq.expressions[0].callee.object.end) !== doc) return;
-        const each = seq.expressions[0].arguments[0];
-        if (each?.type !== 'ArrowFunctionExpression' || each.params.length !== 1 || each.params[0].type !== 'Identifier' || each.body.type !== 'BlockStatement') return;
-        const child = each.params[0].name, steps = each.body.body;
-        const hit = steps[1], last = steps.at(-1), keep = steps.at(-2);
-        if (src.slice(steps[0].start, steps[0].end).replace(/;$/, '') !== `let ${steps[0].declarations?.[0]?.id?.name}=${store}.get(${child})?.get(${pmu})`) return;
-        const cached = steps[0].declarations[0].id.name;
-        if (hit?.type !== 'IfStatement' || src.slice(hit.start, hit.end) !== `if(${cached}!=null){${out}.push(...${cached});return}`) return;
-        const m = /^let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\.get\(([A-Za-z_$][\w$]*)\);?$/.exec(src.slice(keep?.start, keep?.end));
-        if (!m || m[2] !== store || m[3] !== child) return;
-        const units = new RegExp(`^${m[1].replace(/\$/g, '\\$')}\\?\\?\\(${m[1].replace(/\$/g, '\\$')}=new WeakMap,${store.replace(/\$/g, '\\$')}\\.set\\(${child},${m[1].replace(/\$/g, '\\$')}\\)\\),` +
-          `${m[1].replace(/\$/g, '\\$')}\\.set\\(${pmu},([A-Za-z_$][\\w$]*)\\),${out}\\.push\\(\\.\\.\\.\\1\\)$`).exec(src.slice(last.start, last.end));
-        const fresh = src.slice(hit.end, keep.start);
-        if (!units || !fresh.includes(`${pmu}.serialize(`) || !fresh.startsWith(`let `) || !fresh.includes(`${doc}.type.createChecked(${doc}.attrs,`)) return;
-        sites.push({ node, hit, keep, doc, pmu, store, out, child, units: units[1] });
-      })(top);
-      record('pageBlockSerializedOnce', 'initial', sites, ({ node, hit, keep, doc, pmu, store, out, child, units }) => [
-        { start: node.start, end: node.start, text: `${marker}function ppPageBlockSame(ppA,ppB){if(ppA===ppB)return!0;if(ppA==null||ppB==null)return!1;const ppKeys=Object.keys(ppA);` +
-          `return ppKeys.length===Object.keys(ppB).length&&ppKeys.every(ppKey=>Object.prototype.hasOwnProperty.call(ppB,ppKey)&&Object.is(ppA[ppKey],ppB[ppKey]))}` +
-          `function ppPageBlockRecall(ppNode,ppWrapper,ppPmu){try{const ppList=ppPageBlockRecall.memo?.get(ppNode.content);if(ppList!=null)for(const ppEntry of ppList)` +
-          `if(ppEntry.pmu===ppPmu&&ppEntry.type===ppNode.type&&ppEntry.wrapper===ppWrapper.type&&ppPageBlockSame(ppEntry.attrs,ppNode.attrs)&&ppPageBlockSame(ppEntry.wrapperAttrs,ppWrapper.attrs)&&` +
-          `ppEntry.marks.length===ppNode.marks.length&&ppEntry.marks.every((ppMark,ppIndex)=>ppMark===ppNode.marks[ppIndex]))return ppEntry.units}catch{}return null}` +
-          `function ppPageBlockRemember(ppNode,ppWrapper,ppPmu,ppUnits){try{const ppMemo=ppPageBlockRecall.memo??=new WeakMap;let ppList=ppMemo.get(ppNode.content);` +
-          `ppList==null&&ppMemo.set(ppNode.content,ppList=[]);ppList.length>=4&&ppList.shift();ppList.push({pmu:ppPmu,type:ppNode.type,wrapper:ppWrapper.type,attrs:ppNode.attrs,` +
-          `wrapperAttrs:ppWrapper.attrs,marks:ppNode.marks.slice(),units:ppUnits.slice()})}catch{}}` },
-        // A fresh serialisation of an equal block: stored for this node and used as the original does.
-        { start: hit.end, end: hit.end, text: `{const ppKnown=ppPageBlockRecall(${child},${doc},${pmu});if(ppKnown!=null){let ppStore=${store}.get(${child});` +
-          `ppStore??(ppStore=new WeakMap,${store}.set(${child},ppStore)),ppStore.set(${pmu},ppKnown.slice()),${out}.push(...ppKnown);return}}` },
-        { start: keep.start, end: keep.start, text: `ppPageBlockRemember(${child},${doc},${pmu},${units});` },
-      ]);
-    } else skipped.pageBlockSerializedOnce = 'module not found';
     // ===== end of space lane =====
 
 
