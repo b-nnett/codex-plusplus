@@ -132,7 +132,7 @@ final class StartupAdapterTests: XCTestCase {
         // first deadline on a busy machine (it took 46 s before an optimisation).
         XCTAssertLessThan(Date().timeIntervalSince(started), 25, "startup discovery is too slow")
         XCTAssertLessThanOrEqual(result.duration, Date().timeIntervalSince(started))
-        let developmentOnly: Set<String> = ["queryTimings", "appGateReasons", "loadingGateTimings", "policyPhaseTimings", "opaqueSurfaceExperiment"]
+        let developmentOnly: Set<String> = ["queryTimings", "appGateReasons", "loadingGateTimings", "policyPhaseTimings", "opaqueSurfaceExperiment", "retainRecentThreadViews"]
         XCTAssertEqual(Set(result.skipped.keys), PatchAdapter.experimentsEnabled ? [] : developmentOnly, "\(result.skipped)")
         for name in StartupStatus.labels.keys where !developmentOnly.contains(name) { XCTAssertNotNil(result.applied[name], name) }
         for (path, data) in result.replacements where path.hasSuffix(".js") {

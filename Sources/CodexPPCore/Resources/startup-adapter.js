@@ -289,7 +289,7 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
     // ship only in development builds of the helper (input.diagnostics).
     const diagnostics = input.diagnostics === true;
-    const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
+    const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment', 'retainRecentThreadViews']);
     // Every string input is a vendor chunk, by key, except these and any
     // input whose key starts with "asset" (files Codex++ ships, like the
     // terminal's WebGL renderer). An alias names a chunk that is the same file
@@ -2351,6 +2351,56 @@ ppInfo==null?ppView.cache.delete(ppToken):ppInfo.never?ppView.cache.set(ppToken,
 
     // ===== keepalive lane: keeping recently viewed thread views mounted (development experiment). =====
     // (Edits of this lane go between these markers.)
+
+    // retainRecentThreadViews (development builds only): switching back to an
+    // already-loaded thread tears down and rebuilds the whole thread view
+    // (280-490 ms of renderer main thread in a trace of build 20398: React
+    // reconciliation, Jotai atom mount/unmount, GC, forced layouts). The app
+    // already ships a retained-page outlet for its routes: each recently
+    // visited page stays mounted inside React's <Activity mode="hidden"> with
+    // its own router location, matches, router state and Thread/Route/Composer
+    // scopes, is marked data-app-shell-active-page="false" for the app's
+    // global DOM lookups, and is evicted by LRU (max_pages, counting the
+    // visible page) and after ttl_seconds hidden (900 s by default). It is
+    // gated by the Statsig dynamic config 3646412386 ({enabled, max_pages,
+    // ttl_seconds}), which defaults to disabled. This turns it on with
+    // max_pages 4 (the visible thread and the 3 most recent others); ttl and
+    // everything else stay as the config says. The outlet itself still turns
+    // retention off where the app does (archived previews, API-key auth,
+    // routes it does not retain).
+    if (trees.primary) {
+      const configs = [];
+      walk(trees.primary, (node, ancestors) => {
+        if (node.type !== 'CallExpression' || node.arguments.length !== 1) return;
+        const arg = node.arguments[0];
+        const id = arg.type === 'TemplateLiteral' && arg.expressions.length === 0 ? arg.quasis[0].value.cooked : arg.type === 'Literal' ? arg.value : null;
+        if (id !== '3646412386') return;
+        const declarator = ancestors.at(-1);
+        if (declarator?.type !== 'VariableDeclarator' || declarator.init !== node || declarator.id.type !== 'ObjectPattern') return;
+        const value = declarator.id.properties.find(p => p.type === 'Property' && !p.computed && p.key.name === 'value' && p.value.type === 'Identifier');
+        const owner = [...ancestors].reverse().find(a => a.type === 'FunctionDeclaration' || a.type === 'FunctionExpression' || a.type === 'ArrowFunctionExpression');
+        if (!value || !owner) return;
+        const text = sources.primary.slice(owner.start, owner.end);
+        if (!text.includes('retainConversations:') || !text.includes('maxPages:')) return;
+        const parses = [];
+        walk(owner.body, inner => {
+          if (member(inner, 'parse') && inner.arguments.length === 1 && inner.arguments[0].type === 'Identifier' &&
+              inner.arguments[0].name === value.value.name && inner.callee.object.type === 'Identifier') parses.push(inner);
+        });
+        if (parses.length !== 1) return;
+        // The schema the config is parsed with: X = schema({enabled: ..., max_pages: ..., ...}).
+        const schema = parses[0].callee.object.name, shapes = [];
+        walk(trees.primary, inner => {
+          if (inner.type !== 'AssignmentExpression' || inner.left.type !== 'Identifier' || inner.left.name !== schema) return;
+          const fields = inner.right.type === 'CallExpression' && inner.right.arguments[0]?.type === 'ObjectExpression' ? inner.right.arguments[0].properties : [];
+          const keys = new Set(fields.filter(p => p.type === 'Property' && !p.computed).map(p => p.key.name));
+          if (keys.has('enabled') && keys.has('max_pages')) shapes.push(inner);
+        });
+        if (shapes.length === 1) configs.push(parses[0]);
+      });
+      record('retainRecentThreadViews', 'primary', configs, parse => ({ start: parse.start, end: parse.end,
+        text: `${marker}{...${sources.primary.slice(parse.start, parse.end)},enabled:!0,max_pages:4}` }));
+    } else skipped.retainRecentThreadViews = 'module not found';
     // ===== end of keepalive lane =====
 
 
