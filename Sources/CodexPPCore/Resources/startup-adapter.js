@@ -125,8 +125,13 @@
 // only the compositor moves layers. Same path, timing and colours as the
 // original. Labels that hold more than plain text keep the original shimmer.
 // While the window is not focused, shimmers pause and show the plain label.
+// The pet (avatar overlay) window is left as stock: it is created unfocusable,
+// so it would always count as unfocused and its shimmers never moved, and its
+// two shimmers use their own band width and timing (35% / 1.9 s, and a 5 s
+// cycle that sweeps in the first 40%), which this overlay does not reproduce.
 const compositorShimmer = String.raw`(()=>{try{
 if(typeof document==="undefined"||globalThis.__codexPPShimmer)return;globalThis.__codexPPShimmer=1;
+if(globalThis.location?.pathname==="/avatar-overlay"||/[?&]initialRoute=(%2F|\/)avatar-overlay(&|$)/i.test(globalThis.location?.search??""))return;
 const ppSel=".loading-shimmer-pure-text,.loading-shimmer,.loading-shimmer-pure-text-inverted";
 const ppCss=":is(.loading-shimmer-pure-text,.loading-shimmer){--codexpp-base:var(--shimmer-text-secondary);--codexpp-hi:var(--shimmer-contrast);--codexpp-dur:var(--loading-shimmer-duration,var(--loading-shimmer-default-duration,2s));--codexpp-delay:0s;--codexpp-steps:48}"+
 ".loading-shimmer-pure-text-inverted{--codexpp-base:var(--text-primary);--codexpp-hi:var(--text-quaternary);--codexpp-dur:5s;--codexpp-delay:.5s}"+
@@ -1488,6 +1493,131 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
 
     // ===== gpu lane: visual work done on the CPU that the compositor can do (animations, sprites, masks). =====
     // (Edits of this lane go between these markers.)
+    // Both edits below override a CSS-module animation with a stylesheet that
+    // the module's own initialiser appends, and only when the vendor rules are
+    // exactly the shape the override was written against (read from the
+    // stylesheets given to the adapter; class and keyframe names are hashed, so
+    // they come from the module's class map). Anything else skips the edit.
+    const gpuSheets = input.css && typeof input.css === 'object' ? Object.values(input.css).filter(text => typeof text === 'string') : [];
+    const gpuEscape = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // A CSS module's class map `name={Key:id,"key":`literal`,...}` whose keys are
+    // exactly `keys`, with each value read as a string (identifiers resolved from
+    // `id=`literal`` assignments in the same sequence). Returns the assignment.
+    function gpuClassMaps(tree, source, keys) {
+      const found = [];
+      const literal = node => node?.type === 'Literal' && typeof node.value === 'string' ? node.value
+        : node?.type === 'TemplateLiteral' && node.expressions.length === 0 ? node.quasis[0].value.cooked : null;
+      walk(tree, (node, ancestors) => {
+        if (node.type !== 'AssignmentExpression' || node.operator !== '=' || node.left.type !== 'Identifier' || node.right.type !== 'ObjectExpression') return;
+        const props = node.right.properties;
+        const names = props.map(p => p.type === 'Property' && !p.computed && p.kind === 'init' ? (p.key.type === 'Identifier' ? p.key.name : p.key.value) : null);
+        if (names.length !== keys.length || [...names].sort().join() !== [...keys].sort().join()) return;
+        const sequence = ancestors.at(-1);
+        if (sequence?.type !== 'SequenceExpression') return;
+        const values = {};
+        for (const [i, p] of props.entries()) {
+          let value = literal(p.value);
+          if (value == null && p.value.type === 'Identifier') {
+            const assign = sequence.expressions.find(e => e.type === 'AssignmentExpression' && e.left.type === 'Identifier' && e.left.name === p.value.name);
+            value = literal(assign?.right);
+          }
+          if (value == null || !/^[\w-]+$/.test(value)) return;
+          values[names[i]] = value;
+        }
+        found.push({ node, values });
+      });
+      return found;
+    }
+    // The single stylesheet that defines `.className{`, and the declaration
+    // blocks of its plain rules for `selector` (no nesting, no at-rule prelude).
+    const gpuSheet = className => { const hits = gpuSheets.filter(text => text.includes(`.${className}{`)); return hits.length === 1 ? hits[0] : null; };
+    const gpuRules = (css, selector) => [...css.matchAll(new RegExp(`(?:^|[{}])${gpuEscape(selector)}\\{([^{}]*)\\}`, 'g'))].map(m => m[1]);
+    const gpuStyle = (id, css) => `(()=>{try{if(typeof document==="undefined")return;const ${id}=document.createElement("style");${id}.textContent=${JSON.stringify(css)};` +
+      `(document.head??document.documentElement).append(${id})}catch{}})()`;
+
+    // readyPulseOpacity: once an update has downloaded, the sidebar's "Restart
+    // to update" button pulses until the app restarts: an overlay animates
+    // background-color (4 s, ease-in-out, forever) and the button animates
+    // border-color. Neither runs on the compositor, so the window restyles and
+    // repaints that overlay every frame for as long as the update waits, even
+    // while the app sits untouched. The button has no border (border-width 0),
+    // so the border-color animation changes nothing on screen and is dropped.
+    // The overlay keeps its resting colour and a layer painted once in the
+    // pulse colour fades in and out over it with the same keyframes and timing
+    // (opacity, which the compositor animates). Blending the same two colours
+    // by opacity matches the original interpolation to within a fraction of
+    // one 8-bit level. While the window is not focused (compositorShimmer's
+    // data-codexpp-blurred) the fade pauses where it is. Reduced Motion is
+    // unchanged: the app leaves data-animate-ready off and nothing pulses.
+    if (trees.initial) {
+      const maps = gpuClassMaps(trees.initial, sources.initial, ['PrimaryAction', 'ReadyPulse', 'ready-pulse', 'ready-border-pulse']).filter(({ values }) => {
+        const { PrimaryAction: button, ReadyPulse: pulse, 'ready-pulse': fade, 'ready-border-pulse': border } = values;
+        const css = gpuSheet(pulse);
+        if (!css || !css.includes(`.${button}{`)) return false;
+        const [ready, extra] = gpuRules(css, `.${pulse}[data-animate-ready]`), [buttonReady] = gpuRules(css, `.${button}[data-animate-ready]`);
+        const base = gpuRules(css, `.${pulse}`);
+        const animation = /^animation:([^;]+)$/.exec(ready ?? '')?.[1];
+        values.animation = animation;
+        // Only these rules mention the two classes; the button declares no border.
+        const mentions = [...css.matchAll(new RegExp(`[^{}]*\\.(?:${gpuEscape(button)}|${gpuEscape(pulse)})\\b[^{}]*\\{([^{}]*)\\}`, 'g'))];
+        return extra === undefined && animation && new RegExp(`(^|\\s)${gpuEscape(fade)}(\\s|$)`).test(animation) &&
+          css.includes(`@keyframes ${fade}{0%,to{background-color:var(--ready-pulse-from)}50%{background-color:var(--ready-pulse-to)}}`) &&
+          css.includes(`@keyframes ${border}{0%,to{border-color:var(--ready-pulse-from)}50%{border-color:var(--ready-pulse-to)}}`) &&
+          base.length === 1 && /(^|;)background-color:var\(--color-background-info-solid\)(;|$)/.test(base[0]) && /(^|;)position:absolute(;|$)/.test(base[0]) &&
+          buttonReady?.includes('--ready-pulse-from:var(--color-background-info-solid);') && new RegExp(`animation:[^;]*\\b${gpuEscape(border)}\\b`).test(buttonReady) &&
+          mentions.length === 4 && mentions.every(m => !/(^|;)border[\w-]*:/.test(m[1]));
+      });
+      record('readyPulseOpacity', 'initial', maps, ({ node, values }) => {
+        const { PrimaryAction: button, ReadyPulse: pulse, 'ready-pulse': fade, animation } = values;
+        const ready = `.${pulse}[data-animate-ready]`;
+        const css = `.${button}[data-animate-ready],${ready}{animation:none!important}` +
+          `${ready}::before{content:"";position:absolute;inset:0;pointer-events:none;background-color:var(--ready-pulse-to);opacity:0;` +
+          `animation:${animation.replace(new RegExp(`(^|\\s)${gpuEscape(fade)}(?=\\s|$)`), '$1codexpp-ready-pulse')}}` +
+          `@keyframes codexpp-ready-pulse{0%,to{opacity:0}50%{opacity:1}}` +
+          `:root[data-codexpp-blurred] ${ready}::before{animation-play-state:paused}`;
+        return { start: node.end, end: node.end, text: `,${marker}${gpuStyle('ppReadyPulseStyle', css)}` };
+      });
+
+      // blossomShimmerTransform: the OpenAI-logo loader (the app's Suspense
+      // fallback while the window and routes load, and the file-preview
+      // loader) sweeps a highlight across the logo by animating the
+      // background-position of a 220%-wide gradient (2.2 s, forever), which
+      // repaints the logo every frame. The same gradient (inherited, so the
+      // vendor's colours and angle) is now painted once on a child box of the
+      // gradient's size and slid with transform, over the same distance with
+      // the same easing; the logo mask clips it as before. Reduced Motion
+      // holds it at the starting position, as before.
+      const blossoms = gpuClassMaps(trees.initial, sources.initial, ['Root', 'Base', 'Overlay', 'shimmer']).filter(({ values }) => {
+        const { Overlay: overlay, shimmer } = values;
+        const css = gpuSheet(overlay);
+        if (!css) return false;
+        const rules = gpuRules(css, `.${overlay}`), reduced = gpuRules(css, `:root[data-reduced-motion=true] .${overlay}`);
+        const frames = new RegExp(`@keyframes ${gpuEscape(shimmer)}\\{0%\\{background-position:(-?[\\d.]+)% 0\\}to\\{background-position:(-?[\\d.]+)% 0\\}\\}`).exec(css);
+        const mentions = [...css.matchAll(new RegExp(`\\.${gpuEscape(overlay)}\\b`, 'g'))].length;
+        if (rules.length !== 1 || reduced.length !== 1 || reduced[0] !== 'animation:none' || !frames || mentions !== 2) return false;
+        const props = new Map(rules[0].split(';').map(d => [d.slice(0, d.indexOf(':')), d.slice(d.indexOf(':') + 1)]));
+        const size = /^([\d.]+)% 100%$/.exec(props.get('background-size') ?? ''), animation = props.get('animation') ?? '';
+        if (!size || +size[1] <= 100 || props.get('background-position') !== `${frames[1]}% 0` || props.get('background-repeat') !== 'no-repeat' ||
+            !props.get('background-image')?.startsWith('linear-gradient(') || props.get('position') !== 'absolute' || props.get('inset') !== '0' ||
+            !new RegExp(`(^|\\s)${gpuEscape(shimmer)}(\\s|$)`).test(animation) || [...props.keys()].some(k => /^(mask|-webkit-mask|transform|background-(clip|origin|attachment|blend-mode))/.test(k))) return false;
+        Object.assign(values, { width: +size[1], from: +frames[1], to: +frames[2], animation });
+        return true;
+      });
+      record('blossomShimmerTransform', 'initial', blossoms, ({ node, values }) => {
+        const { Overlay: overlay, shimmer, width, from, to, animation } = values;
+        // background-position p% puts the image at (box - image) * p; as a
+        // translation of the image-sized child, that is (100 - width) * p / width
+        // percent of the child's own width.
+        const shift = p => `${+((100 - width) * p / width).toFixed(6)}%`;
+        const css = `.${overlay}{animation:none!important;background-size:0 0!important}` +
+          `.${overlay}::before{content:"";position:absolute;top:0;left:0;width:${width}%;height:100%;pointer-events:none;` +
+          `background-image:inherit;background-repeat:no-repeat;background-size:100% 100%;transform:translateX(${shift(from)});` +
+          `animation:${animation.replace(new RegExp(`(^|\\s)${gpuEscape(shimmer)}(?=\\s|$)`), '$1codexpp-blossom-shimmer')}}` +
+          `@keyframes codexpp-blossom-shimmer{0%{transform:translateX(${shift(from)})}to{transform:translateX(${shift(to)})}}` +
+          `:root[data-reduced-motion=true] .${overlay}::before{animation:none}`;
+        return { start: node.end, end: node.end, text: `,${marker}${gpuStyle('ppBlossomShimmerStyle', css)}` };
+      });
+    } else skipped.readyPulseOpacity = skipped.blossomShimmerTransform = 'module not found';
     // ===== end of gpu lane =====
 
 
