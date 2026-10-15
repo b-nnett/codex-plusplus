@@ -249,12 +249,12 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
     const member = (node, name) => node?.type === 'CallExpression' && node.callee.type === 'MemberExpression' &&
       !node.callee.computed && node.callee.property.type === 'Identifier' && node.callee.property.name === name;
     const isFalse = node => node?.type === 'UnaryExpression' && node.operator === '!' && node.argument.type === 'Literal' && node.argument.value === 1;
-    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [] };
+    const applied = {}, skipped = {}, edits = { shared: [], initial: [], requirements: [], main: [], network: [], checkout: [], primary: [], ambient: [] };
     // Diagnostic edits (timings, gate reasons, the opaque-surface experiment hook)
     // ship only in development builds of the helper (input.diagnostics).
     const diagnostics = input.diagnostics === true;
     const developmentOnly = new Set(['queryTimings', 'appGateReasons', 'loadingGateTimings', 'policyPhaseTimings', 'opaqueSurfaceExperiment']);
-    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout };
+    const sources = { shared: input.shared, initial: input.initial, requirements: input.requirements, main: input.main, network: input.network, checkout: input.checkout, primary: input.primary, ambient: input.ambient };
     if (Object.values(sources).some(source => typeof source === 'string' && source.includes(marker))) {
       throw new Error('Startup fast path already applied.');
     }
@@ -898,6 +898,163 @@ globalThis.CodexPPStartupAdapter = Object.freeze({
           `ppText!=null&&(ppOut.push(ppText),ppText=null);ppOut.push(ppEach(ppSegment,ppIndex))}),ppText!=null&&ppOut.push(ppText),ppOut))` +
           `([],null,${sources.initial.slice(each.start, each.end)})` }));
     } else skipped.plainSettledWords = 'module not found';
+
+    // A plain string: 'x', "x" or `x` without substitutions.
+    const plainString = node => node?.type === 'Literal' && typeof node.value === 'string' ? node.value
+      : node?.type === 'TemplateLiteral' && node.expressions.length === 0 ? node.quasis[0].value.cooked : null;
+
+    // ambientSuggestionsOnDemand (main process): each time the app goes to the
+    // background, once the suggestions are older than the remote stale time,
+    // the main process starts a model thread with tools to write new home
+    // suggestions, then a safety-model pass over them, usually for a home view
+    // nobody opens before the next refresh. The background trigger now does
+    // nothing. The home view still asks for a refresh when it is left (so the
+    // next visit is fresh, subject to the same stale time), from its refresh
+    // button, after onboarding and when a first plugin is connected, and it
+    // shows the stored suggestions meanwhile.
+    if (trees.main) {
+      const triggers = [];
+      walk(trees.main, node => {
+        if (!member(node, 'subscribe') || node.arguments.length !== 1 || node.arguments[0].type !== 'ArrowFunctionExpression') return;
+        const fn = node.arguments[0], body = fn.body.type === 'BlockStatement' && fn.body.body.length === 1 ? fn.body.body[0] : fn.body;
+        if (body?.type !== 'SwitchStatement' || body.discriminant.type !== 'MemberExpression' || body.discriminant.property.name !== 'type') return;
+        const cases = new Map(body.cases.map(c => [plainString(c.test), c]));
+        const background = cases.get('background');
+        if (!background || !cases.has('foreground') || !cases.has('turnComplete') || background.consequent.length === 0) return;
+        const caseText = sources.main.slice(background.start, background.end);
+        if (caseText.includes('`background_ready`') && caseText.includes('`background`')) triggers.push(background);
+      });
+      record('ambientSuggestionsOnDemand', 'main', triggers, background => ({ start: background.consequent[0].start, end: background.consequent[0].start, text: `${marker}return;` }));
+    } else skipped.ambientSuggestionsOnDemand = 'module not found';
+
+    // ambientSuggestionsLowEffort (main process, the ambient-suggestions
+    // chunk): the suggestions thread runs at medium reasoning effort (the
+    // first-plugin-connect run already uses low). It writes three short
+    // suggestions from recent thread titles and connected apps; every run now
+    // uses low effort, with the same model and tools.
+    if (trees.ambient) {
+      const efforts = [];
+      walk(trees.ambient, node => {
+        if (node.type !== 'ConditionalExpression' || node.test.type !== 'BinaryExpression' || node.test.operator !== '===' ||
+            plainString(node.test.right) !== 'first-plugin-connect' || plainString(node.consequent) !== 'low' || node.alternate.type !== 'MemberExpression') return;
+        efforts.push(node);
+      });
+      record('ambientSuggestionsLowEffort', 'ambient', efforts, node => ({ start: node.alternate.start, end: node.alternate.end, text: `${marker}\`low\`` }));
+    } else skipped.ambientSuggestionsLowEffort = 'module not found';
+
+    // catchUpPredictionWhenShown: an open thread's composer requests a
+    // "catch-up" prediction of the user's next message (a forked model call)
+    // even while it cannot show one (the composer is disabled, holds
+    // attachments or queued messages, or is dictating), and only the display
+    // is gated. The query is now enabled only while canShowPrediction holds;
+    // it runs as soon as it does, and an answer already received is kept.
+    if (trees.primary) {
+      const queries = [];
+      walk(trees.primary, node => {
+        if (node.type !== 'FunctionDeclaration' || node.params.length !== 1) return;
+        let flag = null;
+        for (const statement of node.body.body) {
+          if (statement.type !== 'VariableDeclaration') continue;
+          for (const d of statement.declarations) {
+            if (d.id.type !== 'ObjectPattern') continue;
+            for (const p of d.id.properties) if (p.type === 'Property' && p.key.name === 'canShowPrediction' && p.value.type === 'Identifier') flag = p.value.name;
+          }
+        }
+        if (!flag || !sources.primary.slice(node.start, node.end).includes('[`cumberbatch`,')) return;
+        const options = new Set(), calls = [];
+        walk(node.body, inner => {
+          if (inner.type === 'AssignmentExpression' && inner.left.type === 'Identifier' && inner.right.type === 'ObjectExpression') {
+            const keys = inner.right.properties.map(p => p.key?.name);
+            if (['queryKey', 'queryFn', 'staleTime', 'gcTime'].every(k => keys.includes(k)) && !keys.includes('enabled')) options.add(inner.left.name);
+          }
+          if (inner.type === 'CallExpression' && inner.arguments.length === 2 && inner.arguments[0].type === 'Identifier' &&
+              inner.arguments[1].type === 'MemberExpression' && inner.arguments[1].property.name === 'queryClient') calls.push(inner);
+        });
+        for (const call of calls) if (options.has(call.arguments[0].name)) queries.push({ call, flag });
+      });
+      record('catchUpPredictionWhenShown', 'primary', queries, ({ call, flag }) => ({ start: call.arguments[0].start, end: call.arguments[0].end,
+        text: `${marker}{...${call.arguments[0].name},enabled:${flag}!==!1}` }));
+    } else skipped.catchUpPredictionWhenShown = 'module not found';
+
+    // gitStateWhenChanged: before each turn the app reads the repository's
+    // git state (branch, HEAD, upstream, remotes; up to about 3.9 KB) and adds
+    // it to the turn as untrusted context. The app-server records such
+    // context in the thread's history, so the model has seen every earlier
+    // copy. It is now added only when it differs from the copy last added to
+    // that thread (ignoring its timestamp and message id): on a thread's first
+    // turn in this window session, after a reload, whenever it changed, after
+    // the history was compacted or rolled back (where the app also forgets its
+    // own once-per-thread context), and again for a turn that never started.
+    if (trees.shared) {
+      const states = [], forgets = [];
+      walk(trees.shared, node => {
+        if (node.type === 'UnaryExpression' && node.operator === 'delete' && node.argument.type === 'MemberExpression' &&
+            !node.argument.computed && node.argument.property.name === 'lastInjectedPassiveContextKey' && node.argument.object.type === 'Identifier') forgets.push(node);
+        if (node.type !== 'FunctionDeclaration' || !node.async || node.params.length !== 4 || !node.params.every(p => p.type === 'Identifier')) return;
+        const last = node.body.body.at(-1);
+        const cond = last?.type === 'ReturnStatement' ? last.argument : null;
+        if (cond?.type !== 'ConditionalExpression' || cond.test.type !== 'BinaryExpression' || cond.test.left.type !== 'Identifier' ||
+            cond.consequent.type !== 'Identifier' || cond.alternate.type !== 'ObjectExpression') return;
+        const alt = sources.shared.slice(cond.alternate.start, cond.alternate.end);
+        if (!alt.includes('codex_git_state:{kind:`untrusted`') || !alt.includes(`...${cond.consequent.name}.additionalContext`)) return;
+        if (cond.consequent.name !== node.params[3].name) return;
+        states.push({ cond, manager: node.params[1].name, thread: node.params[2].name, value: cond.test.left.name, request: cond.consequent.name });
+      });
+      if (states.length === 1 && forgets.length === 0) skipped.gitStateWhenChanged = 'history reset hooks not found';
+      else record('gitStateWhenChanged', 'shared', states, ({ cond, manager, thread, value, request }) => [
+        { start: cond.alternate.start, end: cond.alternate.end,
+          text: `${marker}(((ppManager,ppThread,ppValue,ppRequest)=>{try{const ppConversation=ppManager.getConversation(ppThread);` +
+            `if(ppConversation==null||typeof ppManager.updateConversationState!=="function")return!0;` +
+            `const ppState=JSON.parse(ppValue);if(ppState==null||typeof ppState!=="object")return!0;delete ppState.capturedAt;delete ppState.clientUserMessageId;` +
+            `const ppKey=(globalThis.__codexPPGitStateSession??=String(Math.random()))+JSON.stringify(ppState),ppLast=ppConversation.ppGitState;` +
+            `if(ppLast!=null&&ppLast.key===ppKey&&ppLast.message!==ppRequest.clientUserMessageId&&ppConversation.latestTurnStartMessageId!==ppLast.before)return!1;` +
+            `const ppBefore=ppConversation.latestTurnStartMessageId,ppMessage=ppRequest.clientUserMessageId;` +
+            `ppManager.updateConversationState(ppThread,ppDraft=>{ppDraft.ppGitState={key:ppKey,before:ppBefore,message:ppMessage}});return!0}catch{return!0}})` +
+            `(${manager},${thread},${value},${request}))?${sources.shared.slice(cond.alternate.start, cond.alternate.end)}:${request}` },
+        ...forgets.map(node => ({ start: node.start, end: node.end, text: `(delete ${node.argument.object.name}.ppGitState,${sources.shared.slice(node.start, node.end)})` })),
+      ]);
+    } else skipped.gitStateWhenChanged = 'module not found';
+
+    // cachedAutoHighlightLanguage: a code block without a language is
+    // re-highlighted every 120 ms while it streams, and each pass runs
+    // highlight.js auto-detection, which highlights the whole block once per
+    // registered grammar (about 50). Each snippet now keeps the language its
+    // last detection found and highlights later content with that grammar
+    // alone, detecting again once the content has doubled in length (or no
+    // longer extends the detected text), and once more when the content has
+    // been unchanged for a second, so the settled block is highlighted exactly
+    // as before. Explicit languages and plaintext are untouched.
+    if (trees.shared) {
+      const highlights = [];
+      walk(trees.shared, (node, ancestors) => {
+        if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier' || node.arguments.length !== 1) return;
+        const call = node.arguments[0];
+        if (!member(call, 'highlightCode') || call.arguments.length !== 2 || !call.arguments.every(a => a.type === 'Identifier') || call.callee.object.type !== 'Identifier') return;
+        const [code, language] = call.arguments.map(a => a.name);
+        let state = null;
+        for (const fn of [...ancestors].reverse()) {
+          if (fn.type !== 'ArrowFunctionExpression' || fn.body.type !== 'BlockStatement') continue;
+          walk(fn.body, d => {
+            if (d.type !== 'VariableDeclarator' || d.id.type !== 'Identifier' || d.init?.type !== 'MemberExpression' || d.init.object.type !== 'Identifier') return;
+            if (d.id.name === code && d.init.property.name === 'latestContent') state ??= { name: d.init.object.name, content: true };
+            if (state && d.id.name === language && d.init.property.name === 'latestLanguage' && d.init.object.name === state.name) state.language = true;
+          });
+          if (state) break;
+        }
+        if (state?.content && state.language) highlights.push({ node, call, code, language, state: state.name });
+      });
+      record('cachedAutoHighlightLanguage', 'shared', highlights, ({ node, call, code, language, state }) => {
+        const module = call.callee.object.name, set = node.callee.name, original = sources.shared.slice(node.start, node.end);
+        return { start: node.start, end: node.end,
+          text: `${marker}(${language}?.trim?.()?${original}:((ppState,ppModule,ppCode,ppLanguage,ppSet)=>{` +
+            `const ppDetect=()=>{const ppResult=ppModule.highlightCode(ppCode,ppLanguage);ppState.ppAutoHighlight={code:ppCode,language:ppResult.language};return ppSet(ppResult)};` +
+            `try{clearTimeout(ppState.ppAutoTimer);const ppAuto=ppState.ppAutoHighlight;` +
+            `if(ppAuto==null||typeof ppCode!=="string"||!ppCode.startsWith(ppAuto.code)||ppCode.length>=2*ppAuto.code.length)return ppDetect();` +
+            `const ppResult=ppModule.highlightCode(ppCode,ppAuto.language??"plaintext");` +
+            `ppCode!==ppAuto.code&&(ppState.ppAutoTimer=setTimeout(()=>{ppState.ppAutoTimer=null;ppState.disposed||ppState.latestContent!==ppCode||ppState.latestLanguage?.trim?.()||ppDetect()},1e3));` +
+            `return ppSet({...ppResult,language:ppAuto.language})}catch{return ${original}}})(${state},${module},${code},${language},${set}))` };
+      });
+    } else skipped.cachedAutoHighlightLanguage = 'module not found';
 
     const result = { applied, skipped };
     if (result_html) result.html = result_html;
