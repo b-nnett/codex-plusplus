@@ -45,7 +45,7 @@ function sharedHook(source, cached) {
 test('all four startup edits apply to the vendor shapes and re-parse', () => {
   const result = adapt({shared, initial});
   assert.deepEqual(Object.keys(result.applied).sort(), ['caretBlinkTimeout', 'compositorShimmer', 'deferDictationCues', 'loadingGateTimings', 'statsigCacheFirst', 'statsigUserCacheFirst']);
-  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'queryTimings', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
+  assert.deepEqual(Object.keys(result.skipped).sort(), ['appGateReasons', 'authStorageGateCacheFirst', 'chunkTimings', 'coalesceBrowserMenuRefresh', 'deferDockIcon', 'lazyAvatarOverlayPrewarm', 'lazyCheckoutCreditPrewarm', 'lazyCheckoutPricingPrewarm', 'lazyDetachedWindowPrewarm', 'lazyHotkeyWindowPrewarm', 'lazyPageWindowPrewarm', 'learnedStartupPreload', 'opaqueSurfaceExperiment', 'plainSettledWords', 'policyPhaseTimings', 'predictOnlyOpenThreads', 'pubsubReconnectCap', 'queryTimings', 'quietSidebarRebind', 'remoteControlBackoff', 'remoteSettingsPollWhenVisible', 'resumeVisibleThreadFirst', 'settingsCacheFirst', 'shellResizeSync', 'skipHiddenThreadRefetch', 'startupRevealUnthrottled', 'statsigBootstrapCacheFirst', 'stderrNotConnectionError', 'viewportContainerQueries', 'wakeAwarePongTimeout'], 'covered elsewhere');
   assert.ok(!result.initial.includes('window.setTimeout(()=>{try{Qpl()}'));
   assert.ok(result.initial.includes('function Qpl()'), 'the cue player keeps its lazy AudioContext');
 });
@@ -664,4 +664,178 @@ test('words whose fade has finished render as plain text; fading words stay span
   assert.equal(out.map(part => typeof part === 'string' ? part : part.children).join(''), 'Hello there, how are you', 'the text is unchanged');
   const quiet = sandbox.irl({fadeText: false, segments: ['a', 'b'], keys: [], fadeSegmentStartIndex: 0, fadeSegmentTimeline: timeline});
   assert.deepEqual(JSON.parse(JSON.stringify(quiet)), ['a', 'b'], 'without fading the segments pass through as before');
+});
+
+test('stderr lines of a running stdio app-server are logged, not stored as the connection error', () => {
+  const appServer = 'var o={an:e=>e.startsWith(`Parse Error`)?{code:`restart-required`}:{code:`connection-failed`,message:e}};function eB(e){return{message:e.message,safe:{}}}' +
+    'class C{constructor(t){this.options={transport:t};this.logger=log;this.connectionError=null}attach(e){this.connection=e;let t=1,s=r=>log.rejected.push(r.message);' +
+    'e.onerror=n=>{if(this.connection!==e){this.logger.trace(`stale`);return}let{message:r,safe:i}=eB(n,this.options);this.connectionError=o.an(r),' +
+    'this.options.transport.kind===`websocket`&&s(Error(r)),this.options.transport.supportsReconnect()?this.logger.error(`app_server_connection.websocket_error`,{}):' +
+    'this.logger.debug(`Codex CLI stderr`,{safe:{message:r}})}}}';
+  const {appServer: patched, applied} = adapt({appServer});
+  assert.equal(applied.stderrNotConnectionError, 'appServer');
+  const run = (source, kind, readyState = 1) => {
+    const debug = [], log = {rejected: [], error() {}, trace() {}, debug: (name, {safe}) => debug.push(safe.message)};
+    const sandbox = {log};
+    vm.runInNewContext(source + ';this.C=C;', sandbox);
+    const host = new sandbox.C({kind, supportsReconnect: () => kind === 'websocket'}), connection = {readyState};
+    host.attach(connection);
+    return {host, connection, log, debug};
+  };
+  const line = {type: 'error', message: 'WARN codex_core: slow'};
+  // Stock: a harmless WARN line becomes a connection-failed error on a connected host.
+  const stock = run(appServer, 'stdio');
+  stock.connection.onerror(line);
+  assert.deepEqual({...stock.host.connectionError}, {code: 'connection-failed', message: 'WARN codex_core: slow'});
+  const live = run(patched, 'stdio');
+  live.connection.onerror(line);
+  assert.equal(live.host.connectionError, null);
+  assert.deepEqual(live.debug, ['WARN codex_core: slow'], 'still logged');
+  // A line that means restart required, and process errors, are recorded as before.
+  live.connection.onerror({type: 'error', message: 'Parse Error: bad'});
+  assert.deepEqual({...live.host.connectionError}, {code: 'restart-required'});
+  live.host.connectionError = null;
+  live.connection.onerror({type: 'error', error: new Error('spawn EPIPE'), message: 'spawn EPIPE'});
+  assert.equal(live.host.connectionError?.message, 'spawn EPIPE');
+  // Once the process is no longer open, or on a websocket, stderr-shaped errors are recorded.
+  const closed = run(patched, 'stdio', 3);
+  closed.connection.onerror(line);
+  assert.equal(closed.host.connectionError?.code, 'connection-failed');
+  const socket = run(patched, 'websocket');
+  socket.connection.onerror({type: 'error', message: 'socket hang up'});
+  assert.equal(socket.host.connectionError?.message, 'socket hang up');
+  assert.deepEqual(socket.log.rejected, ['socket hang up']);
+});
+
+test('remote-control websocket reconnects back off from 1 s to 30 s and reset once a socket is installed', async () => {
+  const appServer = 'var LU=1e3;class X{reconnectTimer=null;streams=new Set([1]);fails=0;ws=null;async ensureOpen(){if(this.fails-->0)throw Error(`down`);this.installWebsocket({})}' +
+    'installWebsocket(e){this.ws=e}scheduleReconnect(){this.reconnectTimer==null&&this.streams.size!==0&&(this.reconnectTimer=setTimeout(()=>{this.reconnectTimer=null,' +
+    'this.ensureOpen().catch(e=>{warn(e),this.scheduleReconnect()})},LU))}}';
+  const {appServer: patched, applied} = adapt({appServer});
+  assert.equal(applied.remoteControlBackoff, 'appServer');
+  const run = async (source, fails) => {
+    const delays = []; let fire = null;
+    const sandbox = {Math: Object.assign(Object.create(Math), {random: () => 0.5}), warn() {}, setTimeout: (f, ms) => (delays.push(ms), fire = f, 1)};
+    vm.runInNewContext(source + ';this.X=X;', sandbox);
+    const client = new sandbox.X(); client.fails = fails;
+    client.scheduleReconnect();
+    for (let i = 0; i <= fails; i++) { const f = fire; fire = null; f(); await new Promise(resolve => setImmediate(resolve)); }
+    return {client, delays};
+  };
+  const stock = await run(appServer, 7);
+  assert.deepEqual(stock.delays, [1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000]);
+  const patchedRun = await run(patched, 7);
+  assert.deepEqual(patchedRun.delays, [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000]);
+  assert.ok(patchedRun.client.ws, 'the eighth attempt opened');
+  patchedRun.client.ws = null; patchedRun.client.scheduleReconnect();
+  assert.equal(patchedRun.delays.at(-1), 1000, 'a new outage starts again at 1 s');
+});
+
+test('pubsub reconnects are capped at 60 s, and focus or online reconnects a socket waiting to retry', () => {
+  const shared = 'var SX={maxReconnectionDelay:1/0,maxRetries:20,minReconnectionDelay:1e3,reconnectionDelayGrowFactor:1.5},dVn={maxReconnectionDelay:1/0,maxRetries:5,minReconnectionDelay:2e3,reconnectionDelayGrowFactor:2};' +
+    'class Sock{reconnectTimer=null;shouldReconnect=!0;reconnects=0;options=null;setReconnectOptions(e){this.options=e}reconnect(){this.reconnectTimer=null,this.reconnects++}}' +
+    'class Client{socket=new Sock;isTransportOpen=!1;windowFocused=!1;constructor(){this.socket.setReconnectOptions(SX),document.addEventListener(`visibilitychange`,this.handleWindowFocusChange),' +
+    'window.addEventListener(`blur`,this.handleWindowFocusChange),window.addEventListener(`focus`,this.handleWindowFocusChange)}disconnect(){document.removeEventListener(`visibilitychange`,this.handleWindowFocusChange),' +
+    'window.removeEventListener(`blur`,this.handleWindowFocusChange),window.removeEventListener(`focus`,this.handleWindowFocusChange),this.closed=!0}' +
+    'handleWindowFocusChange=()=>{let e=document.hasFocus()&&!document.hidden;if(this.socket.setReconnectOptions(e?SX:dVn),e&&!this.isTransportOpen&&!this.socket.shouldReconnect&&this.socket.reconnect(),' +
+    '!this.isTransportOpen||e===this.windowFocused){this.windowFocused=e;return}this.windowFocused=e}}';
+  const {shared: patched, applied} = adapt({shared});
+  assert.equal(applied.pubsubReconnectCap, 'shared');
+  const run = source => {
+    const window = new EventTarget(), document = Object.assign(new EventTarget(), {hidden: false, hasFocus: () => true});
+    const sandbox = {window, document};
+    vm.runInNewContext(source + ';this.Client=Client;this.SX=SX;this.dVn=dVn;', sandbox);
+    return {client: new sandbox.Client(), window, sandbox};
+  };
+  const stock = run(shared);
+  assert.equal(stock.sandbox.SX.maxReconnectionDelay, Infinity);
+  stock.client.socket.reconnectTimer = 1;
+  stock.window.dispatchEvent(new Event('focus')); stock.window.dispatchEvent(new Event('online'));
+  assert.equal(stock.client.socket.reconnects, 0, 'stock waits for the pending retry');
+  const live = run(patched);
+  assert.equal(live.sandbox.SX.maxReconnectionDelay, 6e4); assert.equal(live.sandbox.dVn.maxReconnectionDelay, 6e4);
+  live.client.socket.reconnectTimer = 1;
+  live.window.dispatchEvent(new Event('focus'));
+  assert.equal(live.client.socket.reconnects, 1, 'focus reconnects while a retry is pending');
+  live.window.dispatchEvent(new Event('focus'));
+  assert.equal(live.client.socket.reconnects, 1, 'no retry pending and retries left: nothing to do');
+  live.client.socket.shouldReconnect = false; live.window.dispatchEvent(new Event('focus'));
+  assert.equal(live.client.socket.reconnects, 2, 'exhausted retries reconnect as before');
+  live.window.dispatchEvent(new Event('online'));
+  assert.equal(live.client.socket.reconnects, 3, 'online reconnects a socket that is not open');
+  live.client.isTransportOpen = true; live.window.dispatchEvent(new Event('online'));
+  assert.equal(live.client.socket.reconnects, 3, 'an open socket is left alone');
+  live.client.isTransportOpen = false; live.client.disconnect(); live.window.dispatchEvent(new Event('online'));
+  assert.equal(live.client.socket.reconnects, 3, 'disconnect removes the online listener');
+});
+
+test('after a websocket reconnect the visible thread resumes alongside the thread-list refresh', async () => {
+  const initial = 'async function recover(e,s,c,i,g,refresh,log){try{let n=s!=null;i.markAllConversationsNeedResumeAfterReconnect({restoreStreams:!0,foregroundConversationId:n?s:null});' +
+    'let a=!1;try{c===`live`?await refresh.refreshRecentConversations():null}catch(t){let n=t;a=!0,log.push(`refresh failed`)}let o=!n||s==null?!1:await g(e,s);log.push({o,a})}catch(t){log.push(`failed: ${t.message}`)}}';
+  const {initial: patched, applied} = adapt({initial});
+  assert.equal(applied.resumeVisibleThreadFirst, 'initial');
+  const run = async (source, {refreshFails = false, resumeFails = false, visible = 'thread'} = {}) => {
+    const sandbox = {}; vm.runInNewContext(source + ';this.recover=recover;', sandbox);
+    const events = [], log = []; let finishRefresh;
+    const refresh = () => (events.push('refresh'), new Promise((resolve, reject) => { finishRefresh = () => refreshFails ? reject(new Error('list')) : resolve(); }));
+    const resume = async () => { events.push('resume'); if (resumeFails) throw new Error('resume'); return true; };
+    const done = sandbox.recover('host', visible, 'live', {markAllConversationsNeedResumeAfterReconnect() { events.push('mark'); }}, resume, {refreshRecentConversations: refresh}, log);
+    await new Promise(resolve => setImmediate(resolve));
+    const before = [...events];
+    finishRefresh(); await done;
+    return {before, events, log: JSON.parse(JSON.stringify(log))};
+  };
+  const stock = await run(initial);
+  assert.deepEqual(stock.before, ['mark', 'refresh'], 'stock resumes only after the refresh');
+  const live = await run(patched);
+  assert.deepEqual(live.before, ['mark', 'resume', 'refresh'], 'the resume starts first');
+  assert.deepEqual(live.log, [{o: true, a: false}]);
+  assert.deepEqual((await run(patched, {refreshFails: true})).log, ['refresh failed', {o: true, a: true}]);
+  assert.deepEqual((await run(patched, {resumeFails: true})).log, ['failed: resume'], 'a failed resume reaches the same handler');
+  const none = await run(patched, {visible: null});
+  assert.deepEqual(none.events, ['mark', 'refresh']); assert.deepEqual(none.log, [{o: false, a: false}]);
+});
+
+test('the Remote Connections page skips its refresh ticks while the window is hidden', () => {
+  const remoteSettings = 'var Qs=15e3;function effect(kn){return()=>{let e=null,t=!1,n=async()=>{t||(t=!0,e=new AbortController,await(async()=>{await kn(e.signal)})().finally(()=>{e=null,t=!1}))},' +
+    'r=window.setInterval(()=>{n()},Qs);return()=>{e?.abort(),window.clearInterval(r)}}}';
+  const {remoteSettings: patched, applied} = adapt({remoteSettings});
+  assert.equal(applied.remoteSettingsPollWhenVisible, 'remoteSettings');
+  const run = source => {
+    let tick = null, refreshes = 0;
+    const document = {hidden: true};
+    const sandbox = {document, AbortController, window: {setInterval: (f, ms) => (assert.equal(ms, 15e3), tick = f, 1), clearInterval() {}}};
+    vm.runInNewContext(source + ';this.effect=effect;', sandbox);
+    sandbox.effect(async () => { refreshes++; })();
+    return {tick: () => tick(), document, get refreshes() { return refreshes; }};
+  };
+  const stock = run(remoteSettings); stock.tick();
+  assert.equal(stock.refreshes, 1);
+  const live = run(patched); live.tick();
+  assert.equal(live.refreshes, 0, 'hidden: skipped');
+  live.document.hidden = false; live.tick();
+  assert.equal(live.refreshes, 1, 'visible: refreshed');
+});
+
+test('re-registering a Browser sidebar window with the same owner records and logs nothing', () => {
+  const main = 'class R{windows=new Map;sessionRoutes=new Map([[`c`,{windowId:`w`,ownerWebContentsId:1}]]);events=[];ensureWindowRecord(e){let t=this.windows.get(e);if(t!=null)return t;' +
+    'let n={ownerWebContentsId:-1,windowId:e};return this.windows.set(e,n),n}recordDebugEvent(e){this.events.push(e.kind)}' +
+    'registerWindow({ownerWebContentsId:e,windowId:t}){let n=t,r=(this.windows.get(n)??null)?.ownerWebContentsId,i=this.ensureWindowRecord(n);' +
+    'if(i.ownerWebContentsId=e,r!=null&&r!==e)for(let t of this.sessionRoutes.values())t.windowId===n&&(t.ownerWebContentsId=e);' +
+    'this.recordDebugEvent({kind:r==null?`browser-window-registered`:`browser-window-owner-rebound`}),Tq().info(r==null?`registered`:`rebound`)}}';
+  const {main: patched, applied} = adapt({main});
+  assert.equal(applied.quietSidebarRebind, 'main');
+  const run = source => {
+    const logs = [], sandbox = {Tq: () => ({info: m => logs.push(m)})};
+    vm.runInNewContext(source + ';this.R=R;', sandbox);
+    const registry = new sandbox.R();
+    for (const owner of [1, 1, 1, 2]) registry.registerWindow({ownerWebContentsId: owner, windowId: 'w'});
+    return {registry, logs};
+  };
+  assert.deepEqual(run(main).logs, ['registered', 'rebound', 'rebound', 'rebound']);
+  const live = run(patched);
+  assert.deepEqual(live.logs, ['registered', 'rebound']);
+  assert.deepEqual([...live.registry.events], ['browser-window-registered', 'browser-window-owner-rebound']);
+  assert.equal(live.registry.windows.get('w').ownerWebContentsId, 2);
+  assert.equal(live.registry.sessionRoutes.get('c').ownerWebContentsId, 2, 'a changed owner still rebinds its routes');
 });
