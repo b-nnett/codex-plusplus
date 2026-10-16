@@ -21,4 +21,20 @@ final class SidebarAdapterTests: XCTestCase {
         XCTAssertTrue(output.missing.contains("appScope"))
         XCTAssertTrue(output.report.isEmpty)
     }
+    func testInProcessSplitModuleDiscovery() throws {
+        let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("fixtures/sidebar-adapter/app-shared.js")
+        let initial = "import{Scope as AS}from './app-shared.js';\n" +
+            (try String(contentsOf: fixture, encoding: .utf8))
+            .replacingOccurrences(of: "var AS,N1", with: "var N1")
+            .replacingOccurrences(of: "AS=mk(`AppScope`),", with: "")
+        let output = try SidebarAdapter.adaptModulesInProcess([
+            ["path": "app-shared.js", "source": "var Scope=mk(`AppScope`);export{Scope};"],
+            ["path": "app-initial.js", "source": initial]
+        ])
+        XCTAssertEqual(output.missing, [])
+        XCTAssertEqual(output.patches.count, 2)
+        XCTAssertEqual(output.report["renameSection"]?.path, "app-initial.js")
+    }
+
 }

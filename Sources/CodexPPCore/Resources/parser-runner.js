@@ -17,7 +17,7 @@ const calls = {
   bookmarks: 'CodexPPBookmarksAdapter.adapt(input.modules,input.runtime)',
   shell: 'CodexPPShellAdapter.adapt(input.source,input.runtime)',
   browser: 'CodexPPBrowserAdapter.adapt(input.source)',
-  sidebar: 'CodexPPSidebarAdapter.adapt(input.source)',
+  sidebar: 'input.modules ? CodexPPSidebarAdapter.adaptModules(input.modules) : CodexPPSidebarAdapter.adapt(input.source)',
   startup: 'CodexPPStartupAdapter.adapt(input)'
 };
 const result = vm.runInContext(calls[adapter], context, {timeout});

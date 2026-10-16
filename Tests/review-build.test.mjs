@@ -101,3 +101,11 @@ test('a startup discovery that cannot finish, even retried, means the build woul
   assert.match(report.summary.blockers[0], /^startup: Startup discovery failed \(Code discovery timed out after 180 s/);
   assert.match(report.summary.warnings[0], /startup discovery was retried with a longer deadline after: Code discovery timed out after 60 s/);
 });
+
+test('cross-module sidebar discovery uses its 180 second deadline', () => {
+  const current=structuredClone(before);
+  current.adapters.push({name:'sidebar',required:false,seconds:120,status:'ok',edits:[]});
+  assert.ok(!run(current).report.summary.warnings.some(message=>message.startsWith('sidebar discovery')));
+  current.adapters.at(-1).seconds=180;
+  assert.ok(run(current).report.summary.warnings.some(message=>/sidebar discovery.*180 s hard limit/.test(message)));
+});

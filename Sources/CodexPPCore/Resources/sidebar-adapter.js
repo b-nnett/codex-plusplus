@@ -5,7 +5,64 @@
 // and how it links to other capabilities. Every capability is optional: one
 // that no longer matches is reported missing instead of failing the patch.
 globalThis.CodexPPSidebarAdapter = Object.freeze({
-  adapt(source) {
+  adaptModules(modules) {
+    const parse = source => acorn.parse(source, {ecmaVersion:'latest', sourceType:'module'});
+    const trees = modules.map(module => parse(module.source));
+    const visit = (node, fn) => {
+      if (!node || typeof node.type !== 'string') return;
+      fn(node);
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(child => visit(child, fn));
+        else if (value && typeof value.type === 'string') visit(value, fn);
+      }
+    };
+    const scopes = [];
+    trees.forEach((tree, index) => visit(tree, node => {
+      const name = node.type === 'AssignmentExpression' ? node.left : node.type === 'VariableDeclarator' ? node.id : null;
+      const value = node.type === 'AssignmentExpression' ? node.right : node.init;
+      const argument = value?.arguments?.[0];
+      if (name?.type === 'Identifier' && value?.type === 'CallExpression' && value.arguments.length === 1 &&
+          (argument?.value === 'AppScope' || (argument?.type === 'TemplateLiteral' && !argument.expressions.length && argument.quasis[0].value.cooked === 'AppScope')))
+        scopes.push({index, name:name.name});
+    }));
+    const contexts = modules.map(module => ({module:module.path}));
+    const qualified = [];
+    for (const scope of scopes) {
+      const aliases = new Map([[scope.index, scope.name]]);
+      const exports = trees[scope.index].body.filter(node => node.type === 'ExportNamedDeclaration').flatMap(node => node.specifiers || [])
+        .filter(node => node.local.name === scope.name).map(node => node.exported.name);
+      trees.forEach((tree, index) => {
+        const imports = tree.body.filter(node => node.type === 'ImportDeclaration' &&
+          node.source.value.split('/').at(-1) === modules[scope.index].path.split('/').at(-1))
+          .flatMap(node => node.specifiers).filter(node => exports.includes(node.imported?.name));
+        if (imports.length === 1) aliases.set(index, imports[0].local.name);
+      });
+      let uses = 0;
+      for (const [index, alias] of aliases) visit(trees[index], node => {
+        if (node.type === 'CallExpression' && node.arguments[0]?.type === 'Identifier' && node.arguments[0].name === alias) uses++;
+      });
+      if (uses >= 20) qualified.push({scope, aliases, uses});
+    }
+    if (qualified.length > 1) throw Error('Ambiguous AppScope across sidebar modules.');
+    if (qualified.length === 1) {
+      const {scope, aliases, uses} = qualified[0];
+      contexts[scope.index].scopeUses = {[scope.name]:uses};
+      for (const [index, alias] of aliases) if (index !== scope.index) contexts[index].importedScope = alias;
+    }
+    // Resolve once, then publish only uniquely owned capabilities across modules.
+    const discovered = modules.map((module, index) => this.adapt(module.source, contexts[index]));
+    const owners = new Map();
+    discovered.forEach((output,index) => Object.keys(output.report).forEach(name => {
+      if (!['appScopeDefinition'].includes(name)) owners.set(name, [...owners.get(name)||[], index]);
+    }));
+    const missing = [...new Set(discovered.flatMap(output => output.missing.map(name => name.split(' (')[0])))].filter(name =>
+      name === 'appScope' ? !owners.has('scopeFactory') : name === 'appScopeDefinition' ? !discovered.some(output => output.report[name]) : !owners.has(name));
+    for (const [name, indices] of owners) if (indices.length > 1) throw Error(`Ambiguous sidebar capability across modules: ${name}`);
+    const report = {};
+    discovered.forEach((output,index) => Object.entries(output.report).forEach(([name,entry]) => { if (!report[name]) report[name] = {...entry,path:modules[index].path}; }));
+    return {patches:modules.map((module,index) => ({path:module.path,source:discovered[index].source.replace("if(key==='missing')return [];", `if(key==='missing')return ${JSON.stringify(missing)};`)})),missing,report};
+  },
+  adapt(source, context = {}) {
     const parse = text => acorn.parse(text, {ecmaVersion: 'latest', sourceType: 'module'});
     if (source.includes('__codexPPSidebar')) throw Error('Sidebar already adapted.');
     const ast = parse(source);
@@ -170,7 +227,7 @@ globalThis.CodexPPSidebarAdapter = Object.freeze({
 
     // The app-level scope definition: AppScope, owning many atoms.
     const appScope = settle('appScopeDefinition', bindings.filter(([name, value]) => callTo(value) &&
-      value.arguments.length === 1 && key(value.arguments[0]) === 'AppScope' && usesAsFirstArgument(name) >= 20).map(([name]) => name),
+      value.arguments.length === 1 && key(value.arguments[0]) === 'AppScope' && usesAsFirstArgument(name) + (context.scopeUses?.[name] || 0) >= 20).map(([name]) => name).concat(context.importedScope ? [context.importedScope] : []),
       'AppScope, first argument of at least 20 atom definitions');
     const atom = value => callTo(value) && identifier(value.arguments[0], appScope);
 
@@ -266,6 +323,15 @@ globalThis.CodexPPSidebarAdapter = Object.freeze({
       `sidebarLayoutGate:${gateRead ? JSON.stringify(sidebarLayoutGate) : 'null'},` +
       `reactVersion:${JSON.stringify(reactVersion ?? null)},` +
       `missing:Object.freeze(${JSON.stringify(missing)})})});\n`;
+    if (context.module) {
+      const start = result.indexOf("Object.defineProperty(globalThis,'__codexPPSidebar'");
+      const contract = result.slice(start).replace("Object.defineProperty(globalThis,'__codexPPSidebar',{configurable:true,value:Object.freeze(", "").replace(/\)\}\);\n$/, "");
+      result = result.slice(0, start) + `var __codexPPSidebarParts=globalThis.__codexPPSidebarParts||(globalThis.__codexPPSidebarParts=Object.create(null));__codexPPSidebarParts[${JSON.stringify(context.module)}]=${contract};` +
+        `Object.defineProperty(globalThis,'__codexPPSidebar',{configurable:true,value:new Proxy({protocol:1},{get(_,key){` +
+        `const parts=Object.values(__codexPPSidebarParts);if(key==='protocol')return 1;` +
+        `if(key==='missing')return ${JSON.stringify(context.missing || [])};` +
+        `for(const part of parts){const value=part[key];if(value!=null)return value}}})});\n`;
+    }
     parse(result);
     const report = Object.fromEntries(Object.entries(evidence).map(([name, why]) =>
       [name, {local: typeof resolved[name] === 'string' ? resolved[name] : resolved[name]?.owner?.id?.name ?? null, why}]));

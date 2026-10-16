@@ -115,7 +115,7 @@ public enum BuildReview {
             case "sidebar":
                 if let sidebar = pipeline.sidebar {
                     for (name, evidence) in sidebar.report.sorted(by: { $0.key < $1.key }) {
-                        var edit: [String: Any] = ["name": name, "status": "applied", "target": sidebar.path, "why": evidence.why]
+                        var edit: [String: Any] = ["name": name, "status": "applied", "target": evidence.path ?? sidebar.path, "why": evidence.why]
                         if let local = evidence.local { edit["local"] = local }
                         edits.append(edit)
                     }

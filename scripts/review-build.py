@@ -132,12 +132,13 @@ def warnings(review):
     found = []
     for adapter in review.get("adapters", []):
         seconds = adapter.get("seconds", 0)
+        limit = 180 if adapter["name"] == "sidebar" else DISCOVERY_LIMIT_SECONDS
         for reason in adapter.get("retries", []):
             found.append(f"{adapter['name']} discovery was retried with a longer deadline after: {condense(reason)}")
         if adapter["name"] == "startup" and not adapter.get("retries") and seconds >= DISCOVERY_LIMIT_SECONDS:
             found.append(f"startup discovery took {seconds:.1f} s, past its first {DISCOVERY_LIMIT_SECONDS} s deadline")
-        elif seconds >= DISCOVERY_LIMIT_SECONDS and adapter["name"] != "startup":
-            found.append(f"{adapter['name']} discovery took {seconds:.1f} s, at the {DISCOVERY_LIMIT_SECONDS} s hard limit: patching would time out")
+        elif seconds >= limit and adapter["name"] != "startup":
+            found.append(f"{adapter['name']} discovery took {seconds:.1f} s, at the {limit} s hard limit: patching would time out")
         elif adapter["name"] == "startup" and seconds > STARTUP_WARN_SECONDS:
             found.append(f"startup discovery took {seconds:.1f} s (over {STARTUP_WARN_SECONDS} s; the first deadline is {DISCOVERY_LIMIT_SECONDS} s, then one retry at 180 s)")
         if not adapter.get("required") and adapter.get("status") == "failed":
