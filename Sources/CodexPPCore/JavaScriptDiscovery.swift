@@ -5,6 +5,7 @@ import Darwin
 /// Vendor source is JSON data for a parser, never executable JavaScript.
 enum JavaScriptDiscovery {
     static func run(archive: AsarArchive, adapter: String, input: [String: Any], timeout: TimeInterval = 60) throws -> Data? {
+        guard timeout.isFinite, timeout > 0, timeout <= 180 else { throw PatchError.invalid("Invalid code discovery deadline.") }
         let resources = archive.url.deletingLastPathComponent()
         let node = resources.appendingPathComponent("cua_node/bin/node")
         guard FileManager.default.fileExists(atPath: node.path) else { return nil }
@@ -34,7 +35,10 @@ enum JavaScriptDiscovery {
         defer { try? errors.close() }
         let process = Process()
         process.executableURL = node
-        process.arguments = [runner.path, adapter, request.path, output.path]
+        // Keep the parser inside the outer deadline, including the longer
+        // startup retry. A fixed VM limit would defeat that retry entirely.
+        let parserTimeout = max(1, Int((timeout - 5) * 1000))
+        process.arguments = [runner.path, adapter, request.path, output.path, String(parserTimeout)]
         process.currentDirectoryURL = directory
         process.environment = ["PATH": "/usr/bin:/bin", "HOME": fm.homeDirectoryForCurrentUser.path, "TMPDIR": directory.path]
         process.standardInput = FileHandle.nullDevice

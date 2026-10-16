@@ -61,7 +61,8 @@ struct RendererPipeline {
         // report its missing capabilities; it never blocks the patch.
         if let sidebar = try step("sidebar", required: false, { try SidebarAdapter.diagnose(archive: original, replacements: renderers) }) {
             output.sidebar = sidebar
-            renderers = renderers.filter({ $0.0 != sidebar.path }) + [(sidebar.path, sidebar.source)]
+            let paths = Set(sidebar.patches.map { $0.0 })
+            renderers = renderers.filter({ !paths.contains($0.0) }) + sidebar.patches
         }
         // The startup fast path also edits the main bundle, so it builds
         // on the browser adapter's output rather than replacing it.

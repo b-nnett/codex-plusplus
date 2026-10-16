@@ -100,3 +100,40 @@ test('Discovery resolves every capability in the reviewed app-shared module', {s
     sections:'s3', navigationSignal:'TF', gates:'$U', pinIcon:'Dmr', unpinIcon:'Omr'
   });
 });
+
+test('Split sidebar modules retain live hooks and capture only the app scope', () => {
+  // Move the real scope definition into an imported module. The remaining
+  // decoy does not have enough consumers to qualify.
+  const shared = 'var SharedScope=mk(`AppScope`);export{SharedScope as Scope};';
+  const initial = 'import{Scope as AS}from "./app-shared.js";\n' + fixture
+    .replace('var AS,N1', 'var N1').replace('AS=mk(`AppScope`),', '');
+  const output = parser.CodexPPSidebarAdapter.adaptModules([
+    {path:'app-shared.js',source:shared}, {path:'app-initial.js',source:initial}
+  ]);
+  assert.deepEqual([...output.missing], []);
+  const context = evaluate(output.patches[0].source.replace('export{SharedScope as Scope};','') + '\nglobalThis.earlyContract=globalThis.__codexPPSidebar;\n' +
+    output.patches[1].source.replace('import{Scope as AS}from "./app-shared.js";', 'var AS=SharedScope;'));
+  assert.deepEqual([...context.__codexPPSidebar.missing], []);
+  assert.equal(typeof context.__codexPPSidebar.renameSection, 'function');
+  assert.equal(context.earlyContract.renameSection, context.__codexPPSidebar.renameSection);
+  const facade=vm.runInContext('Fk(AS,[],{})',context);
+  assert.equal(context.__codexPPSidebar.appScope(),facade);
+  assert.equal(context.__codexPPSidebar.react().createElement(),'el');
+});
+
+test('Split discovery rejects duplicate capability owners', () => {
+  assert.throws(() => parser.CodexPPSidebarAdapter.adaptModules([
+    {path:'one.js',source:fixture}, {path:'two.js',source:fixture}
+  ]), /Ambiguous/);
+});
+
+test('Split discovery does not trust an unrelated scope import', () => {
+  const shared='var Scope=mk(`AppScope`);export{Scope};';
+  const initial='import{Scope as AS}from "./unrelated.js";\n'+fixture
+    .replace('var AS,N1','var N1').replace('AS=mk(`AppScope`),','');
+  const output=parser.CodexPPSidebarAdapter.adaptModules([
+    {path:'app-shared.js',source:shared},{path:'app-initial.js',source:initial}
+  ]);
+  assert.ok(output.missing.includes('appScopeDefinition'));
+  assert.ok(output.missing.includes('appScope'));
+});
